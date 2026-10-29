@@ -1,10 +1,23 @@
 import SwiftUI
 import UIKit
 
-/// Sheets presented from the 简介 tab.
-enum VideoIntroSheet: String, Identifiable {
-    case coin, favorite, parts, ugcSeason, pgcEpisodes, pgcInfo
-    var id: String { rawValue }
+/// Sheets presented from the 简介 tab. 投币 / 收藏 carry the video they were opened for: they stay open when
+/// auto-next replaces the page, and must not act on the new video then.
+enum VideoIntroSheet: Identifiable {
+    case coin(aid: Int64, maxCoins: Int, given: Int)
+    case favorite(rid: Int64, type: Int)
+    case parts, ugcSeason, pgcEpisodes, pgcInfo
+
+    var id: String {
+        switch self {
+        case .coin(let aid, _, _): return "coin-\(aid)"
+        case .favorite(let rid, let type): return "favorite-\(type)-\(rid)"
+        case .parts: return "parts"
+        case .ugcSeason: return "ugcSeason"
+        case .pgcEpisodes: return "pgcEpisodes"
+        case .pgcInfo: return "pgcInfo"
+        }
+    }
 }
 
 /// 简介 tab: UP / staff header, title + stats (expandable to desc, BV号, tags), banners, action row,
@@ -739,13 +752,13 @@ struct VideoIntroView: View {
     @ViewBuilder
     private func sheetView(_ item: VideoIntroSheet) -> some View {
         switch item {
-        case .coin:
-            VideoCoinSheet(maxCoins: model.maxCoins, given: model.relation.coinCount) { count, alsoLike in
-                Task { await model.giveCoins(count, alsoLike: alsoLike) }
+        case .coin(let aid, let maxCoins, let given):
+            VideoCoinSheet(maxCoins: maxCoins, given: given) { count, alsoLike in
+                Task { await model.giveCoins(count, alsoLike: alsoLike, aid: aid) }
             }
-        case .favorite:
-            VideoFavFolderSheet(rid: model.favoriteResource.rid, resourceType: model.favoriteResource.type) { favored in
-                model.favoriteChanged(favored)
+        case .favorite(let rid, let type):
+            VideoFavFolderSheet(rid: rid, resourceType: type) { favored in
+                model.favoriteChanged(favored, rid: rid)
             }
         case .parts:
             if let d = model.detail {
@@ -778,12 +791,15 @@ struct VideoIntroView: View {
             ToastCenter.shared.show("达到投币上限啦~")
             return
         }
-        sheet = .coin
+        guard model.interactionAid > 0 else { return }
+        sheet = .coin(aid: model.interactionAid, maxCoins: model.maxCoins, given: model.relation.coinCount)
     }
 
     private func openFavorite() {
         guard requireLogin() else { return }
-        sheet = .favorite
+        let resource = model.favoriteResource
+        guard resource.rid > 0 else { return }
+        sheet = .favorite(rid: resource.rid, type: resource.type)
     }
 
     // MARK: Helpers

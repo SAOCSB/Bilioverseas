@@ -164,6 +164,8 @@ final class LiveRoomModel: ObservableObject {
         showsDanmakuOverlay = AppSettings.shared.danmaku.enabled
         player.onExhausted = { [weak self] in self?.handleExhausted() }
         player.onPlaying = { [weak self] in self?.refetchBudget = 3 }
+        player.onPiPStopped = { [weak self] in self?.pipDidStop() }
+        player.owner = self
     }
 
     /// The real room id (short ids resolve through getRoomPlayInfo / getH5InfoByRoom).
@@ -322,6 +324,15 @@ final class LiveRoomModel: ObservableObject {
             resumeOnAppear = true
             player.pause()
         }
+        socket?.stop()
+    }
+
+    /// PiP ended while another page covers the room (还原 / 关闭 from the space page, or another
+    /// room took over): stop the audio there is no UI for; it resumes when the room is shown again.
+    private func pipDidStop() {
+        guard !isVisible else { return }
+        if player.wantsPlay { player.pause() }
+        if isLive { resumeOnAppear = true }
         socket?.stop()
     }
 

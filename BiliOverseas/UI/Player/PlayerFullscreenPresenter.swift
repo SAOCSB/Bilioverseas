@@ -30,6 +30,8 @@ struct PlayerFullscreenRootView: View {
             .persistentSystemOverlays(.hidden)
             .defersSystemGestures(on: .all)
             .preferredColorScheme(.dark)
+            // Not under the app root: sheets presented from here would otherwise lose the app tint.
+            .tint(.biliPink)
     }
 }
 
@@ -48,8 +50,24 @@ final class PlayerFullscreenPresenter {
         vc.modalTransitionStyle = .crossDissolve
         vc.view.backgroundColor = .black
         hosting = vc
+        // Leaving and re-entering fullscreen quickly: UIKit drops a presentation started while the previous
+        // fullscreen is still fading out (the player would be "fullscreen" with nothing on screen). Present it
+        // once that dismissal has finished instead.
+        if let leaving = top.presentedViewController, leaving.isBeingDismissed,
+           let coordinator = leaving.transitionCoordinator {
+            let queued = coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.presentDeferred(vc) }
+            }
+            if queued { return true }
+        }
         top.present(vc, animated: true)
         return true
+    }
+
+    /// Deferred `present`: skipped when fullscreen was left (or entered anew) meanwhile.
+    private func presentDeferred(_ vc: PlayerFullscreenHostingController) {
+        guard hosting === vc, vc.presentingViewController == nil, let top = Self.topViewController() else { return }
+        top.present(vc, animated: true)
     }
 
     func dismiss() {
@@ -61,7 +79,36 @@ final class PlayerFullscreenPresenter {
         // Allow portrait before the app mask goes back to portrait (no "no common orientation" moment).
         vc.orientationMask = .allButUpsideDown
         OrientationManager.shared.restorePortrait()
-        vc.dismiss(animated: true)
+        // Never presented (still waiting in `present`): `presentDeferred` drops it.
+        guard vc.presentingViewController != nil else { return }
+        // UIKit ignores a dismissal requested while a presentation in this stack is still animating (the
+        // fullscreen itself, or a sheet just opened over it).
+        if let coordinator = Self.runningTransition(in: vc) {
+            let queued = coordinator.animate(alongsideTransition: nil) { _ in
+                Task { @MainActor in PlayerFullscreenPresenter.dismissNow(vc) }
+            }
+            if queued { return }
+        }
+        Self.dismissNow(vc)
+    }
+
+    /// Dismisses from the presenting controller: that also takes down a sheet shown over the fullscreen player
+    /// (弹幕设置, 发弹幕 …). `vc.dismiss` would only close that sheet and leave a black fullscreen controller
+    /// behind, with the surface already moved back inline and no way out.
+    private static func dismissNow(_ vc: UIViewController) {
+        guard let presenter = vc.presentingViewController else { return }
+        presenter.dismiss(animated: true)
+    }
+
+    private static func runningTransition(in vc: UIViewController) -> UIViewControllerTransitionCoordinator? {
+        var current: UIViewController? = vc
+        while let candidate = current {
+            if candidate.isBeingPresented || candidate.isBeingDismissed, let coordinator = candidate.transitionCoordinator {
+                return coordinator
+            }
+            current = candidate.presentedViewController
+        }
+        return nil
     }
 
     static func keyWindow() -> UIWindow? {

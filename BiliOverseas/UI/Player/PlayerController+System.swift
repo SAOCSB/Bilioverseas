@@ -241,4 +241,16 @@ enum PlayerPiPKeeper {
     static func release(_ controller: PlayerController) {
         kept[ObjectIdentifier(controller)] = nil
     }
+
+    /// Another player started: PiP windows left over from closed pages end (their controllers then stop in
+    /// `pipDidStop`), so two videos never play at once.
+    static func stopOthers(than controller: PlayerController) {
+        for other in Array(kept.values) where other !== controller {
+            if other.pip?.isPictureInPictureActive == true {
+                other.pip?.stopPictureInPicture()
+            } else if !other.isPiPBusy {
+                other.performStop()
+            }
+        }
+    }
 }

@@ -14,6 +14,8 @@ struct BiliOverseasApp: App {
                 .environmentObject(auth)
                 .preferredColorScheme(colorScheme)
                 .tint(.biliPink)
+                .onAppear { applyInterfaceStyle(settings.general.theme) }
+                .onChange(of: settings.general.theme) { applyInterfaceStyle($0) }
                 .task {
                     await auth.bootstrap()
                 }
@@ -25,6 +27,22 @@ struct BiliOverseasApp: App {
         case .system: return nil
         case .light: return .light
         case .dark: return .dark
+        }
+    }
+
+    /// `preferredColorScheme(nil)` does not reliably hand an explicit light / dark choice back to the
+    /// system (the window can keep the last forced style until relaunch), so the window-level override
+    /// is set as well; `.unspecified` follows the system again.
+    private func applyInterfaceStyle(_ theme: AppTheme) {
+        let style: UIUserInterfaceStyle
+        switch theme {
+        case .system: style = .unspecified
+        case .light: style = .light
+        case .dark: style = .dark
+        }
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows { window.overrideUserInterfaceStyle = style }
         }
     }
 }

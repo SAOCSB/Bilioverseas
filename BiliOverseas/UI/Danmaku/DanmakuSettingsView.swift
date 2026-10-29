@@ -154,6 +154,8 @@ struct DanmakuQuickPanel: View {
                 }
             }
         }
+        // Own toast layer: the app's lies under this sheet (e.g. 「导入账号云端屏蔽列表」 feedback).
+        .overlay { ToastOverlay() }
         .presentationDetents([.medium, .large])
     }
 }
@@ -188,7 +190,9 @@ struct DanmakuBlockListView: View {
                         .keyboardType(kind == .user ? .numberPad : .default)
                         .submitLabel(.done)
                         .onSubmit(add)
+                    // Borderless: otherwise the whole row (including the text field) triggers `add`.
                     Button("添加", action: add)
+                        .buttonStyle(.borderless)
                         .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             } footer: {

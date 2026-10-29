@@ -18,9 +18,15 @@ struct RelationListView: View {
         self.kind = kind
         _list = StateObject(wrappedValue: PagedListModel<UserBrief>(fetch: { cursor in
             let page = ListCursor.page(cursor)
-            switch kind {
-            case .following: return try await SpaceAPI.followings(mid: mid, page: page)
-            case .fans: return try await SpaceAPI.fans(mid: mid, page: page)
+            do {
+                switch kind {
+                case .following: return try await SpaceAPI.followings(mid: mid, page: page)
+                case .fans: return try await SpaceAPI.fans(mid: mid, page: page)
+                }
+            } catch BiliError.api(let code, _) where code == 22007 && page > 1 {
+                // Other users' lists stop after 5 pages (「访问超过5页」) although `total` says more:
+                // that is the end of the list, not an error with a 重试 that can never succeed.
+                return .empty
             }
         }))
     }

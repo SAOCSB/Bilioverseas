@@ -243,6 +243,10 @@ private struct SearchPaneContainer<Item: Identifiable, Content: View>: View {
     let isActive: Bool
     let emptyText: String
     let content: Content
+    /// The list whose first load ran to the end. Until then an idle empty list means "not loaded
+    /// yet" (spinner); afterwards it is really empty, also when `FeedFilter` hid every result of
+    /// the first pages while `hasMore` is still true (that used to spin forever).
+    @State private var loadedList: ObjectIdentifier?
 
     init(list: PagedListModel<Item>, isActive: Bool, emptyText: String, @ViewBuilder content: () -> Content) {
         _list = ObservedObject(wrappedValue: list)
@@ -258,8 +262,9 @@ private struct SearchPaneContainer<Item: Identifiable, Content: View>: View {
                     SearchErrorStateView(message: error) {
                         Task { await list.refresh() }
                     }
-                } else if !list.isLoading && !list.hasMore {
-                    StateMessageView(systemImage: "magnifyingglass", message: emptyText)
+                } else if !list.isLoading && (!list.hasMore || loadedList == ObjectIdentifier(list)) {
+                    StateMessageView(systemImage: "magnifyingglass", message: emptyText,
+                                     retry: list.hasMore ? { Task { await list.loadMore() } } : nil)
                 } else {
                     ProgressView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -275,7 +280,10 @@ private struct SearchPaneContainer<Item: Identifiable, Content: View>: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .id(ObjectIdentifier(list))
         .task(id: SearchPaneLoadKey(list: ObjectIdentifier(list), active: isActive)) {
-            if isActive { await list.loadIfNeeded() }
+            guard isActive else { return }
+            let id = ObjectIdentifier(list)
+            await list.loadIfNeeded()
+            if !Task.isCancelled { loadedList = id }
         }
     }
 }

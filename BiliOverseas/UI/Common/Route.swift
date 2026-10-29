@@ -105,9 +105,13 @@ struct RouteView: View {
         case .about:
             AboutView()
         case .web(let url):
-            SafariView(url: url)
-                .ignoresSafeArea()
-                .toolbar(.hidden, for: .tabBar)
+            if SafariView.canOpen(url) {
+                SafariView(url: url)
+                    .ignoresSafeArea()
+                    .toolbar(.hidden, for: .tabBar)
+            } else {
+                ExternalLinkView(url: url)
+            }
         }
     }
 }

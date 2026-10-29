@@ -42,7 +42,18 @@ final class DynamicsFeedQuery: @unchecked Sendable {
         let s = query.snapshot
         if s.hostMid != 0 {
             var page = try await DynamicsAPI.feed(hostMid: s.hostMid, offset: cursor)
-            if s.type == "video" { page.items = page.items.filter { $0.type == .video } }
+            guard s.type == "video" else { return page }
+            // The per-UP feed has no type filter. An UP posting mostly images / text would give
+            // video-less pages, which stall infinite scroll (or show 「TA还没有发布动态」 while older
+            // videos exist), so skip ahead a few pages until one has a video.
+            var videos = page.items.filter { $0.type == .video }
+            var hops = 0
+            while videos.isEmpty, page.hasMore, let next = page.next, hops < 3 {
+                hops += 1
+                page = try await DynamicsAPI.feed(hostMid: s.hostMid, offset: next)
+                videos = page.items.filter { $0.type == .video }
+            }
+            page.items = videos
             return page
         }
         return try await DynamicsAPI.feed(type: s.type, offset: cursor)

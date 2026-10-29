@@ -10,6 +10,10 @@ final class SearchHotWordsModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var placeholderIndex = 0
     private var loadedAt: Date?
+    /// The running fetch. It belongs to the shared model, not to the view task that started it:
+    /// pushing the search page cancels 首页's task, and a second caller must wait for the same
+    /// fetch instead of returning with an empty list and no spinner / error.
+    private var loadTask: Task<Void, Never>?
 
     /// How many leading words rotate through the placeholder.
     private static let placeholderPool = 10
@@ -28,8 +32,21 @@ final class SearchHotWordsModel: ObservableObject {
     }
 
     func reload() async {
-        guard !isLoading else { return }
+        if let running = loadTask {
+            await running.value
+            return
+        }
+        let task = Task { await self.fetchWords() }
+        loadTask = task
+        await task.value
+    }
+
+    private func fetchWords() async {
         isLoading = true
+        defer {
+            isLoading = false
+            loadTask = nil
+        }
         do {
             let list = try await SearchAPI.hotWords(limit: 30)
             words = list
@@ -39,7 +56,6 @@ final class SearchHotWordsModel: ObservableObject {
         } catch {
             if !ListMapping.isCancellation(error) { errorMessage = error.localizedDescription }
         }
-        isLoading = false
     }
 
     func advancePlaceholder() {

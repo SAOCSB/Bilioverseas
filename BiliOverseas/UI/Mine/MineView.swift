@@ -286,15 +286,22 @@ final class MineViewModel: ObservableObject {
     /// First ~10 history items for 「最近观看」.
     @Published private(set) var recent: [VideoCard] = []
     private var lastRefresh: Date?
+    /// Bumped on login / logout / account switch; a history page requested before is dropped.
+    private var accountGeneration = 0
 
-    /// Re-fetches the profile (nav + stat) and the recent history. Throttled unless `force`.
+    /// Re-fetches the profile (nav + stat; throttled unless `force`) and the recent history. The
+    /// history row is always reloaded: it is one small request, and coming back from 历史记录 (清空 /
+    /// 删除) or from a video must not show stale entries for the throttle window.
     func refresh(force: Bool) async {
         let auth = AuthService.shared
         guard auth.isLoggedIn else {
             recent = []
             return
         }
-        if !force, let last = lastRefresh, Date().timeIntervalSince(last) < 15 { return }
+        if !force, let last = lastRefresh, Date().timeIntervalSince(last) < 15 {
+            await loadRecent()
+            return
+        }
         lastRefresh = Date()
         async let profile: Void = auth.refreshProfile()
         await loadRecent()
@@ -306,8 +313,10 @@ final class MineViewModel: ObservableObject {
             recent = []
             return
         }
+        let gen = accountGeneration
         do {
             let page = try await HistoryAPI.list(cursor: nil, type: "all", pageSize: 10)
+            guard gen == accountGeneration else { return }
             recent = Array(page.items.prefix(10))
         } catch {
             // Keep what is shown; the row simply stays as it was.
@@ -315,6 +324,7 @@ final class MineViewModel: ObservableObject {
     }
 
     func loginStateChanged() {
+        accountGeneration += 1
         lastRefresh = nil
         recent = []
         Task { await refresh(force: true) }

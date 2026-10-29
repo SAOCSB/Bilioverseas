@@ -23,10 +23,10 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
 
     var isEmpty: Bool { items.isEmpty }
 
+    /// Reloads from the first page. `next` / `hasMore` are only replaced once the first page
+    /// arrives, so a failed or cancelled refresh keeps paging from where the shown rows end.
     func refresh() async {
         generation += 1
-        next = nil
-        hasMore = true
         errorMessage = nil
         isLoading = false
         await load(reset: true)
@@ -52,9 +52,16 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
         items.removeAll(where: predicate)
     }
 
+    /// Replaces the rows (e.g. `replace([])` when the query changes): paging restarts from the first
+    /// page and a page still in flight for the old rows is dropped.
     func replace(_ newItems: [Item]) {
+        generation += 1
         items = newItems
         seen = Set(newItems.map(\.id))
+        next = nil
+        hasMore = true
+        isLoading = false
+        errorMessage = nil
     }
 
     private func load(reset: Bool) async {
@@ -119,6 +126,12 @@ struct ListFooter: View {
                 Text(emptyText).font(.footnote).foregroundStyle(.secondary)
             } else if !hasMore {
                 Text("没有更多了").font(.caption).foregroundStyle(.tertiary)
+            } else if let retry {
+                // Normally the last rows' onAppear already started the next page. This is shown when
+                // nothing will (e.g. several fully filtered pages in a row), so scrolling cannot stall.
+                Button("加载更多", action: retry)
+                    .font(.footnote)
+                    .buttonStyle(.borderless)
             }
         }
         .frame(maxWidth: .infinity)

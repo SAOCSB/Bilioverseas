@@ -146,6 +146,8 @@ final class VideoCommentsModel: ObservableObject, VideoCommentMutating {
     private var cursor: String?
     private var seen = Set<Int64>()
     private var generation = 0
+    /// Consecutive pages that added no new row (all duplicates / pinned).
+    private var emptyPages = 0
 
     init(oid: Int64, type: Int = 1, sort: ReplySort = .hot) {
         self.oid = oid
@@ -211,10 +213,22 @@ final class VideoCommentsModel: ObservableObject, VideoCommentMutating {
                 fresh.append(r)
             }
             items.append(contentsOf: fresh)
+            let previousCursor = cursor
             cursor = page.nextCursor
-            hasMore = page.hasMore
+            // A cursor that does not move would return the same page forever.
+            hasMore = page.hasMore && (reset || page.nextCursor != previousCursor)
             if page.totalCount > 0 { totalCount = page.totalCount }
             didLoad = true
+            // Loading more is driven by rows appearing: a page without new rows would leave the list stuck
+            // (no new row, no footer text). Fetch on, a few pages at most.
+            emptyPages = fresh.isEmpty ? (reset ? 1 : emptyPages + 1) : 0
+            if hasMore && fresh.isEmpty {
+                if emptyPages < 3 {
+                    Task { await loadMore() }   // runs after `isLoading` is cleared below
+                } else {
+                    hasMore = false
+                }
+            }
         } catch {
             guard gen == generation else { return }
             if !videoCommentIsCancellation(error) {

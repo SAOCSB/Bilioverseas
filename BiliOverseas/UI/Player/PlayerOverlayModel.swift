@@ -175,6 +175,9 @@ final class PlayerOverlayModel: ObservableObject {
         panel = nil
         sheet = nil
         seekPreview = nil
+        // Every running scrub / long press ends with the hand-over (the chrome and the surface are re-hosted); a
+        // hold whose end got lost would otherwise disable auto-hide for the rest of the video.
+        holds = 0
         controlsVisible = true
         scheduleHide()
     }

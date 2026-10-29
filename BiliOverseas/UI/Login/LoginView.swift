@@ -407,26 +407,20 @@ final class LoginQRViewModel: ObservableObject {
         polling = true
         defer { polling = false }
         do {
+            // A success is completed even when this poll's session is stale (code refreshed, mode
+            // switched or screen left while the request was in flight): the user has confirmed on the
+            // phone, the code is consumed, and for web QR the response already stored the session
+            // cookies via Set-Cookie. Dropping it would leave a half-applied login (cookies without
+            // tokens / profile) or lose the TV access_key.
             switch m {
             case .web:
                 let state = try await LoginAPI.pollWebQR(key: key)
-                guard s == session else { return true }
-                switch state {
-                case .waitingScan:
-                    phase = .waitingScan
-                case .scannedWaitingConfirm:
-                    phase = .scanned
-                case .expired:
-                    end(.expired)
-                    return true
-                case .success(let refreshToken, let crossDomainURL):
+                if case .success(let refreshToken, let crossDomainURL) = state {
                     end(.success)
                     await AuthService.shared.completeWebQRLogin(refreshToken: refreshToken, crossDomainURL: crossDomainURL)
                     finishLogin()
                     return true
                 }
-            case .tv:
-                let state = try await LoginAPI.pollTVQR(authCode: key)
                 guard s == session else { return true }
                 switch state {
                 case .waitingScan:
@@ -436,10 +430,27 @@ final class LoginQRViewModel: ObservableObject {
                 case .expired:
                     end(.expired)
                     return true
-                case .success(let result):
+                case .success:
+                    return true
+                }
+            case .tv:
+                let state = try await LoginAPI.pollTVQR(authCode: key)
+                if case .success(let result) = state {
                     end(.success)
                     await AuthService.shared.completeTVLogin(result)
                     finishLogin()
+                    return true
+                }
+                guard s == session else { return true }
+                switch state {
+                case .waitingScan:
+                    phase = .waitingScan
+                case .scannedWaitingConfirm:
+                    phase = .scanned
+                case .expired:
+                    end(.expired)
+                    return true
+                case .success:
                     return true
                 }
             }
@@ -511,18 +522,23 @@ enum LoginQRRenderer {
 /// Target object for `UIImageWriteToSavedPhotosAlbum`'s completion selector.
 final class LoginQRPhotoSaver: NSObject {
     private let completion: (Error?) -> Void
+    /// UIKit does not promise to retain the completion target; a second tap replaces the model's
+    /// reference, and the screen may go away before the callback. Stay alive until it arrives.
+    private var keepAlive: LoginQRPhotoSaver?
 
     init(completion: @escaping (Error?) -> Void) {
         self.completion = completion
     }
 
     func save(_ picture: UIImage) {
+        keepAlive = self
         UIImageWriteToSavedPhotosAlbum(picture, self,
                                        #selector(LoginQRPhotoSaver.image(_:didFinishSavingWithError:contextInfo:)), nil)
     }
 
     @objc private func image(_ image: UIImage, didFinishSavingWithError error: Error?, contextInfo: UnsafeMutableRawPointer?) {
         completion(error)
+        keepAlive = nil
     }
 }
 
@@ -572,7 +588,9 @@ struct LoginCookieSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
+                    // Cancelling mid-submit would not stop the login, only lose its "dismiss login" step.
                     Button("取消") { dismiss() }
+                        .disabled(isSubmitting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if isSubmitting {

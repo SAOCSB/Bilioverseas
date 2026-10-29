@@ -529,11 +529,14 @@ struct DynamicImageGrid: View {
 /// A single image shown at its own aspect ratio (clamped to 0.6 … 2.0 so long images are cropped).
 struct DynamicSingleImage: View {
     let url: String
+    /// Released when the row scrolls away (lazy stacks keep off-screen rows and their state alive,
+    /// and an original-size photo decodes to tens of MB); the size is kept so the row height stays.
     @State private var image: UIImage?
+    @State private var imageSize: CGSize?
 
     private var aspect: CGFloat {
-        guard let image, image.size.width > 0, image.size.height > 0 else { return 4.0 / 3.0 }
-        return min(max(image.size.width / image.size.height, 0.6), 2.0)
+        guard let size = imageSize, size.width > 0, size.height > 0 else { return 4.0 / 3.0 }
+        return min(max(size.width / size.height, 0.6), 2.0)
     }
 
     private var requestURL: String {
@@ -543,8 +546,10 @@ struct DynamicSingleImage: View {
     var body: some View {
         // Fits a 320 pt screen even inside a forwarded box.
         let width: CGFloat = aspect >= 1 ? 270 : 210
+        // A memory-cached image shows in the first frame after the row comes back on screen.
+        let shown = image ?? (imageSize != nil ? ImagePipeline.shared.cached(requestURL) : nil)
         ZStack {
-            if let image {
+            if let image = shown {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -556,7 +561,7 @@ struct DynamicSingleImage: View {
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(alignment: .bottomTrailing) {
-            if let image, image.size.height / max(image.size.width, 1) > 2.2 {
+            if let size = imageSize, size.height / max(size.width, 1) > 2.2 {
                 Text("长图")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.white)
@@ -570,10 +575,14 @@ struct DynamicSingleImage: View {
             let u = requestURL
             if let cached = ImagePipeline.shared.cached(u) {
                 image = cached
+                imageSize = cached.size
                 return
             }
-            image = await ImagePipeline.shared.image(for: u)
+            guard let loaded = await ImagePipeline.shared.image(for: u), !Task.isCancelled else { return }
+            image = loaded
+            imageSize = loaded.size
         }
+        .onDisappear { image = nil }
     }
 }
 

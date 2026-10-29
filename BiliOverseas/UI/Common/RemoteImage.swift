@@ -48,11 +48,13 @@ final class ImagePipeline: @unchecked Sendable {
         inflight[url] = task
         lock.unlock()
         let img = await task.value
-        lock.lock(); inflight[url] = nil; lock.unlock()
+        // Cache before dropping the in-flight entry, so a request arriving in between neither misses
+        // both nor starts a second download.
         if let img {
             let cost = Int(img.size.width * img.size.height * img.scale * img.scale * 4)
             memory.setObject(img, forKey: url as NSString, cost: cost)
         }
+        lock.lock(); inflight[url] = nil; lock.unlock()
         return img
     }
 }
@@ -63,7 +65,13 @@ struct RemoteImage: View {
     var width: CGFloat? = nil
     var contentMode: ContentMode = .fill
 
-    @State private var image: UIImage?
+    /// The image together with the URL it was loaded for.
+    private struct Loaded {
+        let url: String
+        let image: UIImage
+    }
+
+    @State private var loaded: Loaded?
 
     private var resolvedURL: String {
         guard let width, AppSettings.shared.general.compactImages else { return url.biliHTTPS }
@@ -72,20 +80,27 @@ struct RemoteImage: View {
     }
 
     var body: some View {
+        let u = resolvedURL
+        // A memory-cached image shows in the very first frame (no placeholder flash when a row is
+        // rebuilt), and an image already loaded for this URL stays even if the cache evicted it.
+        let shown = loaded?.url == u ? loaded?.image : ImagePipeline.shared.cached(u)
         ZStack {
-            if let image {
-                Image(uiImage: image)
+            if let shown {
+                Image(uiImage: shown)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
             } else {
                 Rectangle().fill(Color(.secondarySystemFill))
             }
         }
-        .task(id: resolvedURL) {
-            let u = resolvedURL
-            if let c = ImagePipeline.shared.cached(u) { image = c; return }
-            image = nil
-            image = await ImagePipeline.shared.image(for: u)
+        .task(id: u) {
+            if loaded?.url == u { return }
+            if let c = ImagePipeline.shared.cached(u) {
+                loaded = Loaded(url: u, image: c)
+                return
+            }
+            guard let img = await ImagePipeline.shared.image(for: u), !Task.isCancelled else { return }
+            loaded = Loaded(url: u, image: img)
         }
     }
 }

@@ -142,7 +142,10 @@ struct FilterRuleListEditor: View {
                     .autocorrectionDisabled()
                     .submitLabel(.done)
                     .onSubmit(add)
+                // Borderless: a default-style button makes the whole Form row its tap target, so a tap
+                // into the text field (to correct the draft) would also run `add`.
                 Button("添加", action: add)
+                    .buttonStyle(.borderless)
                     .disabled(trimmedDraft.isEmpty)
             }
         } header: {

@@ -173,8 +173,11 @@ extension PlayerController {
             skipPrompt = nil
             performSeek(to: segment.seekTarget, origin: .smartSkip)
             if s.showToast {
+                let gen = loadGeneration
                 ToastCenter.shared.show("已跳过广告", duration: 4, actionTitle: "撤销") { [weak self] in
-                    self?.undoSmartSkip(segment)
+                    // Not into another video loaded since (segment ids are just "start:end").
+                    guard let self, gen == self.loadGeneration else { return }
+                    self.undoSmartSkip(segment)
                 }
             }
         case .showPrompt(let segment, let remaining):
@@ -304,7 +307,8 @@ extension PlayerController {
             return
         }
         guard let s = sessionStats else { return }
-        networkSpeed = s.bytesPerSecond
+        // Every assignment re-renders the detail page (it observes the controller): only publish changes.
+        if networkSpeed != s.bytesPerSecond { networkSpeed = s.bytesPerSecond }
         if show {
             stats = s
         } else if stats != nil {

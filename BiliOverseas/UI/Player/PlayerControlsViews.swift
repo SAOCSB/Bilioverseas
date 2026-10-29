@@ -31,10 +31,12 @@ struct PlayerIconButton: View {
     let systemName: String
     var size: CGFloat = 18
     var width: CGFloat = 36
+    /// VoiceOver label (the SF Symbol name otherwise).
+    var label: String? = nil
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
+        let button = Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: size, weight: .medium))
                 .foregroundColor(.white)
@@ -42,6 +44,11 @@ struct PlayerIconButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        if let label {
+            button.accessibilityLabel(Text(label))
+        } else {
+            button
+        }
     }
 }
 
@@ -103,8 +110,12 @@ struct PlayerProgressBar: View {
     let onScrubBegan: () -> Void
     let onScrubChanged: (Double) -> Void
     let onScrubEnded: (Double) -> Void
+    /// The drag went away without `onEnded` (touch cancelled by the system, or the bar removed mid-drag: controls
+    /// hidden by a tap, lock, fullscreen hand-over). Must undo what `onScrubBegan` / `onScrubChanged` did.
+    var onScrubCancelled: () -> Void = {}
 
     @State private var scrubFraction: Double?
+    @GestureState private var isTouching = false
 
     var body: some View {
         GeometryReader { geo in
@@ -130,13 +141,17 @@ struct PlayerProgressBar: View {
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
+                    .updating($isTouching) { _, touching, _ in touching = true }
                     .onChanged { value in
+                        // Unknown duration: a tap would seek to 0.
+                        guard total > 0 else { return }
                         let f = min(1, max(0, Double(value.location.x / width)))
                         if scrubFraction == nil { onScrubBegan() }
                         scrubFraction = f
                         onScrubChanged(f * total)
                     }
                     .onEnded { value in
+                        guard total > 0 else { return }
                         let f = min(1, max(0, Double(value.location.x / width)))
                         scrubFraction = nil
                         onScrubEnded(f * total)
@@ -144,6 +159,29 @@ struct PlayerProgressBar: View {
             )
         }
         .frame(height: 28)
+        // `onEnded` is not called for a cancelled drag; without this the preview stayed on screen and the
+        // auto-hide hold was never released (controls stuck visible until the next video).
+        .onChange(of: isTouching) { touching in
+            if !touching { cancelScrub() }
+        }
+        .onDisappear { cancelScrub() }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("播放进度"))
+        .accessibilityValue(Text("\(PlayerFormat.time(timeline.snapshot.time))/\(PlayerFormat.time(timeline.snapshot.duration))"))
+        .accessibilityAdjustableAction { direction in
+            let snap = timeline.snapshot
+            guard snap.duration > 0 else { return }
+            let step = max(10, snap.duration / 20)
+            let target = direction == .increment ? snap.time + step : snap.time - step
+            onScrubBegan()
+            onScrubEnded(min(max(target, 0), snap.duration))
+        }
+    }
+
+    private func cancelScrub() {
+        guard scrubFraction != nil else { return }
+        scrubFraction = nil
+        onScrubCancelled()
     }
 
     @ViewBuilder
@@ -219,6 +257,8 @@ struct PlayerTimeText: View {
             .foregroundColor(.white)
             .lineLimit(1)
             .fixedSize()
+            // Plain labels over the video: let taps through to the gesture layer (toggle controls).
+            .allowsHitTesting(false)
     }
 }
 
@@ -415,6 +455,7 @@ struct PlayerClipSkipButton: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(Text("关闭跳过提示"))
         }
         .foregroundColor(.white)
         .background(Capsule().fill(Color.black.opacity(0.7)))
@@ -449,6 +490,7 @@ struct PlayerResumeChip: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(Text("关闭"))
         }
         .padding(.leading, 12)
         .padding(.trailing, 6)

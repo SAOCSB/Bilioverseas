@@ -13,6 +13,8 @@ enum VideoDetailTab: Hashable {
 struct VideoDetailView: View {
     @StateObject private var model: VideoDetailModel
     @StateObject private var player = PlayerController()
+    /// Stops the player when SwiftUI drops this page's state (see `VideoDetailPageLifetime`).
+    @StateObject private var lifetime = VideoDetailPageLifetime()
     @EnvironmentObject private var router: TabRouter
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
@@ -42,6 +44,16 @@ struct VideoDetailView: View {
         .background(VideoCommentComposerHost(model: model.comments))
         .onAppear {
             if stackDepth == nil { stackDepth = router.path.count }
+            if lifetime.onRelease == nil {
+                let pageModel = model, pagePlayer = player
+                lifetime.onRelease = {
+                    Task { @MainActor in
+                        pageModel.pageClosed()
+                        pagePlayer.stop()
+                    }
+                }
+            }
+            model.pageAppeared()
             model.attach(player)
             model.startIfNeeded()
             if resumeOnAppear {
@@ -55,7 +67,16 @@ struct VideoDetailView: View {
             if let depth = stackDepth, router.path.count < depth {
                 model.pageClosed()
                 player.stop()
-            } else if player.status == .playing || player.status == .buffering {
+                return
+            }
+            // Covered by a pushed page / tab switch — or a swipe-back whose path update lands after this call
+            // (`lifetime` stops the player once the page's state is released).
+            // Picture in Picture keeps playing while the user browses elsewhere.
+            if player.isPiPActive { return }
+            model.pageCovered()
+            // `wantsToPlay` (not only `.playing`): a page covered while its video is still starting would
+            // otherwise begin playing behind the new page.
+            if player.wantsToPlay {
                 resumeOnAppear = true
                 player.pause()
             }
@@ -64,14 +85,18 @@ struct VideoDetailView: View {
 
     // MARK: Player area
 
-    /// 16:9 for horizontal videos; vertical videos get `max(longestSide × 0.65, shortestSide)` (capped).
+    /// 16:9 for horizontal videos; vertical videos get `max(longestSide × 0.65, shortestSide)`. Both are capped at
+    /// 65 % of the screen height: a landscape iPad would otherwise give a 16:9 player all but ~110 pt of it
+    /// (the video is letterboxed inside the shorter area).
     private func playerHeight(width: CGFloat, fullHeight: CGFloat) -> CGFloat {
         let horizontal = (width * 9 / 16).rounded()
-        guard model.isVerticalVideo, fullHeight > 0 else { return horizontal }
+        guard fullHeight > 0 else { return horizontal }
+        let cap = (fullHeight * 0.65).rounded()
+        guard model.isVerticalVideo else { return min(horizontal, cap) }
         let shortest = min(width, fullHeight)
         let longest = max(width, fullHeight)
         let vertical = min(max(longest * 0.65, shortest), fullHeight * 0.65)
-        return max(horizontal, vertical.rounded())
+        return min(max(horizontal, vertical.rounded()), cap)
     }
 
     private var statusBarBackground: Color {
@@ -309,6 +334,14 @@ final class VideoDetailModel: ObservableObject {
     private weak var player: PlayerController?
     private var pendingItem: PlaybackItem?
     private var started = false
+    /// Another page covers this one: new items wait in `pendingItem` so a hidden page never starts playing.
+    private var isCovered = false
+    /// Login state the relation / follow data was loaded with (reloaded on appear after a login / logout).
+    private var sideDataLoggedIn = false
+    /// Bumped by every local like / coin / favourite change: a relation response requested earlier is stale.
+    private var relationEdits = 0
+    /// Archives played on this page (auto-next skips them in 相关推荐 so A → B → A loops do not happen).
+    private var playedAids: Set<Int64> = []
     /// Bumped by every content load; stale responses are dropped.
     private var generation = 0
     /// Bumped by every content / part / episode change; stale side data is dropped.
@@ -389,14 +422,24 @@ final class VideoDetailModel: ObservableObject {
         player.onEnded = { [weak self] in
             Task { @MainActor in self?.advance(manual: false) }
         }
-        // Enables 「下一集」 in fullscreen and next-track on the lock screen.
-        player.onNext = { [weak self] in
-            Task { @MainActor in self?.advance(manual: true) }
-        }
-        if let item = pendingItem {
+        refreshNextAvailability()
+        if let item = pendingItem, !isCovered {
             pendingItem = nil
             player.load(item)
         }
+    }
+
+    /// The page is visible again (first appearance, back from a pushed page / another tab).
+    func pageAppeared() {
+        isCovered = false
+        if hasContent, BiliHTTP.shared.isLoggedIn != sideDataLoggedIn {
+            reloadAccountState()
+        }
+    }
+
+    /// Another page was pushed on top (or another tab was selected).
+    func pageCovered() {
+        isCovered = true
     }
 
     func startIfNeeded() {
@@ -418,6 +461,15 @@ final class VideoDetailModel: ObservableObject {
     func pageClosed() {
         loadTask?.cancel()
         cancelSideTasks()
+    }
+
+    /// The user picked a part / episode of the shown content: an in-place switch still loading (auto-next,
+    /// 合集 episode) must not replace the page afterwards.
+    private func cancelPendingSwitch() {
+        guard isSwitching else { return }
+        loadTask?.cancel()
+        generation += 1
+        isSwitching = false
     }
 
     private func load(_ target: VideoRef, inPlace: Bool) {
@@ -507,6 +559,7 @@ final class VideoDetailModel: ObservableObject {
             detail = d
             season = nil
             currentEpisode = nil
+            playedAids.insert(d.aid)
             let preferred = target.cid != 0 ? d.pages.first(where: { $0.cid == target.cid }) : nil
             currentCid = (preferred ?? d.pages.first)?.cid ?? d.cid
             counts = Counts(view: d.stat.view, danmaku: d.stat.danmaku, like: d.stat.like, coin: d.stat.coin,
@@ -537,8 +590,12 @@ final class VideoDetailModel: ObservableObject {
     // MARK: Playback
 
     private func playCurrent(startTime: Double?) {
+        refreshNextAvailability()
         guard let item = makeItem(startTime: startTime) else { return }
-        if let player {
+        // A content switch that finishes while another page covers this one (auto-next, lock-screen 下一集)
+        // is loaded on the next appearance instead of auto-playing behind that page.
+        if let player, !isCovered {
+            pendingItem = nil
             player.load(item)
         } else {
             pendingItem = item
@@ -580,6 +637,7 @@ final class VideoDetailModel: ObservableObject {
 
     func selectPart(_ part: VideoPart) {
         guard part.cid != currentCid else { return }
+        cancelPendingSwitch()
         currentCid = part.cid
         sideGeneration += 1
         playCurrent(startTime: nil)
@@ -588,6 +646,7 @@ final class VideoDetailModel: ObservableObject {
 
     func selectEpisode(_ episode: PGCEpisode) {
         guard season != nil, episode.epId != currentEpisode?.epId else { return }
+        cancelPendingSwitch()
         currentEpisode = episode
         currentCid = episode.cid
         sideGeneration += 1
@@ -614,10 +673,15 @@ final class VideoDetailModel: ObservableObject {
         replace(with: VideoRef(seasonId: link.seasonId, title: link.title, cover: link.cover))
     }
 
-    /// Next: next part → next 合集 episode → next PGC episode → first (filtered) related video.
-    /// Automatic advancing at the end honours 「自动连播」; the 下一集 button always advances.
-    private func advance(manual: Bool) {
-        guard manual || AppSettings.shared.player.autoNext else { return }
+    private enum NextStep {
+        case part(VideoPart)
+        case episode(PGCEpisode)
+        case video(VideoRef)
+    }
+
+    /// Next: next part → next 合集 episode → next PGC episode (same list / section) → first (filtered) related
+    /// video not played on this page yet.
+    private func nextStep() -> NextStep? {
         if let s = season, let ep = currentEpisode {
             let list: [PGCEpisode]
             if s.episodes.contains(where: { $0.epId == ep.epId }) {
@@ -626,26 +690,56 @@ final class VideoDetailModel: ObservableObject {
                 list = s.sections.first(where: { $0.episodes.contains(where: { $0.epId == ep.epId }) })?.episodes ?? []
             }
             if let i = list.firstIndex(where: { $0.epId == ep.epId }), i + 1 < list.count {
-                selectEpisode(list[i + 1])
+                return .episode(list[i + 1])
             }
-            return
+            return nil
         }
-        guard let d = detail else { return }
+        guard let d = detail else { return nil }
         if let i = d.pages.firstIndex(where: { $0.cid == currentCid }), i + 1 < d.pages.count {
-            selectPart(d.pages[i + 1])
-            return
+            return .part(d.pages[i + 1])
         }
         if let ugc = d.ugcSeason {
             let episodes = ugc.allEpisodes
             if let i = episodes.firstIndex(where: { $0.aid == d.aid }), i + 1 < episodes.count {
-                replace(with: episodes[i + 1].videoRef)
-                return
+                return .video(episodes[i + 1].videoRef)
             }
         }
-        if let next = related.first {
+        if let next = related.first(where: { !playedAids.contains($0.aid) }) ?? related.first {
             var r = next.videoRef
             r.startTime = nil
-            replace(with: r)
+            return .video(r)
+        }
+        return nil
+    }
+
+    /// Automatic advancing at the end honours 「自动连播」; the 下一集 button always advances.
+    private func advance(manual: Bool) {
+        guard manual || AppSettings.shared.player.autoNext, let step = nextStep() else { return }
+        if !manual && (comments.composerTarget != nil || comments.subRepliesRoot != nil) {
+            // Switching to another comment area would close the open composer (losing the draft) or the
+            // reply thread the user is reading.
+            switch step {
+            case .part: break
+            case .episode(let ep) where ep.aid == comments.oid: break
+            default: return
+            }
+        }
+        switch step {
+        case .part(let p): selectPart(p)
+        case .episode(let ep): selectEpisode(ep)
+        case .video(let r): replace(with: r)
+        }
+    }
+
+    /// 「下一集」 (fullscreen bar, lock screen next-track) only when there is something to advance to.
+    private func refreshNextAvailability() {
+        guard let player else { return }
+        if nextStep() == nil {
+            if player.onNext != nil { player.onNext = nil }
+        } else if player.onNext == nil {
+            player.onNext = { [weak self] in
+                Task { @MainActor in self?.advance(manual: true) }
+            }
         }
     }
 
@@ -668,6 +762,7 @@ final class VideoDetailModel: ObservableObject {
 
     private func loadSideData() {
         let gen = sideGeneration
+        sideDataLoggedIn = BiliHTTP.shared.isLoggedIn
         spawn { await $0.loadRelation(gen: gen) }
         if let d = detail {
             if d.tags.isEmpty { spawn { await $0.loadTags(gen: gen) } }
@@ -679,6 +774,7 @@ final class VideoDetailModel: ObservableObject {
 
     private func loadRelation(gen: Int) async {
         guard BiliHTTP.shared.isLoggedIn else { return }
+        let edits = relationEdits
         do {
             let r: VideoRelation
             if season != nil, let ep = currentEpisode {
@@ -689,14 +785,39 @@ final class VideoDetailModel: ObservableObject {
                 return
             }
             guard gen == sideGeneration else { return }
-            relation = r
-            if r.liked && counts.like == 0 { counts.like = 1 }
-            if r.favored && counts.favorite == 0 { counts.favorite = 1 }
             if r.followingUp, let d = detail {
                 isFollowingOwner = true
                 followedStaff.insert(d.owner.mid)
             }
+            // A like / coin / favourite made while this was in flight is newer than the response: ask again.
+            guard edits == relationEdits else {
+                spawn { await $0.loadRelation(gen: gen) }
+                return
+            }
+            relation = r
+            if r.liked && counts.like == 0 { counts.like = 1 }
+            if r.favored && counts.favorite == 0 { counts.favorite = 1 }
         } catch {}
+    }
+
+    /// Back on the page after logging in / out (the login page is pushed on top): the like / coin / favourite
+    /// and follow state shown was loaded for the other session.
+    private func reloadAccountState() {
+        sideDataLoggedIn = BiliHTTP.shared.isLoggedIn
+        relationEdits += 1
+        relation = VideoRelation()
+        addedToWatchLater = false
+        if !sideDataLoggedIn {
+            isFollowingOwner = false
+            followedStaff = []
+        }
+        let gen = sideGeneration
+        spawn { await $0.loadRelation(gen: gen) }
+        if ownerMid > 0 { spawn { await $0.loadOwnerCard(gen: gen) } }
+        if comments.didLoad {
+            let list = comments
+            Task { await list.refresh() }   // per-user like state of the comments
+        }
     }
 
     private func loadTags(gen: Int) async {
@@ -710,8 +831,10 @@ final class VideoDetailModel: ObservableObject {
         let cards = (try? await VideoAPI.related(aid: d.aid, bvid: d.bvid)) ?? []
         guard gen == sideGeneration else { return }
         let allows = FeedFilter.liveFilter(scope: .related)
-        related = cards.filter { $0.aid != d.aid && allows($0) }
+        var ids = Set<String>()
+        related = cards.filter { $0.aid != d.aid && allows($0) && ids.insert($0.id).inserted }
         relatedLoaded = true
+        refreshNextAvailability()
     }
 
     /// `/x/web-interface/card` → fans / videos / follow state / VIP of the uploader.
@@ -781,28 +904,34 @@ final class VideoDetailModel: ObservableObject {
         let target = !relation.liked
         do {
             try await VideoAPI.like(aid: aid, like: target)
+            if !target { ToastCenter.shared.show("已取消点赞") }
+            // Auto-next / another episode may have replaced the page meanwhile: its state is not ours.
+            guard aid == interactionAid else { return }
+            relationEdits += 1
             relation.liked = target
             counts.like = max(0, counts.like + (target ? 1 : -1))
-            if !target { ToastCenter.shared.show("已取消点赞") }
         } catch {
             ToastCenter.shared.show(error: error)
         }
     }
 
-    func giveCoins(_ count: Int, alsoLike: Bool) async {
-        let aid = interactionAid
+    /// `aid`: the video the coin sheet was opened for (it stays open when auto-next switches the page).
+    func giveCoins(_ count: Int, alsoLike: Bool, aid targetAid: Int64? = nil) async {
+        let aid = targetAid ?? interactionAid
         guard aid > 0, begin(.coin) else { return }
         defer { end(.coin) }
-        let n = max(1, min(count, maxCoins - relation.coinCount))
+        let n = aid == interactionAid ? max(1, min(count, maxCoins - relation.coinCount)) : max(1, min(count, 2))
         do {
             let liked = try await VideoAPI.coin(aid: aid, count: n, alsoLike: alsoLike)
+            ToastCenter.shared.show("投币成功")
+            guard aid == interactionAid else { return }
+            relationEdits += 1
             relation.coinCount += n
             counts.coin += Int64(n)
             if (alsoLike || liked) && !relation.liked {
                 relation.liked = true
                 counts.like += 1
             }
-            ToastCenter.shared.show("投币成功")
         } catch {
             ToastCenter.shared.show(error: error)
         }
@@ -825,6 +954,11 @@ final class VideoDetailModel: ObservableObject {
             } else {
                 result = try await VideoAPI.triple(aid: aid, bvid: detail?.bvid ?? "")
             }
+            guard aid == interactionAid else {
+                ToastCenter.shared.show(result.coin ? "三连成功" : "投币失败")
+                return
+            }
+            relationEdits += 1
             if result.like && !relation.liked {
                 relation.liked = true
                 counts.like += 1
@@ -847,8 +981,10 @@ final class VideoDetailModel: ObservableObject {
         }
     }
 
-    /// Called by the folder picker after a successful save.
-    func favoriteChanged(_ favored: Bool) {
+    /// Called by the folder picker after a successful save of `rid` (the resource it was opened for).
+    func favoriteChanged(_ favored: Bool, rid: Int64) {
+        guard rid == favoriteResource.rid else { return }
+        relationEdits += 1
         guard favored != relation.favored else { return }
         relation.favored = favored
         counts.favorite = max(0, counts.favorite + (favored ? 1 : -1))
@@ -860,7 +996,7 @@ final class VideoDetailModel: ObservableObject {
         defer { end(.watchLater) }
         do {
             try await VideoAPI.addToWatchLater(aid: aid)
-            addedToWatchLater = true
+            if aid == interactionAid { addedToWatchLater = true }
             ToastCenter.shared.show("已添加至稍后再看")
         } catch {
             ToastCenter.shared.show(error: error)
@@ -892,11 +1028,27 @@ final class VideoDetailModel: ObservableObject {
         let target = !isFollowingSeason
         do {
             let toast = try await VideoAPI.pgcFollow(seasonId: s.seasonId, follow: target)
-            isFollowingSeason = target
+            if s.seasonId == season?.seasonId { isFollowingSeason = target }
             ToastCenter.shared.show(toast)
         } catch {
             ToastCenter.shared.show(error: error)
         }
+    }
+}
+
+// MARK: - Page lifetime
+
+/// Owned by the detail page as a `@StateObject`, so SwiftUI releases it exactly when the page's state goes away:
+/// popped by any means — including a pop-to-root (tab re-tap) while another page covered it, which sends no
+/// further `onDisappear`, and a swipe-back whose path update arrives after `onDisappear` ran. Without this the
+/// player would only be released, never stopped (no final history heartbeat, stale lock-screen 正在播放,
+/// Picture in Picture killed instead of finishing).
+final class VideoDetailPageLifetime: ObservableObject {
+    /// Set on the main actor by the page; must hop to the main actor itself.
+    var onRelease: (() -> Void)?
+
+    deinit {
+        onRelease?()
     }
 }
 
@@ -947,6 +1099,16 @@ final class VideoDetailPopGestureController: UIViewController, UIGestureRecogniz
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        (navigationController?.viewControllers.count ?? 0) > 1
+        guard let nav = navigationController else { return false }
+        // Never start a pop while a push / pop animation runs (UINavigationController would get stuck).
+        return nav.viewControllers.count > 1 && nav.transitionCoordinator == nil
+    }
+
+    /// A swipe from the left edge pops instead of being taken by a scroll view under it — the 简介 | 评论 pager
+    /// (a paging scroll view that can rubber-band on its first page) or a horizontal chip row. Those pans wait
+    /// for the edge recognizer, which fails at once for touches away from the edge.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        otherGestureRecognizer is UIPanGestureRecognizer && otherGestureRecognizer.view is UIScrollView
     }
 }

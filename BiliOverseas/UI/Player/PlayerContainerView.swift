@@ -330,28 +330,31 @@ struct PlayerChromeView: View {
     private var topBar: some View {
         HStack(spacing: 4) {
             if fullscreen {
-                PlayerIconButton(systemName: "chevron.left", size: 18) { controller.fullscreenBack() }
+                PlayerIconButton(systemName: "chevron.left", size: 18, label: "返回") { controller.fullscreenBack() }
                 titleBlock
                 Spacer(minLength: 8)
                 if !compact { PlayerFullscreenStatusView() }
-                PlayerIconButton(systemName: "slider.horizontal.3", size: 17) {
+                PlayerIconButton(systemName: "slider.horizontal.3", size: 17, label: "弹幕设置") {
                     act { overlay.sheet = .danmakuSettings }
                 }
             } else {
                 Spacer(minLength: 0)
             }
             if controller.supportsPiP {
-                PlayerIconButton(systemName: controller.isPiPActive ? "pip.exit" : "pip.enter", size: 17) {
+                PlayerIconButton(systemName: controller.isPiPActive ? "pip.exit" : "pip.enter", size: 17,
+                                 label: controller.isPiPActive ? "退出画中画" : "画中画") {
                     act { controller.togglePiP() }
                 }
             }
-            PlayerIconButton(systemName: "ellipsis", size: 18) { open(.more) }
+            PlayerIconButton(systemName: "ellipsis", size: 18, label: "更多设置") { open(.more) }
         }
         .padding(.horizontal, fullscreen ? 12 : 6)
         .padding(.top, fullscreen ? 6 : 2)
         .padding(.bottom, 14)
         .background(
+            // Fullscreen: run under the notch / rounded corners too (the bar itself stays in the safe area).
             LinearGradient(colors: [Color.black.opacity(0.75), .clear], startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: fullscreen ? .all : [])
                 .allowsHitTesting(false)
         )
     }
@@ -372,6 +375,8 @@ struct PlayerChromeView: View {
                     .lineLimit(1)
             }
         }
+        // A tap on the (wide) title area should toggle the controls like the rest of the video.
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -394,7 +399,7 @@ struct PlayerChromeView: View {
             }
             PlayerTextButton(title: speedTitle, highlighted: controller.isBoosting || controller.rate != 1,
                              fontSize: 12) { open(.speed) }
-            PlayerIconButton(systemName: "arrow.up.left.and.arrow.down.right", size: 15, width: 32) {
+            PlayerIconButton(systemName: "arrow.up.left.and.arrow.down.right", size: 15, width: 32, label: "全屏") {
                 act { controller.enterFullscreen() }
             }
         }
@@ -416,7 +421,9 @@ struct PlayerChromeView: View {
             HStack(spacing: compact ? 4 : 12) {
                 playButton
                 if controller.hasNext {
-                    PlayerIconButton(systemName: "forward.end.fill", size: 18) { act { controller.onNext?() } }
+                    PlayerIconButton(systemName: "forward.end.fill", size: 18, label: "下一集") {
+                        act { controller.onNext?() }
+                    }
                 }
                 danmakuToggle
                 danmakuInput
@@ -429,16 +436,18 @@ struct PlayerChromeView: View {
                 if let quality = currentQualityEntry {
                     PlayerTextButton(title: quality.shortTitle) { open(.quality) }
                 }
-                PlayerIconButton(systemName: "arrow.down.right.and.arrow.up.left", size: 15) {
+                PlayerIconButton(systemName: "arrow.down.right.and.arrow.up.left", size: 15, label: "退出全屏") {
                     act { controller.exitFullscreen() }
                 }
             }
         }
-        .padding(.horizontal, 16)
+        // Vertical-video fullscreen on a 375 pt phone with 下一集 + 字幕 + 1.25X + 1080P+ overflowed by ~7 pt at 16.
+        .padding(.horizontal, compact ? 10 : 16)
         .padding(.top, 20)
         .padding(.bottom, 2)
         .background(
             LinearGradient(colors: [.clear, Color.black.opacity(0.75)], startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: .all)
                 .allowsHitTesting(false)
         )
     }
@@ -451,7 +460,10 @@ struct PlayerChromeView: View {
     }
 
     private var playButton: some View {
-        PlayerIconButton(systemName: playIcon, size: fullscreen ? 22 : 18) { act { controller.togglePlay() } }
+        let label = controller.status == .ended ? "重新播放" : (controller.wantsToPlay ? "暂停" : "播放")
+        return PlayerIconButton(systemName: playIcon, size: fullscreen ? 22 : 18, label: label) {
+            act { controller.togglePlay() }
+        }
     }
 
     private var progressBar: some View {
@@ -469,6 +481,10 @@ struct PlayerChromeView: View {
                               overlay.seekPreview = nil
                               overlay.endHold()
                               controller.seek(to: target)
+                          },
+                          onScrubCancelled: {
+                              overlay.seekPreview = nil
+                              overlay.endHold()
                           })
     }
 
@@ -479,6 +495,7 @@ struct PlayerChromeView: View {
             PlayerDanmakuToggleIcon(enabled: settings.danmaku.enabled)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(Text(settings.danmaku.enabled ? "关闭弹幕" : "开启弹幕"))
     }
 
     private var danmakuInput: some View {
@@ -503,11 +520,12 @@ struct PlayerChromeView: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(Text("发弹幕"))
     }
 
     private var subtitleIconButton: some View {
         PlayerIconButton(systemName: controller.selectedSubtitleId == nil ? "captions.bubble" : "captions.bubble.fill",
-                         size: 16, width: 32) { open(.subtitle) }
+                         size: 16, width: 32, label: "字幕") { open(.subtitle) }
     }
 
     private var speedTitle: String {
@@ -551,11 +569,15 @@ struct PlayerFullscreenStatusView: View {
             .foregroundColor(.white.opacity(0.9))
             .padding(.trailing, 4)
         }
-        .onAppear { UIDevice.current.isBatteryMonitoringEnabled = true }
+        .allowsHitTesting(false)
     }
 
     static func batteryPercent() -> Int? {
-        let level = UIDevice.current.batteryLevel
+        // Enabled before the first read: `batteryLevel` is −1 until monitoring is on (the first render used to
+        // show no battery for up to 20 s).
+        let device = UIDevice.current
+        if !device.isBatteryMonitoringEnabled { device.isBatteryMonitoringEnabled = true }
+        let level = device.batteryLevel
         return level >= 0 ? Int((level * 100).rounded()) : nil
     }
 }

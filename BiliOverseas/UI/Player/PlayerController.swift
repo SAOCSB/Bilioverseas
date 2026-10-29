@@ -298,7 +298,8 @@ final class PlayerController: ObservableObject {
     private var heartbeatStarted = false
     private var waitingSince: Double?
     private var stallReported = false
-    private var endpointRebuildPending = false
+    /// A `rebuild` is preparing its new item (reset when it installs or gives up).
+    private var rebuildPending = false
     private var pendingSwitchToast: String?
     private var switchRevert: (quality: Int?, audio: Int?, codec: VideoCodecPreference?, forceAVC: Bool)?
     private var tickCount = 0
@@ -308,6 +309,10 @@ final class PlayerController: ObservableObject {
     private let fullscreenPresenter = PlayerFullscreenPresenter()
     private var fullscreenByRotation = false
     private var autoExitTask: Task<Void, Never>?
+    /// The inline container disappeared (a page was pushed over this one) and has not reappeared yet.
+    private var containerHidden = false
+    /// Play intent held back while the container is hidden; `play()` runs when it reappears.
+    private var resumeOnContainerAppear = false
 
     init() {
         let avPlayer = AVPlayer()
@@ -373,6 +378,8 @@ final class PlayerController: ObservableObject {
             default: return
             }
         }
+        // Auto-next (or another part tapped while playing) keeps playing even with 「自动播放」 off.
+        let continuing = item != nil && (wantsToPlay || status == .ended)
         autoExitTask?.cancel()
         teardown(reportHeartbeat: true)
         item = newItem
@@ -382,10 +389,17 @@ final class PlayerController: ObservableObject {
         lastKnownPosition = 0
         timeline.reset(duration: duration)
         status = .loading
-        wantsToPlay = AppSettings.shared.player.autoPlay
+        wantsToPlay = AppSettings.shared.player.autoPlay || continuing
+        if wantsToPlay, containerHidden, !isPiPBusy {
+            // Loaded while another page covers this one (e.g. the detail request finished late): start when visible.
+            wantsToPlay = false
+            resumeOnContainerAppear = true
+        }
         hasFirstFrame = false
         surface.danmaku.load(cid: newItem.cid, aid: newItem.aid, duration: newItem.duration)
-        surface.reattachPlayerIfNeeded()
+        // Re-attaching the layer in the background (auto-next during background play) would get the new item
+        // paused by the system (QA1668); `appWillEnterForeground` re-attaches it.
+        if UIApplication.shared.applicationState != .background { surface.reattachPlayerIfNeeded() }
         overlay.prepareForNewItem()
         startTicking()
         let gen = loadGeneration
@@ -396,23 +410,27 @@ final class PlayerController: ObservableObject {
 
     func play() {
         guard item != nil else { return }
-        switch status {
-        case .failed:
+        if case .failed = status {
             retry()
             return
-        case .ended:
-            wantsToPlay = true
-            pausedByBackground = false
-            pausedByInterruption = false
-            performSeek(to: 0, origin: .user)
-            startPlayback()
-            return
-        default:
-            break
         }
+        let replay = status == .ended
         wantsToPlay = true
         pausedByBackground = false
         pausedByInterruption = false
+        resumeOnContainerAppear = false
+        if replay {
+            performSeek(to: 0, origin: .user)
+            // With a lost endpoint the seek became a rebuild, which starts playback itself.
+            if !isEndpointLost { startPlayback() }
+            return
+        }
+        if isEndpointLost {
+            // The proxy session died while this page was idle: rebuild instead of playing a dead item.
+            if status == .paused { status = hasFirstFrame ? .buffering : .loading }
+            rebuildForLostEndpoint(position: lastKnownPosition)
+            return
+        }
         guard startupDone else {
             if status == .paused { status = hasFirstFrame ? .buffering : .loading }
             return
@@ -424,6 +442,7 @@ final class PlayerController: ObservableObject {
         wantsToPlay = false
         pausedByBackground = false
         pausedByInterruption = false
+        resumeOnContainerAppear = false
         if isBoosting {
             isBoosting = false
             applyRate()
@@ -470,7 +489,7 @@ final class PlayerController: ObservableObject {
 
     /// Stop & release. While Picture in Picture runs the player keeps going (kept alive) and stops when PiP ends.
     func stop() {
-        if isPiPActive || pipCoordinator.isStarting || pipCoordinator.isActive {
+        if isPiPBusy {
             stopAfterPiP = true
             PlayerPiPKeeper.retain(self)
             return
@@ -523,6 +542,15 @@ final class PlayerController: ObservableObject {
         guard newRate.isFinite, newRate > 0 else { return }
         rate = min(max(newRate, 0.25), 4)
         applyRate()
+        if Double(playerRate) < rate - 0.001 { ToastCenter.shared.show("当前视频最高支持 2 倍速播放") }
+    }
+
+    /// The rate handed to AVPlayer. HLS plays above 2× only with I-frame playlists (`canPlayFastForward`), which
+    /// the proxy's playlists do not have; progressive MP4 may go up to 4×.
+    var playerRate: Float {
+        var r = effectiveRate
+        if r > 2, session?.isHLS ?? false, !(playerItem?.canPlayFastForward ?? false) { r = 2 }
+        return Float(r)
     }
 
     /// Long-press start: only while playing. Returns whether the boost started.
@@ -544,7 +572,7 @@ final class PlayerController: ObservableObject {
     }
 
     private func applyRate() {
-        let r = Float(effectiveRate)
+        let r = playerRate
         player.defaultRate = r
         if player.rate != 0 { player.rate = r }
         PlayerNowPlayingCenter.shared.playbackChanged(self)
@@ -669,9 +697,8 @@ final class PlayerController: ObservableObject {
                                                               epId: target.epId, seasonId: target.seasonId,
                                                               quality: quality)
         } catch {
+            // Still the current load: even a cancellation we did not ask for must not leave the status at .loading.
             guard gen == loadGeneration, !Task.isCancelled else { return }
-            if error is CancellationError { return }
-            if let b = error as? BiliError, b == .cancelled { return }
             fail(Self.describe(error))
             return
         }
@@ -766,7 +793,8 @@ final class PlayerController: ObservableObject {
                                 position: position, generation: sgen)
                         return
                     } catch {
-                        guard current(), !(error is CancellationError) else { return }
+                        // Still current: a stray CancellationError is just another failed attempt (never a stuck .loading).
+                        guard current() else { return }
                         lastError = error
                     }
                 }
@@ -795,13 +823,14 @@ final class PlayerController: ObservableObject {
                             generation: sgen)
                     return
                 } catch {
-                    guard current(), !(error is CancellationError) else { return }
+                    guard current() else { return }
                     lastError = error
                 }
             }
         }
 
         guard current() else { return }
+        rebuildPending = false
         if reason == .switchStreams, startupDone {
             // The previous item is still playing: keep it and undo the menu choice.
             if let revert = switchRevert {
@@ -835,7 +864,7 @@ final class PlayerController: ObservableObject {
         lastKnownPosition = start
         waitingSince = ProcessInfo.processInfo.systemUptime
         stallReported = false
-        endpointRebuildPending = false
+        rebuildPending = false
 
         let old = session
         session = newSession
@@ -874,10 +903,27 @@ final class PlayerController: ObservableObject {
         guard item != nil, playInfo != nil else { return }
         streamGeneration += 1
         loadTask?.cancel()
+        rebuildPending = true
         let sgen = streamGeneration
         loadTask = Task { [weak self] in
             await self?.installStreams(position: position, generation: sgen, reason: reason)
         }
+    }
+
+    /// The item's proxy session can no longer serve it: the listener moved to another port, or the engine closed
+    /// the session to stay under its session cap (another page opened a newer one).
+    private var isEndpointLost: Bool {
+        guard let session else { return false }
+        return !session.isEndpointValid
+    }
+
+    /// Rebuilds at `position` (nil = now) after `isEndpointLost`, without touching the fallback ladder.
+    /// Callers rebuild an engine-closed session only when this page wants to play: an idle page rebuilding at once
+    /// would evict the next-oldest page's session, which would rebuild and evict the next one, forever.
+    private func rebuildForLostEndpoint(position: Double?) {
+        // A rebuild already preparing brings a new session anyway.
+        guard !rebuildPending else { return }
+        rebuild(position: position, reason: .endpoint)
     }
 
     private func teardown(reportHeartbeat: Bool) {
@@ -914,7 +960,8 @@ final class PlayerController: ObservableObject {
         pendingStartTime = nil
         waitingSince = nil
         stallReported = false
-        endpointRebuildPending = false
+        rebuildPending = false
+        resumeOnContainerAppear = false
         pendingSwitchToast = nil
         switchRevert = nil
         transientMessage = nil
@@ -931,6 +978,11 @@ final class PlayerController: ObservableObject {
         resetFeatureState()
     }
 
+    private var isFailed: Bool {
+        if case .failed = status { return true }
+        return false
+    }
+
     private func fail(_ message: String) {
         status = .failed(message)
         wantsToPlay = false
@@ -943,6 +995,7 @@ final class PlayerController: ObservableObject {
     }
 
     static func describe(_ error: Error) -> String {
+        if error is CancellationError || (error as? BiliError) == .cancelled { return "加载被中断，请重试" }
         if let e = error as? LocalizedError, let d = e.errorDescription, !d.isEmpty { return d }
         let ns = error as NSError
         return ns.localizedDescription.isEmpty ? "播放失败" : ns.localizedDescription
@@ -1069,12 +1122,14 @@ final class PlayerController: ObservableObject {
 
     private func startPlayback() {
         guard player.currentItem != nil else { return }
-        let r = Float(effectiveRate)
+        let r = playerRate
         player.defaultRate = r
         player.play()
         if player.rate != r { player.rate = r }
         syncStatus()
         PlayerNowPlayingCenter.shared.claim(self)
+        // A PiP window left over from a closed page would keep playing over this one.
+        PlayerPiPKeeper.stopOthers(than: self)
     }
 
     private var isNearEnd: Bool {
@@ -1144,6 +1199,16 @@ final class PlayerController: ObservableObject {
     private func handleFailure(message: String?) {
         guard item != nil, let info = playInfo else {
             fail(message.map { "播放失败：\($0)" } ?? "播放失败")
+            return
+        }
+        if let session, !session.isEndpointValid {
+            // Not the stream's fault: no fallback step. An idle page whose session the engine closed waits for
+            // play() (see rebuildForLostEndpoint) instead of showing a spinner forever.
+            if wantsToPlay || !session.isClosed {
+                rebuildForLostEndpoint(position: lastKnownPosition)
+            } else if !startupDone, status == .loading || status == .buffering {
+                status = .paused
+            }
             return
         }
         let position = lastKnownPosition
@@ -1244,6 +1309,24 @@ final class PlayerController: ObservableObject {
         if status == .ended, total <= 0 || target < total - 0.5 {
             status = wantsToPlay ? .buffering : .paused
         }
+        if isEndpointLost, origin != .startup {
+            // The item's proxy session is gone, so seeking it would only fail: rebuild at the target, which
+            // `displayTime()` shows meanwhile (`install` ends the pseudo seek).
+            seekToken += 1
+            isSeeking = true
+            seekTarget = target
+            lastKnownPosition = target
+            currentTime = target
+            timeline.update(time: target, duration: total, buffered: 0)
+            surface.danmaku.seek(to: target)
+            heartbeat.seeked(to: target)
+            tracker?.didSeek(to: target)
+            if origin == .user { skipPrompt = nil }
+            updateSubtitle(at: target)
+            rebuild(position: target, reason: .endpoint)
+            PlayerNowPlayingCenter.shared.playbackChanged(self)
+            return
+        }
         let outside = !Self.isBuffered(target, in: observed)
         session?.playerWillSeek(to: target, outsideBuffer: outside)
         seekToken += 1
@@ -1332,12 +1415,16 @@ final class PlayerController: ObservableObject {
         if Int(t) != Int(currentTime) || abs(t - currentTime) >= 1 { currentTime = t }
         if startupDone, !isSeeking { lastKnownPosition = t }
         let playing = isActuallyPlaying
+        // The layer's readiness KVO only reports changes; if it stayed true across an item replacement the cover
+        // would never hide. Once the new item is ready and positioned, a ready layer shows its frame.
+        if !hasFirstFrame, startupDone { layerReadinessChanged() }
 
         if let session {
             if !session.isEndpointValid {
-                if !endpointRebuildPending, playInfo != nil {
-                    endpointRebuildPending = true
-                    rebuild(position: nil, reason: .endpoint)
+                // A port change is rebuilt right away; a session the engine closed only once this page wants to
+                // play (see rebuildForLostEndpoint). A failed or ended player waits for the user.
+                if wantsToPlay || !session.isClosed, !isFailed, status != .ended {
+                    rebuildForLostEndpoint(position: nil)
                 }
             } else {
                 let forward = playerItem?.preferredForwardBufferDuration ?? forwardBufferSeconds
@@ -1428,16 +1515,31 @@ final class PlayerController: ObservableObject {
 
     func containerDidAppear() {
         containerVisible = true
+        containerHidden = false
         startOrientationObserving()
         if item != nil { startTicking() }
+        if resumeOnContainerAppear {
+            resumeOnContainerAppear = false
+            if item != nil { play() }
+        }
     }
 
     func containerDidDisappear() {
         // The fullscreen presentation hides the inline container: not a real disappearance.
         guard !isFullscreen else { return }
         containerVisible = false
+        containerHidden = true
         stopOrientationObserving()
+        // The detail page pauses a playing / buffering player when a page is pushed over it; one still loading
+        // would start playing hidden once ready. Hold its intent until the page is back (or `stop()` comes).
+        if wantsToPlay, item != nil, status != .playing, status != .buffering, !isPiPBusy {
+            wantsToPlay = false
+            resumeOnContainerAppear = true
+        }
     }
+
+    /// Picture in Picture is running or starting (the player must keep going without the page).
+    var isPiPBusy: Bool { isPiPActive || pipCoordinator.isActive || pipCoordinator.isStarting }
 
     func startOrientationObserving() {
         guard !generatingOrientation else { return }

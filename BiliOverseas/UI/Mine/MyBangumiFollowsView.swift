@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// 我的追番 / 我的追剧 (`BangumiAPI.myFollows`). Login required. Swipe to 取消追番.
 struct MyBangumiFollowsView: View {
@@ -19,7 +20,7 @@ struct MyBangumiFollowsView: View {
                     .padding(.vertical, 8)
 
                     MineBangumiFollowsList(list: store.list(for: type), type: type)
-                        .id(type)
+                        .id("\(type)-\(store.generation)")
                 }
             } else {
                 LoginRequiredView(message: "登录后查看追番")
@@ -27,6 +28,11 @@ struct MyBangumiFollowsView: View {
         }
         .navigationTitle(type == 1 ? "我的追番" : "我的追剧")
         .navigationBarTitleDisplayMode(.inline)
+        .onReceive(NotificationCenter.default.publisher(for: AuthService.loginStateDidChange)) { _ in
+            // The cached lists belong to the previous account (e.g. session expired here, then
+            // 扫码登录 from the login prompt as someone else).
+            store.reset()
+        }
     }
 }
 
@@ -34,6 +40,13 @@ struct MyBangumiFollowsView: View {
 @MainActor
 final class MineBangumiFollowsStore: ObservableObject {
     private var lists: [Int: PagedListModel<VideoCard>] = [:]
+    /// Bumped by `reset()` so the shown list view is rebuilt (and reloads).
+    @Published private(set) var generation = 0
+
+    func reset() {
+        lists = [:]
+        generation += 1
+    }
 
     func list(for type: Int) -> PagedListModel<VideoCard> {
         if let l = lists[type] { return l }

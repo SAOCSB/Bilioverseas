@@ -54,7 +54,8 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         singleTap.addTarget(self, action: #selector(handleSingleTap(_:)))
         doubleTap.addTarget(self, action: #selector(handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
-        singleTap.require(toFail: doubleTap)
+        // The single tap waits for the double tap only while one is possible (see
+        // `gestureRecognizer(_:shouldRequireFailureOf:)`): a tap on a locked player answers at once.
         longPress.addTarget(self, action: #selector(handleLongPress(_:)))
         longPress.minimumPressDuration = 0.3
         pan.addTarget(self, action: #selector(handlePan(_:)))
@@ -98,6 +99,46 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             return start.x > e && start.x < bounds.width - e && start.y > e && start.y < bounds.height - e
         }
         return true
+    }
+
+    /// §1.1: the double tap does not exist while locked (or before an item is loaded), so the single tap must not
+    /// wait ~0.3 s for it to fail then. Asked once per recognition attempt.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === singleTap, otherGestureRecognizer === doubleTap else { return false }
+        guard let controller else { return true }
+        return !controller.overlay.isLocked && controller.item != nil
+    }
+
+    // MARK: Leaving the window
+
+    override func willMove(toWindow newWindow: UIWindow?) {
+        super.willMove(toWindow: newWindow)
+        if newWindow == nil { cancelActiveGestures() }
+    }
+
+    /// The surface leaves the window mid-gesture when it moves between the inline and fullscreen hosts (rotation
+    /// while holding / scrubbing) or the page gets covered. Whether or not UIKit still delivers `.cancelled`, end a
+    /// running 长按倍速 (restore the previous speed) and drop a pending scrub here, so the boost, the preview and
+    /// the auto-hide hold can never stay behind.
+    private func cancelActiveGestures() {
+        if let controller {
+            if boosting {
+                boosting = false
+                controller.endBoost()
+                controller.overlay.endHold()
+            }
+            if panMode != .undecided { finishPan(committed: false, controller) }
+        } else {
+            boosting = false
+            panMode = .undecided
+        }
+        for recognizer in [longPress, pan] as [UIGestureRecognizer]
+        where recognizer.state == .began || recognizer.state == .changed {
+            // Disabling a running recognizer cancels it; its `.cancelled` callback is a no-op now.
+            recognizer.isEnabled = false
+            recognizer.isEnabled = true
+        }
     }
 
     // MARK: Taps
@@ -164,6 +205,12 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         guard let controller else { return }
         switch g.state {
         case .began:
+            if boosting {
+                // A previous press that never reported its end: restore before starting again.
+                boosting = false
+                controller.endBoost()
+                controller.overlay.endHold()
+            }
             if controller.beginBoost() {
                 boosting = true
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -188,6 +235,8 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         let p = g.location(in: self)
         switch g.state {
         case .began:
+            // A previous pan that never reported its end must not keep its preview / hold.
+            if panMode != .undecided { finishPan(committed: false, controller) }
             panMode = .undecided
             panStartPoint = CGPoint(x: p.x - t.x, y: p.y - t.y)
             lastTranslation = .zero
@@ -308,6 +357,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
 
     private func setSystemVolume(_ value: Double) {
         guard let slider = Self.findSlider(in: volumeView) else { return }
+        lastVolumeWrite = CACurrentMediaTime()
         slider.value = Float(min(max(value, 0), 1))
         slider.sendActions(for: .valueChanged)
     }
@@ -321,7 +371,10 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     }
 
     private func hardwareVolumeChanged(_ value: Double) {
-        guard !adjustingVolume, window != nil, let controller, controller.item != nil else { return }
+        // `outputVolume` reports our own slider writes asynchronously, after the pan has ended: such an echo would
+        // keep the pill up for the 0.8 s hardware-key delay instead of 0.2 s.
+        guard !adjustingVolume, CACurrentMediaTime() - lastVolumeWrite > 0.5,
+              window != nil, let controller, controller.item != nil else { return }
         controller.overlay.showLevel(.volume, value: value)
         controller.overlay.hideLevel(after: 0.8)
     }

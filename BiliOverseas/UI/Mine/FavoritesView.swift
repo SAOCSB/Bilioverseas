@@ -412,6 +412,9 @@ struct MineFavFolderEditSheet: View {
                 if newValue.count > Self.maxIntroLength { intro = String(newValue.prefix(Self.maxIntroLength)) }
             }
         }
+        // The app's toast layer is under this sheet; without its own, a failed 创建 / 保存 (the sheet
+        // stays open) would give no feedback at all.
+        .overlay { ToastOverlay() }
         .presentationDetents([.medium, .large])
         .interactiveDismissDisabled(submitting)
     }

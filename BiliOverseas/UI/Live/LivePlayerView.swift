@@ -28,6 +28,11 @@ final class LivePlayerController: ObservableObject {
     var onExhausted: (() -> Void)?
     /// Playback actually started (the owner resets its retry budget).
     var onPlaying: (() -> Void)?
+    /// PiP ended (closed, 还原 or failed to start) while the owner still exists.
+    var onPiPStopped: (() -> Void)?
+    /// The room model. A PiP window outlives a popped room (`LivePiPKeeper`); when it ends and the
+    /// owner is gone, the player stops instead of playing on without any UI.
+    weak var owner: AnyObject?
 
     /// The user wants playback (false after 暂停 / stop).
     @Published private(set) var wantsPlay = false
@@ -56,7 +61,7 @@ final class LivePlayerController: ObservableObject {
             Task { @MainActor [weak self] in self?.timeControlChanged() }
         }
         pipDelegate.onActiveChange = { [weak self] active in
-            Task { @MainActor [weak self] in self?.isPiPActive = active }
+            Task { @MainActor [weak self] in self?.pipActiveChanged(active) }
         }
         NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)
             .receive(on: DispatchQueue.main)
@@ -76,6 +81,8 @@ final class LivePlayerController: ObservableObject {
 
     /// Plays `urls` (best first), starting at `index`.
     func play(urls: [String], from index: Int = 0) {
+        // A popped room still playing in PiP must not keep playing over this one.
+        LivePiPKeeper.yield(to: self)
         self.urls = urls
         urlIndex = min(max(index, 0), max(urls.count - 1, 0))
         wantsPlay = true
@@ -86,6 +93,7 @@ final class LivePlayerController: ObservableObject {
     /// 线路: replays another CDN URL of the same stream.
     func switchLine(_ index: Int) {
         guard urls.indices.contains(index) else { return }
+        LivePiPKeeper.yield(to: self)
         urlIndex = index
         wantsPlay = true
         pausedAt = nil
@@ -107,6 +115,7 @@ final class LivePlayerController: ObservableObject {
     /// Resumes; after a longer pause the stream restarts at the live edge with a fresh item.
     func resume() {
         guard !urls.isEmpty else { return }
+        LivePiPKeeper.yield(to: self)
         wantsPlay = true
         let stale = pausedAt.map { Date().timeIntervalSince($0) > 8 } ?? false
         pausedAt = nil
@@ -208,6 +217,11 @@ final class LivePlayerController: ObservableObject {
     private func timeControlChanged() {
         switch player.timeControlStatus {
         case .playing:
+            if !wantsPlay {
+                // Started from the PiP window / AirPlay remote (our own code only plays when wanted).
+                wantsPlay = true
+                pausedAt = nil
+            }
             isBuffering = false
             notPlayingSince = nil
             if phase != .playing {
@@ -218,7 +232,14 @@ final class LivePlayerController: ObservableObject {
             isBuffering = true
         case .paused:
             // With automaticallyWaitsToMinimizeStalling = false a dry buffer pauses the player;
-            // the watchdog resumes it.
+            // the watchdog resumes it. A pause with data still buffered while the PiP window (or an
+            // AirPlay remote) is the UI is the user's: honour it, or the watchdog restarts playback
+            // within a second.
+            if wantsPlay, isPiPActive || player.isExternalPlaybackActive,
+               let item = player.currentItem, item.status == .readyToPlay, !item.isPlaybackBufferEmpty {
+                wantsPlay = false
+                pausedAt = Date()
+            }
             isBuffering = wantsPlay && player.currentItem != nil
             if !wantsPlay, phase == .playing || phase == .loading { phase = .paused }
         @unknown default:
@@ -284,6 +305,9 @@ final class LivePlayerController: ObservableObject {
     /// Called by `LivePlayerSurface` with its layer; (re)creates the PiP controller for it.
     func attach(layer: AVPlayerLayer) {
         guard LivePlayerController.supportsPiP, layer !== pipLayer else { return }
+        // Replacing an active controller would end its PiP window without a delegate callback
+        // (isPiPActive would stay true); re-attach once that window has closed.
+        if pip?.isPictureInPictureActive == true { return }
         pipLayer = layer
         pipPossibleObservation = nil
         pip?.delegate = nil
@@ -307,6 +331,51 @@ final class LivePlayerController: ObservableObject {
             pip.stopPictureInPicture()
         } else if pip.isPictureInPicturePossible {
             pip.startPictureInPicture()
+        }
+    }
+
+    private func pipActiveChanged(_ active: Bool) {
+        guard active != isPiPActive else { return }
+        isPiPActive = active
+        if active {
+            // The PiP window may outlive the room page (popped while in PiP).
+            LivePiPKeeper.retain(self)
+            return
+        }
+        LivePiPKeeper.release(self)
+        if owner == nil {
+            // 关闭 / 还原 after the room was popped: nothing to show it in, so no more audio.
+            stop()
+        } else {
+            onPiPStopped?()
+        }
+    }
+
+    /// Another room started playing: pause this one and close its PiP window.
+    fileprivate func yieldToOtherRoom() {
+        if wantsPlay { pause() }
+        if let pip, pip.isPictureInPictureActive { pip.stopPictureInPicture() }
+    }
+}
+
+/// Keeps a live player alive while its PiP window outlives the room page that created it, and makes
+/// sure at most one room plays.
+@MainActor
+enum LivePiPKeeper {
+    private static var kept: [ObjectIdentifier: LivePlayerController] = [:]
+
+    static func retain(_ controller: LivePlayerController) {
+        kept[ObjectIdentifier(controller)] = controller
+    }
+
+    static func release(_ controller: LivePlayerController) {
+        kept[ObjectIdentifier(controller)] = nil
+    }
+
+    /// `controller` is about to play: every other room still in PiP gives way.
+    static func yield(to controller: LivePlayerController) {
+        for other in kept.values where other !== controller {
+            other.yieldToOtherRoom()
         }
     }
 }

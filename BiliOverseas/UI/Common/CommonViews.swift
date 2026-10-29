@@ -62,6 +62,35 @@ struct SafariView: UIViewControllerRepresentable {
     let url: URL
     func makeUIViewController(context: Context) -> SFSafariViewController { SFSafariViewController(url: url) }
     func updateUIViewController(_ vc: SFSafariViewController, context: Context) {}
+
+    /// `SFSafariViewController` raises (crashes the app) for anything but http / https.
+    static func canOpen(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
+    }
+}
+
+/// Destination of a `.web` route Safari cannot show (`bilibili://…`, relative links …): offers to
+/// hand the link to the system instead.
+struct ExternalLinkView: View {
+    let url: URL
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "link").font(.system(size: 40)).foregroundStyle(.tertiary)
+            Text("此链接无法在应用内打开").font(.subheadline).foregroundStyle(.secondary)
+            Text(verbatim: url.absoluteString)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+            Button("用其他应用打开") { openURL(url) }
+                .buttonStyle(.bordered)
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 }
 
 /// Centered error / empty placeholder with retry.

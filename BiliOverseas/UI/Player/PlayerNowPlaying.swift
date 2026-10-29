@@ -61,7 +61,8 @@ final class PlayerNowPlayingCenter {
         if !item.ownerName.isEmpty { info[MPMediaItemPropertyArtist] = item.ownerName }
         if controller.duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = controller.duration }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = controller.displayTime()
-        info[MPNowPlayingInfoPropertyPlaybackRate] = controller.status == .playing ? controller.effectiveRate : 0.0
+        // The rate AVPlayer really runs at (HLS is capped at 2×), so the lock-screen clock does not drift.
+        info[MPNowPlayingInfoPropertyPlaybackRate] = controller.status == .playing ? Double(controller.playerRate) : 0.0
         info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = controller.rate
         info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.video.rawValue
         if let artwork { info[MPMediaItemPropertyArtwork] = artwork }

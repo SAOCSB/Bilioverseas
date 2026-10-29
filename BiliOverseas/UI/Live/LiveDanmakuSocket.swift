@@ -226,6 +226,10 @@ final class LiveDanmakuSocket {
     private var generation = 0
     private var hostIndex = 0
     private var failures = 0
+    /// When the current connection was authenticated. The backoff only resets once a connection
+    /// stayed up for a while: a server that accepts the auth and drops the socket right away
+    /// must not cause a reconnect every second forever.
+    private var connectedAt: Date?
     private var nextMessageId = 0
     private(set) var isRunning = false
 
@@ -256,6 +260,7 @@ final class LiveDanmakuSocket {
     func stop() {
         isRunning = false
         generation += 1
+        connectedAt = nil
         heartbeatTask?.cancel()
         heartbeatTask = nil
         receiveTask?.cancel()
@@ -324,7 +329,7 @@ final class LiveDanmakuSocket {
             switch frame {
             case .authReply(let ok):
                 if ok {
-                    failures = 0
+                    connectedAt = Date()
                     onEvent?(.connected)
                     startHeartbeat(generation: gen)
                 } else {
@@ -372,6 +377,8 @@ final class LiveDanmakuSocket {
         receiveTask?.cancel()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
+        if let at = connectedAt, Date().timeIntervalSince(at) >= 60 { failures = 0 }
+        connectedAt = nil
         failures += 1
         hostIndex += 1
         if failures > LiveDanmakuSocket.maxFailures {

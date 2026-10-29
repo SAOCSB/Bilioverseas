@@ -58,20 +58,29 @@ struct SmartSkipSettings: SettingsGroup {
 struct FeedFilterSettings: SettingsGroup {
     /// Remove ad / commercial cards (goto=ad, business_info, 创作推广 …) from feeds.
     var blockAdCards: Bool = true
-    /// Also hide normal videos that look like paid promotions (恰饭/商单 keywords, cooperation flags).
+    /// Also hide normal videos that look like paid promotions (恰饭/商单 keywords, cooperation flags,
+    /// goods-attached dynamics). Heuristic, so off by default — see `FeedPromotionDetector`.
     var blockPromotedVideos: Bool = false
-    /// Hide live-room and bangumi/course cards mixed into the recommend feed.
-    var blockLiveCards: Bool = false
+    /// Hide live-room cards mixed into the home recommend feed (on by default: features.md §10.1
+    /// "OURS" drops live from the feed unless the user opts in).
+    var blockLiveCards: Bool = true
+    /// Hide bangumi / film / course cards mixed into the home recommend feed.
     var blockPGCCards: Bool = false
-    /// Title keywords (plain text, or `/regex/`).
+    /// Title keywords: plain text (case-insensitive substring), or `/regex/` (case-insensitive).
     var blockedKeywords: [String] = []
-    /// UP names or mids to hide.
+    /// UP names (exact, case-insensitive) or mids (`12345`, `UID:12345`) to hide.
     var blockedUploaders: [String] = []
-    /// Hide videos shorter than this many seconds (0 = off).
+    /// Hide videos shorter than this many seconds (0 = off). Unknown durations are never hidden.
     var minDuration: Int = 0
-    /// Never filter videos from UPs you follow.
+    /// Hide videos whose likes / views is below this percentage (0 = off; PiliPlus 0…4 %).
+    /// Only applied when both counts are known (> 0), i.e. mostly web recommend / popular / ranking.
+    var minLikeRatio: Int = 0
+    /// Hide videos with fewer plays than this (0 = off; PiliPlus 50 / 100 / 500 / 1000). Only when known.
+    var minPlayCount: Int = 0
+    /// Never filter videos from UPs you follow (explicitly blocked UPs and ad cards excepted).
     var exemptFollowed: Bool = true
-    /// Also apply keyword/UP filters to popular, ranking, search and related lists.
+    /// Also apply the user rules (keywords, UPs, 恰饭, duration, likes, plays) to popular, ranking,
+    /// search and related lists. Off = home recommend only. Ad-card blocking ignores this switch.
     var applyToAllLists: Bool = true
 }
 
@@ -90,34 +99,58 @@ enum DanmakuArea: Double, Codable, CaseIterable, Identifiable {
 }
 
 struct DanmakuSettings: SettingsGroup {
+    /// 「弹幕开关」
     var enabled: Bool = true
-    /// 0.1 … 1.0
-    var opacity: Double = 0.85
-    /// Multiplier on the base font size, 0.5 … 2.0
+    /// 「不透明度」 applied to the whole danmaku layer, 0 … 1 (step 0.01).
+    var opacity: Double = 1.0
+    /// 「字体大小」 multiplier on the 15 pt base font, 0.5 … 2.5.
     var fontScale: Double = 1.0
-    var bold: Bool = true
-    /// Outline width in points, 0 … 3
-    var strokeWidth: Double = 1.0
+    /// 「全屏字体大小」 multiplier used while the player is fullscreen, 0.5 … 2.5.
+    var fontScaleFullscreen: Double = 1.2
+    /// 「字体粗细」 index 0 … 8 = w100 … w900 (UI shows index + 1). Default 5 = w600.
+    var fontWeight: Int = 5
+    /// Convenience switch over `fontWeight` (on = semibold or heavier). Not persisted on its own.
+    var bold: Bool {
+        get { fontWeight >= 5 }
+        set { fontWeight = newValue ? max(fontWeight, 5) : min(fontWeight, 3) }
+    }
+    /// 「描边粗细」 black outline width in points, 0 … 5 (step 0.5).
+    var strokeWidth: Double = 1.5
+    /// 「弹幕行高」 track height = font size × lineHeight, 1.0 … 3.0.
+    var lineHeight: Double = 1.6
+    /// 「显示区域」 fraction of the player height used by danmaku tracks.
     var area: DanmakuArea = .half
-    /// Seconds a scrolling danmaku takes to cross the screen (smaller = faster), 3 … 16
+    /// 「滚动弹幕时长」 seconds a scrolling danmaku takes to cross the screen (smaller = faster), 1 … 50.
     var scrollDuration: Double = 7.0
-    /// Seconds top/bottom danmaku stay, 2 … 10
+    /// 「静态弹幕时长」 seconds top/bottom danmaku stay, 1 … 50.
     var fixedDuration: Double = 4.0
     var hideScroll: Bool = false
     var hideTop: Bool = false
     var hideBottom: Bool = false
+    /// 「彩色」 block: hides every non-white danmaku (incl. VIP gradient ones).
     var hideColorful: Bool = false
+    /// 「高级」 block: modes 7 (positioned), 8 (code) and 9 (BAS). They are not rendered yet.
     var hideAdvanced: Bool = true
-    /// Merge identical danmaku sent within a short window.
-    var mergeDuplicates: Bool = true
-    /// Official "智能云屏蔽" level (DanmakuElem.weight threshold), 0 … 10
+    /// 「合并重复弹幕」 identical (normalised) content within `mergeWindow` seconds shows once with a count.
+    var mergeDuplicates: Bool = false
+    /// Merge window in seconds, measured from the first occurrence.
+    var mergeWindow: Double = 20
+    /// Official "智能云屏蔽" level: drop danmaku whose `weight` is below it, 0 (off) … 11.
     var cloudBlockLevel: Int = 0
     /// Maximum danmaku on screen at once (0 = unlimited).
     var maxOnScreen: Int = 0
-    /// Plain keywords, or `/regex/`.
+    /// Plain keywords (case-insensitive substring), or `/regex/` (case-insensitive).
     var blockedKeywords: [String] = []
-    /// Sender midHash values.
+    /// Sender midHash values (`crc32(uid)` lower-case hex, as in `DanmakuElem.mid_hash`).
     var blockedUsers: [String] = []
-    /// Allow scrolling danmaku to overlap when tracks are full (dense mode).
+    /// Optional display label (usually the UID the user typed) for each blocked midHash.
+    var blockedUserLabels: [String: String] = [:]
+    /// 「海量弹幕」: when every track is busy, overlap scrolling danmaku instead of dropping them.
     var allowOverlap: Bool = false
+    /// 「固定转滚动」: top/bottom danmaku that cannot be placed (or are wider than the view) scroll instead.
+    var static2Scroll: Bool = false
+    /// 「滚动弹幕固定速度」: every scrolling danmaku moves at `viewWidth / scrollDuration`.
+    var scrollFixedVelocity: Bool = false
+    /// 「显示会员彩色弹幕」: VIP gradient danmaku get a gradient outline.
+    var showVipColorful: Bool = true
 }

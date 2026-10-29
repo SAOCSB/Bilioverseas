@@ -301,9 +301,8 @@ struct H1ResponseParser {
                                 continue // 100-continue / 103 early hints: wait for the final response
                             }
                             try begin(parsed)
-                            if let b = body { events.append(.body(b)); body = nil }
                             events.append(.head(parsed))
-                            break
+                            break // leaves the head-scanning loop; the outer loop continues with the body state
                         }
                         buffer.append(b)
                         currentLineLength = 0

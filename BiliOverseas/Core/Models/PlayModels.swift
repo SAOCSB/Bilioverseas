@@ -93,6 +93,12 @@ struct PlayInfo {
     /// PGC: preview-only episode (试看) / DRM protected.
     var isPreview: Bool = false
     var isDRM: Bool = false
+    /// UGC charging video that only offers a trial clip (`accept_description` contains "试看").
+    var isTrial: Bool = false
+    /// PGC opening / ending markers (`video_info.clip_info_list`), seconds.
+    var clips: [PGCClipInfo] = []
+    /// `accept_description[]` verbatim (parallel to `accept_quality`).
+    var acceptDescriptions: [String] = []
 
     var isDash: Bool { !videos.isEmpty }
 }

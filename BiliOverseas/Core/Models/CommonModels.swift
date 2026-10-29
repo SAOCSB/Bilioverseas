@@ -52,6 +52,8 @@ struct VideoCard: Identifiable, Hashable {
     var adSignals: [String] = []
     /// Number of parts (分P) when known.
     var pageCount: Int = 0
+    /// Zone / partition name (`tname`) when known.
+    var zone: String = ""
 
     init(id: String) { self.id = id }
 

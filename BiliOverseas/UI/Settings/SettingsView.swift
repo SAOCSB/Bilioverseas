@@ -87,6 +87,12 @@ struct SettingsView: View {
             SettingsValuePicker(title: "首页列数", selection: $settings.general.feedColumns, options: [1, 2]) { n in
                 n <= 1 ? "单列" : "双列"
             }
+            Picker("默认首页", selection: $settings.general.defaultHomeTab) {
+                ForEach(Array(HomeTopTab.settingOrder.enumerated()), id: \.offset) { index, tab in
+                    Text(verbatim: tab.title).tag(index)
+                }
+            }
+            .pickerStyle(.menu)
             SettingsToggleRow(title: "省流量封面", subtitle: "加载较小尺寸的封面和头像，节省流量",
                               isOn: $settings.general.compactImages)
         } header: {

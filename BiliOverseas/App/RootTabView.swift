@@ -37,6 +37,9 @@ struct RootTabView: View {
             .tag(MainTab.mine)
         }
         .overlay { ToastOverlay() }
+        .onReceive(NotificationCenter.default.publisher(for: .homeAvatarTapped)) { _ in
+            tab = .mine
+        }
     }
 
     /// Re-tapping the current tab pops to its root, like the official client.

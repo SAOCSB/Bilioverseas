@@ -50,12 +50,12 @@ private struct PopularEntryRow: View {
                 }
                 .buttonStyle(.plain)
             }
-            NavigationLink(destination: PopularWeeklyView()) {
+            NavigationLink(value: Route.popularWeekly) {
                 PopularEntryTile(title: "每周必看", systemImage: "calendar",
                                  tint: Color(red: 0.98, green: 0.4, blue: 0.4))
             }
             .buttonStyle(.plain)
-            NavigationLink(destination: PopularPreciousView()) {
+            NavigationLink(value: Route.popularPrecious) {
                 PopularEntryTile(title: "入站必刷", systemImage: "star.fill",
                                  tint: Color.biliPink)
             }

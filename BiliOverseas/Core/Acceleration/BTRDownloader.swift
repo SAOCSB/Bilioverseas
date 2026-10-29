@@ -615,21 +615,29 @@ final class BTRDownloader: BTRDownloading, @unchecked Sendable {
     private let autoFlag = BTRFlag()
     private let lock = NSLock()
     private var tracks: [BTRTrack] = []
-    private var banLists: [String: BTRBanList] = [:]
+    private var routes = Set<String>()
+    private let banRegistry: BTRBanRegistry
+    private var banHandler: ((_ host: String, _ kind: BTRBanKind) -> Void)?
     private var operations: [ObjectIdentifier: BTROperation] = [:]
     private var cancelled = false
     private var unsubscribe: (() -> Void)?
 
-    /// Called when the ban list drops a node or an address (for user notices: "已停用这个 CDN 节点 …").
-    var onBan: ((_ host: String, _ kind: BTRBanKind) -> Void)?
+    /// Called when the ban list of one of this downloader's routes drops a node or an address (for user notices:
+    /// "已停用这个 CDN 节点 — {host} 两次没有返回任何数据，这个视频接下来不再使用它。").
+    var onBan: ((_ host: String, _ kind: BTRBanKind) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return banHandler }
+        set { lock.lock(); banHandler = newValue; lock.unlock() }
+    }
 
+    /// `bans`: where ban lists live (one per route, kept across sessions of the same video).
     init(config: @escaping () -> BTRConfig, client: MediaHTTPClient, auto: AutoConcurrencyController?,
-         clock: MonotonicClock = SystemClock.shared, tuning: BTRTuning = .standard) {
+         clock: MonotonicClock = SystemClock.shared, tuning: BTRTuning = .standard, bans: BTRBanRegistry = .shared) {
         configProvider = config
         self.client = client
         self.auto = auto
         self.clock = clock
         self.tuning = tuning
+        banRegistry = bans
         let flag = autoFlag
         let initial = Self.resolve(config(), auto: auto, flag: flag)
         pool = BTRSlotPool(limit: initial.concurrency, clock: clock, onChange: { [weak auto] active, limit, queued in
@@ -637,6 +645,14 @@ final class BTRDownloader: BTRDownloading, @unchecked Sendable {
         })
         // Every downloader follows the controller's level at once.
         unsubscribe = auto?.subscribe { [weak self] _ in self?.applyLimit() }
+        bans.observe(self) { [weak self] route, host, kind in
+            guard let self else { return }
+            self.lock.lock()
+            let mine = self.routes.contains(route)
+            let handler = self.banHandler
+            self.lock.unlock()
+            if mine { handler?(host, kind) }
+        }
     }
 
     deinit {
@@ -663,14 +679,9 @@ final class BTRDownloader: BTRDownloading, @unchecked Sendable {
     // MARK: Tracks
 
     func makeTrack(kind: MediaKind, urls: [String], routeKey: String) -> BTRTrackHandle {
+        let bans = banRegistry.banList(for: routeKey)
         lock.lock()
-        let bans: BTRBanList
-        if let existing = banLists[routeKey] {
-            bans = existing
-        } else {
-            bans = BTRBanList(onBan: { [weak self] host, _, kind in self?.onBan?(host, kind) })
-            banLists[routeKey] = bans
-        }
+        routes.insert(routeKey)
         lock.unlock()
         let provider = configProvider
         let track = BTRTrack(kind: kind, urls: urls, routeKey: routeKey, bans: bans, mode: { provider().mode },
@@ -684,8 +695,9 @@ final class BTRDownloader: BTRDownloading, @unchecked Sendable {
     /// The ban list shared by the tracks of `routeKey` (diagnostics / tests).
     func banList(routeKey: String) -> BTRBanList? {
         lock.lock()
-        defer { lock.unlock() }
-        return banLists[routeKey]
+        let known = routes.contains(routeKey)
+        lock.unlock()
+        return known ? banRegistry.banList(for: routeKey) : nil
     }
 
     // MARK: BTRDownloading

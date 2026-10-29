@@ -15,11 +15,14 @@ struct BTRURLParts {
     var route: String
 }
 
-enum BTRURLCache {
-    private static let lock = NSLock()
-    private static var cache: [String: BTRURLParts] = [:]
+final class BTRURLCache: @unchecked Sendable {
+    private static let shared = BTRURLCache()
+    private let lock = NSLock()
+    private var cache: [String: BTRURLParts] = [:]
 
-    static func parts(_ url: String) -> BTRURLParts {
+    static func parts(_ url: String) -> BTRURLParts { shared.lookup(url) }
+
+    private func lookup(_ url: String) -> BTRURLParts {
         lock.lock()
         if let hit = cache[url] {
             lock.unlock()
@@ -40,6 +43,50 @@ enum BTRURLCache {
         cache[url] = parsed
         lock.unlock()
         return parsed
+    }
+}
+
+/// Ban lists by route (video + part). BTR keeps one per video across restarts of its playback and resets it when
+/// the video changes; this keeps the most recent `capacity` routes, so a new session of the same video (quality
+/// change, reload) keeps what was learnt.
+final class BTRBanRegistry: @unchecked Sendable {
+    static let shared = BTRBanRegistry()
+
+    private let capacity: Int
+    private let lock = NSLock()
+    private var lists: [(route: String, list: BTRBanList)] = []
+    private var listeners: [ObjectIdentifier: (weak: AnyObject?, call: (String, String, BTRBanKind) -> Void)] = [:]
+
+    init(capacity: Int = 4) { self.capacity = max(1, capacity) }
+
+    /// The list of `routeKey`, created on first use (most recent first; the oldest route is dropped).
+    func banList(for routeKey: String) -> BTRBanList {
+        lock.lock()
+        defer { lock.unlock() }
+        if let i = lists.firstIndex(where: { $0.route == routeKey }) {
+            let entry = lists.remove(at: i)
+            lists.insert(entry, at: 0)
+            return entry.list
+        }
+        let list = BTRBanList(onBan: { [weak self] host, _, kind in self?.report(routeKey, host, kind) })
+        lists.insert((routeKey, list), at: 0)
+        if lists.count > capacity { lists.removeLast(lists.count - capacity) }
+        return list
+    }
+
+    /// `owner` is told about every new ban (`routeKey`, host, kind) while it lives.
+    func observe(_ owner: AnyObject, _ call: @escaping (String, String, BTRBanKind) -> Void) {
+        lock.lock()
+        listeners = listeners.filter { $0.value.weak != nil }
+        listeners[ObjectIdentifier(owner)] = (owner, call)
+        lock.unlock()
+    }
+
+    private func report(_ route: String, _ host: String, _ kind: BTRBanKind) {
+        lock.lock()
+        let calls = listeners.values.filter { $0.weak != nil }.map(\.call)
+        lock.unlock()
+        for c in calls { c(route, host, kind) }
     }
 }
 

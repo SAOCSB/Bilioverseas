@@ -377,7 +377,7 @@ final class LiveDanmakuSocket {
         receiveTask?.cancel()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
-        if let at = connectedAt, Date().timeIntervalSince(at) >= 60 { failures = 0 }
+        if let at = connectedAt, Date().timeIntervalSince(at) >= 15 { failures = 0 }
         connectedAt = nil
         failures += 1
         hostIndex += 1

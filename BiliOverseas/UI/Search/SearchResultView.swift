@@ -280,8 +280,10 @@ private struct SearchPaneContainer<Item: Identifiable, Content: View>: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .id(ObjectIdentifier(list))
         .task(id: SearchPaneLoadKey(list: ObjectIdentifier(list), active: isActive)) {
-            guard isActive else { return }
             let id = ObjectIdentifier(list)
+            // Once per list: an empty or failed tab is not re-requested on every swipe back to it
+            // (search is risk-controlled; 重试 / searching again reload on demand).
+            guard isActive, loadedList != id else { return }
             await list.loadIfNeeded()
             if !Task.isCancelled { loadedList = id }
         }
@@ -445,6 +447,8 @@ private struct SearchUserPane: View {
     @ObservedObject var list: PagedListModel<UserBrief>
     @ObservedObject private var auth = AuthService.shared
     let isActive: Bool
+    /// 已关注 tapped: confirm before unfollowing (as on the space page and the relation lists).
+    @State private var unfollowTarget: UserBrief?
 
     init(model: SearchResultModel, list: PagedListModel<UserBrief>, isActive: Bool) {
         _model = ObservedObject(wrappedValue: model)
@@ -473,6 +477,13 @@ private struct SearchUserPane: View {
                     }
                 }
             }
+        }
+        .confirmationDialog("确定不再关注TA吗？", isPresented: Binding(
+            get: { unfollowTarget != nil },
+            set: { if !$0 { unfollowTarget = nil } }
+        ), titleVisibility: .visible, presenting: unfollowTarget) { user in
+            Button("不再关注", role: .destructive) { Task { await model.toggleFollow(user) } }
+            Button("取消", role: .cancel) {}
         }
     }
 
@@ -504,7 +515,11 @@ private struct SearchUserPane: View {
             router.push(.login)
             return
         }
-        Task { await model.toggleFollow(user) }
+        if model.isFollowed(user) {
+            unfollowTarget = user
+        } else {
+            Task { await model.toggleFollow(user) }
+        }
     }
 }
 

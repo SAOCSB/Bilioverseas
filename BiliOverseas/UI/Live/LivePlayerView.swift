@@ -218,7 +218,7 @@ final class LivePlayerController: ObservableObject {
         switch player.timeControlStatus {
         case .playing:
             if !wantsPlay {
-                // Started from the PiP window / AirPlay remote (our own code only plays when wanted).
+                // Started from the PiP window (our own code only plays when playback is wanted).
                 wantsPlay = true
                 pausedAt = nil
             }
@@ -232,10 +232,10 @@ final class LivePlayerController: ObservableObject {
             isBuffering = true
         case .paused:
             // With automaticallyWaitsToMinimizeStalling = false a dry buffer pauses the player;
-            // the watchdog resumes it. A pause with data still buffered while the PiP window (or an
-            // AirPlay remote) is the UI is the user's: honour it, or the watchdog restarts playback
-            // within a second.
-            if wantsPlay, isPiPActive || player.isExternalPlaybackActive,
+            // the watchdog resumes it. A pause with data still buffered while the PiP window is the
+            // UI is the user's (its 暂停 / 关闭 buttons): honour it, or the watchdog restarts
+            // playback within a second.
+            if wantsPlay, isPiPActive,
                let item = player.currentItem, item.status == .readyToPlay, !item.isPlaybackBufferEmpty {
                 wantsPlay = false
                 pausedAt = Date()
@@ -372,8 +372,9 @@ enum LivePiPKeeper {
         kept[ObjectIdentifier(controller)] = nil
     }
 
-    /// `controller` is about to play: every other room still in PiP gives way.
-    static func yield(to controller: LivePlayerController) {
+    /// `controller` is about to play: every other room still in PiP gives way. The video player can
+    /// pass nil when it starts, so a live PiP window never plays over a video.
+    static func yield(to controller: LivePlayerController?) {
         for other in kept.values where other !== controller {
             other.yieldToOtherRoom()
         }

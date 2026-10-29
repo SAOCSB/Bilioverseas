@@ -56,6 +56,8 @@ final class RankingBoardModel: ObservableObject {
     @Published private(set) var entries: [RankingZone: [RankingEntry]] = [:]
     @Published private(set) var loadingZones: Set<RankingZone> = []
     @Published private(set) var errors: [RankingZone: String] = [:]
+    /// Latest request per zone; an older (e.g. cancelled) request never overwrites a newer one.
+    private var tokens: [RankingZone: Int] = [:]
 
     init() {
         zone = RankingZone.all.first ?? .ugc(rid: 0, name: "全站")
@@ -71,7 +73,8 @@ final class RankingBoardModel: ObservableObject {
     }
 
     func load(_ z: RankingZone) async {
-        guard !loadingZones.contains(z) else { return }
+        let token = (tokens[z] ?? 0) + 1
+        tokens[z] = token
         loadingZones.insert(z)
         errors[z] = nil
         do {
@@ -82,6 +85,7 @@ final class RankingBoardModel: ObservableObject {
             case .pgc(let seasonType, _):
                 cards = try await BangumiAPI.rank(seasonType: seasonType)
             }
+            guard tokens[z] == token else { return }
             let allows = FeedFilter.liveFilter(scope: .ranking)
             var seen = Set<String>()
             var list: [RankingEntry] = []
@@ -91,6 +95,7 @@ final class RankingBoardModel: ObservableObject {
             }
             entries[z] = list
         } catch {
+            guard tokens[z] == token else { return }
             if !ListMapping.isCancellation(error) {
                 if entries[z] == nil {
                     errors[z] = error.localizedDescription

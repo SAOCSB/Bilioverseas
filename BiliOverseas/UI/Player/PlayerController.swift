@@ -1328,6 +1328,8 @@ final class PlayerController: ObservableObject {
             seekToken += 1
             isSeeking = true
             seekTarget = target
+            // No stale audio from the old buffer meanwhile (the play intent is kept; not an external pause).
+            player.pause()
             lastKnownPosition = target
             currentTime = target
             timeline.update(time: target, duration: total, buffered: 0)
@@ -1580,11 +1582,14 @@ final class PlayerController: ObservableObject {
     }
 
     private func applyDeviceOrientation(_ orientation: UIDeviceOrientation) {
-        guard AppSettings.shared.player.autoFullscreenOnRotate, !overlay.isLocked, item != nil,
+        // Rotation rules are phone-only (an iPad rotates its whole UI freely).
+        guard UIDevice.current.userInterfaceIdiom == .phone,
+              AppSettings.shared.player.autoFullscreenOnRotate, !overlay.isLocked, item != nil,
               UIApplication.shared.applicationState == .active, !isPiPActive else { return }
         if case .failed = status { return }
         if isFullscreen {
-            if orientation == .portrait, fullscreenByRotation, !isVerticalVideo { exitFullscreen() }
+            // Not while a sheet is open over the fullscreen player (e.g. typing in 发弹幕): exiting would close it.
+            if orientation == .portrait, fullscreenByRotation, !isVerticalVideo, overlay.sheet == nil { exitFullscreen() }
         } else if containerVisible, orientation.isLandscape, !isVerticalVideo, overlay.sheet == nil,
                   !PlayerFullscreenPresenter.isModalPresented() {
             enterFullscreen(byRotation: true, deviceOrientation: orientation)

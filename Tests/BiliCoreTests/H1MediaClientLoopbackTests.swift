@@ -631,6 +631,128 @@ final class H1MediaClientLoopbackTests: XCTestCase {
         XCTAssertTrue(drained)
     }
 
+    // MARK: - Pool hygiene, timeouts, edge responses
+
+    private func expectError(_ client: MediaHTTPClient, _ path: String, _ range: ByteRange,
+                             received: inout Data) async -> Error? {
+        do {
+            for try await event in client.get(server.url(path), range: range, highPriority: false) {
+                if case .data(let d) = event { received.append(d) }
+            }
+            return nil
+        } catch {
+            return error
+        }
+    }
+
+    func testStaleResetPooledConnectionIsRetriedTransparently() async throws {
+        let client = makeClient()
+        _ = try await fetch(client, "/stale-rst", range(0, count: 10_000))
+        let second = try await fetch(client, "/file", range(321, count: 30_000))
+        XCTAssertEqual(second.status, 206)
+        XCTAssertTrue(second.body == LoopbackCDN.content(offset: 321, count: 30_000))
+        XCTAssertEqual(server.accepted, 2)
+    }
+
+    func testServerClosingAnIdleConnectionIsNoticedAndNotReused() async throws {
+        let client = makeClient()
+        _ = try await fetch(client, "/idle-close", range(0, count: 1000))
+        let dropped = await waitUntil { client.openConnectionCount == 0 }
+        XCTAssertTrue(dropped, "an idle connection the server closed must leave the pool")
+        let r = try await fetch(client, "/file", range(0, count: 1000))
+        XCTAssertTrue(r.body == LoopbackCDN.content(offset: 0, count: 1000))
+        XCTAssertEqual(server.accepted, 2)
+    }
+
+    func testNoResponseTripsTheBackstopAsConnectFailed() async throws {
+        let client = makeClient()
+        client.responseTimeout = 0.3
+        var body = Data()
+        let error = await expectError(client, "/no-response", range(0, count: 100), received: &body)
+        guard case .connectFailed? = error as? MediaFetchError else { return XCTFail("got \(String(describing: error))") }
+        let closed = await waitUntil { client.openConnectionCount == 0 }
+        XCTAssertTrue(closed)
+    }
+
+    func testMidBodyStallTripsTheBackstopAsConnectionClosed() async throws {
+        let client = makeClient()
+        client.responseTimeout = 0.3
+        var body = Data()
+        let error = await expectError(client, "/stall", range(100, count: 200_000), received: &body)
+        XCTAssertEqual(error as? MediaFetchError, .connectionClosed)
+        XCTAssertTrue(body == LoopbackCDN.content(offset: 100, count: 100_000))
+        let closed = await waitUntil { client.openConnectionCount == 0 }
+        XCTAssertTrue(closed)
+    }
+
+    func testSlowConsumerDoesNotTripTheBackstop() async throws {
+        let client = makeClient()
+        client.responseTimeout = 0.3
+        let size = 8 << 20
+        var it = client.get(server.url("/file"), range: range(0, count: size), highPriority: false).makeAsyncIterator()
+        guard case .head? = try await it.next() else { return XCTFail("missing head") }
+        try await Task.sleep(nanoseconds: 1_000_000_000) // > 3 × responseTimeout without demand
+        var body = Data()
+        while let event = try await it.next() {
+            if case .data(let d) = event { body.append(d) }
+        }
+        XCTAssertTrue(body == LoopbackCDN.content(offset: 0, count: size))
+    }
+
+    func testStrayBytesAfterTheResponseMakeTheConnectionUnreusable() async throws {
+        let client = makeClient()
+        let r = try await fetch(client, "/junk-after", range(50, count: 5000))
+        XCTAssertTrue(r.body == LoopbackCDN.content(offset: 50, count: 5000))
+        _ = try await fetch(client, "/file", range(0, count: 100))
+        XCTAssertEqual(server.accepted, 2, "a connection with unread bytes must never be reused")
+    }
+
+    func testNoContentIsAHeadOnlyResponseAndKeepsTheConnection() async throws {
+        let client = makeClient()
+        let r = try await fetch(client, "/no-content", range(0, count: 100))
+        XCTAssertEqual(r.status, 204)
+        XCTAssertTrue(r.body.isEmpty)
+        _ = try await fetch(client, "/file", range(0, count: 100))
+        XCTAssertEqual(server.accepted, 1)
+    }
+
+    func testCancelledWaiterDoesNotBlockTheQueue() async throws {
+        let client = makeClient(maxConnectionsPerHost: 1)
+        let first = Task { try await self.fetch(client, "/slow", self.range(0, count: 160_000)) }
+        let started = await waitUntil { self.server.bodyBytesSent > 0 }
+        XCTAssertTrue(started)
+        let queued = Task { try await self.fetch(client, "/file", self.range(0, count: 100)) }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        queued.cancel()
+        let third = try await fetch(client, "/file", range(7, count: 1000))
+        XCTAssertTrue(third.body == LoopbackCDN.content(offset: 7, count: 1000))
+        _ = try await first.value
+        _ = try? await queued.value
+        XCTAssertEqual(server.accepted, 1)
+        XCTAssertEqual(client.openConnectionCount, 1)
+    }
+
+    func testDroppedStreamsLeakNoConnections() async throws {
+        let client = makeClient(maxConnectionsPerHost: 2)
+        for i in 0 ..< 6 { _ = client.get(server.url("/slow"), range: range(i * 1000, count: 1 << 20), highPriority: false) }
+        let drained = await waitUntil { client.openConnectionCount == 0 }
+        XCTAssertTrue(drained, "open=\(client.openConnectionCount)")
+        let r = try await fetch(client, "/file", range(0, count: 100))
+        XCTAssertEqual(r.status, 206)
+    }
+
+    func testPreconnectToADeadHostLeavesNothingOpen() async throws {
+        let dead = try await LoopbackCDN.start()
+        let port = dead.port
+        dead.stop()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let client = makeClient()
+        client.preconnect(hosts: ["http://127.0.0.1:\(port)"])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let closed = await waitUntil { client.openConnectionCount == 0 }
+        XCTAssertTrue(closed)
+    }
+
     // MARK: - URLSession fallback
 
     func testURLSessionClientFetchesExactBytesAndCancels() async throws {

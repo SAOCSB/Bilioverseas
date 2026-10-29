@@ -58,7 +58,6 @@ final class HomeTabModels: ObservableObject {
 struct HomeView: View {
     @EnvironmentObject private var router: TabRouter
     @StateObject private var models = HomeTabModels()
-    @ObservedObject private var hotWords = SearchHotWordsModel.shared
     @ObservedObject private var auth = AuthService.shared
     @State private var selection: HomeTopTab
 
@@ -106,7 +105,7 @@ struct HomeView: View {
             Button {
                 router.push(.searchHome)
             } label: {
-                searchCapsule
+                HomeSearchCapsule(hotWords: SearchHotWordsModel.shared)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("搜索")
@@ -128,11 +127,35 @@ struct HomeView: View {
         }
     }
 
+    private func avatarTapped() {
+        if auth.isLoggedIn {
+            NotificationCenter.default.post(name: .homeAvatarTapped, object: nil)
+        } else {
+            router.push(.login)
+        }
+    }
+
+    /// Loads 热搜 once and rotates the placeholder every few seconds while 首页 is visible.
+    private func rotatePlaceholder() async {
+        let hotWords = SearchHotWordsModel.shared
+        await hotWords.loadIfNeeded()
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if Task.isCancelled { break }
+            hotWords.advancePlaceholder()
+        }
+    }
+}
+
+/// The search capsule with the rotating 热搜 placeholder (its own view so only it re-renders).
+private struct HomeSearchCapsule: View {
+    @ObservedObject var hotWords: SearchHotWordsModel
+
     private var placeholder: String {
         hotWords.placeholderWord?.showName ?? "搜索"
     }
 
-    private var searchCapsule: some View {
+    var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 14, weight: .medium))
@@ -152,24 +175,6 @@ struct HomeView: View {
         .frame(height: 32)
         .background(Color(.secondarySystemBackground), in: Capsule())
         .contentShape(Capsule())
-    }
-
-    private func avatarTapped() {
-        if auth.isLoggedIn {
-            NotificationCenter.default.post(name: .homeAvatarTapped, object: nil)
-        } else {
-            router.push(.login)
-        }
-    }
-
-    /// Loads 热搜 once and rotates the placeholder every few seconds while 首页 is visible.
-    private func rotatePlaceholder() async {
-        await hotWords.loadIfNeeded()
-        while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
-            if Task.isCancelled { break }
-            await hotWords.advancePlaceholder()
-        }
     }
 }
 
@@ -211,7 +216,7 @@ struct HomeTabStrip<Tab: Hashable>: View {
     private func tabButton(_ tab: Tab) -> some View {
         let isSelected = tab == selection
         return Button {
-            selection = tab
+            withAnimation(.easeInOut(duration: 0.25)) { selection = tab }
         } label: {
             VStack(spacing: 5) {
                 Text(title(tab))

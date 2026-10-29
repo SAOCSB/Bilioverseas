@@ -666,6 +666,7 @@ enum DynamicRichTextBuilder {
         return out
     }
 
+    @MainActor
     static func emoji(url: String, side: CGFloat) async -> UIImage? {
         let key = "\(url)@\(Int(side))" as NSString
         if let img = emojiCache.object(forKey: key) { return img }
@@ -675,6 +676,7 @@ enum DynamicRichTextBuilder {
         return img
     }
 
+    @MainActor
     static func resized(_ image: UIImage, side: CGFloat) -> UIImage {
         let w = max(image.size.width, 1), h = max(image.size.height, 1)
         let scale = side / max(w, h)

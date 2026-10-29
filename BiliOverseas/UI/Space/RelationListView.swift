@@ -16,13 +16,13 @@ struct RelationListView: View {
     init(mid: Int64, kind: RelationKind) {
         self.mid = mid
         self.kind = kind
-        _list = StateObject(wrappedValue: PagedListModel<UserBrief> { cursor in
+        _list = StateObject(wrappedValue: PagedListModel<UserBrief>(fetch: { cursor in
             let page = ListCursor.page(cursor)
             switch kind {
             case .following: return try await SpaceAPI.followings(mid: mid, page: page)
             case .fans: return try await SpaceAPI.fans(mid: mid, page: page)
             }
-        })
+        }))
     }
 
     private var isOwn: Bool { auth.isLoggedIn && auth.mid == mid }

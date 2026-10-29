@@ -10,7 +10,7 @@ final class BangumiHomeModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var timelineError: String?
     @Published private(set) var rankError: String?
-    private var hasLoaded = false
+    @Published private(set) var hasLoaded = false
 
     /// Selected day, defaulting to today.
     var selectedDay: BangumiDay? {
@@ -97,7 +97,18 @@ struct BangumiHomeView: View {
 
     private var followsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HomeSectionHeader("我的追番")
+            HomeSectionHeader("我的追番") {
+                NavigationLink(value: Route.bangumiFollows) {
+                    HStack(spacing: 2) {
+                        Text("查看全部")
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 10) {
                     ForEach(model.follows) { card in
@@ -119,8 +130,14 @@ struct BangumiHomeView: View {
             if model.days.isEmpty {
                 if let error = model.timelineError {
                     BangumiInlineError(message: error) { Task { await model.reload() } }
-                } else {
+                } else if model.isLoading || !model.hasLoaded {
                     ProgressView()
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 24)
+                } else {
+                    Text("暂无新番时间表")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 24)
                 }

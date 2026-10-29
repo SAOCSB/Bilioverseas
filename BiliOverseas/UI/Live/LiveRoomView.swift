@@ -141,6 +141,8 @@ final class LiveRoomModel: ObservableObject {
     @Published private(set) var isLive = false
     @Published private(set) var watchedText = ""
     @Published var showsDanmakuOverlay = true
+    /// Re-requesting play URLs after every line failed (show a spinner, not the error).
+    @Published private(set) var isRecovering = false
 
     private var socket: LiveDanmakuSocket?
     private var socketTask: Task<Void, Never>?
@@ -262,8 +264,12 @@ final class LiveRoomModel: ObservableObject {
 
     /// Every CDN line failed: the URLs are short-lived, so request fresh ones (up to 3 times).
     private func handleExhausted() {
-        guard refetchBudget > 0 else { return }
+        guard refetchBudget > 0 else {
+            isRecovering = false
+            return
+        }
         refetchBudget -= 1
+        isRecovering = true
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             await self?.refetchPlayURL(qn: nil, announce: false)
@@ -271,6 +277,7 @@ final class LiveRoomModel: ObservableObject {
     }
 
     private func refetchPlayURL(qn: Int?, announce: Bool) async {
+        defer { isRecovering = false }
         do {
             let info = try await LiveAPI.playURL(roomId: roomId, qn: qn ?? preferredQn)
             apply(info)
@@ -452,7 +459,7 @@ struct LiveRoomPlayerPanel: View {
 
     private var errorText: String? {
         if let e = model.loadError { return e }
-        if case .failed(let message) = player.phase, model.isLive { return message }
+        if case .failed(let message) = player.phase, model.isLive, !model.isRecovering { return message }
         return nil
     }
 
@@ -477,7 +484,8 @@ struct LiveRoomPlayerPanel: View {
                 .buttonStyle(.plain)
             }
             .padding()
-        } else if model.isLoading || (model.isLive && player.wantsPlay && (player.isBuffering || player.phase == .loading)) {
+        } else if model.isLoading || model.isRecovering
+                    || (model.isLive && player.wantsPlay && (player.isBuffering || player.phase == .loading)) {
             ProgressView()
                 .tint(.white)
                 .controlSize(.large)

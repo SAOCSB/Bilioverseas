@@ -163,12 +163,13 @@ enum LiveDanmakuPacket {
     }
 
     /// zlib (RFC 1950) → bytes. Apple's `COMPRESSION_ZLIB` is raw DEFLATE (RFC 1951), so the 2-byte
-    /// zlib header is stripped first; the Adler-32 trailer after the final block is ignored.
+    /// zlib header and the 4-byte Adler-32 trailer are stripped first.
     static func inflateZlib(_ input: [UInt8]) -> [UInt8]? {
         var src = input
-        if src.count >= 2, (src[0] & 0x0F) == 8, ((UInt16(src[0]) << 8) | UInt16(src[1])) % 31 == 0 {
-            let hasDictionary = (src[1] & 0x20) != 0
-            src.removeFirst(hasDictionary ? 6 : 2)
+        if src.count > 6, (src[0] & 0x0F) == 8, ((UInt16(src[0]) << 8) | UInt16(src[1])) % 31 == 0 {
+            // FDICT (preset dictionary) is never used by Bilibili; such a stream cannot be inflated.
+            if (src[1] & 0x20) != 0 { return nil }
+            src = Array(src[2..<(src.count - 4)])
         }
         guard !src.isEmpty else { return nil }
         var capacity = max(src.count * 8, 64 * 1024)

@@ -866,15 +866,14 @@ final class VideoCommentSubRepliesModel: ObservableObject, VideoCommentMutating 
     }
 
     private func load(reset: Bool) async {
-        if reset {
-            generation += 1
-            nextPage = 1
-        }
+        if reset { generation += 1 }
         let gen = generation
         isLoading = true
         errorMessage = nil
         do {
-            let page = try await ReplyAPI.subReplies(oid: oid, type: type, root: root.rpid, page: nextPage)
+            // `nextPage` changes only with a response: a failed refresh must not rewind it under the loaded pages.
+            let requested = reset ? 1 : nextPage
+            let page = try await ReplyAPI.subReplies(oid: oid, type: type, root: root.rpid, page: requested)
             guard gen == generation else { return }
             if reset { items = [] }
             if page.upperMid != 0 { upperMid = page.upperMid }
@@ -885,7 +884,7 @@ final class VideoCommentSubRepliesModel: ObservableObject, VideoCommentMutating 
             let known = Set(items.map(\.rpid))
             items.append(contentsOf: page.items.filter { !known.contains($0.rpid) })
             hasMore = page.hasMore
-            if let n = page.nextCursor.flatMap({ Int($0) }) { nextPage = n } else { nextPage += 1 }
+            nextPage = page.nextCursor.flatMap({ Int($0) }) ?? requested + 1
             if page.totalCount > 0 { totalCount = page.totalCount }
             didLoad = true
         } catch {

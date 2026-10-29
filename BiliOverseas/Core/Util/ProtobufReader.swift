@@ -55,8 +55,10 @@ struct ProtobufReader {
     }
 
     mutating func readBytes() throws -> [UInt8] {
-        let len = Int(try readVarint())
-        guard len >= 0, index + len <= end else { throw DecodeError.truncated }
+        let raw = try readVarint()
+        // Validate before converting: garbage input can carry lengths that overflow Int.
+        guard raw <= UInt64(end - index) else { throw DecodeError.truncated }
+        let len = Int(raw)
         let out = Array(bytes[index..<(index + len)])
         index += len
         return out

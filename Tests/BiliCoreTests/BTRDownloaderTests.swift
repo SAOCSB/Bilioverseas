@@ -221,13 +221,13 @@ final class BTRDownloaderTests: XCTestCase {
     func testAnExpiredDeadlineAloneDoesNotFanOut() async throws {
         let client = FakeMediaClient()
         client.defaultBehavior = .hang
-        let d = make(client, config(hosts: [hostA, hostB]), tuning: fastTuning(hedgeDelayMs: 300, firstByteMs: 10_000))
+        let d = make(client, config(hosts: [hostA, hostB]), tuning: fastTuning(hedgeDelayMs: 900, firstByteMs: 10_000))
         let track = d.makeTrack(kind: .video, urls: [btrMediaURL(hostA)], routeKey: "bv1:p1")
         let entry = now()
         let task = Task { try await fetch(d, track, range(0, 8 * 64 * KiB), deadline: { entry }) }
         await sleepMs(80)
         XCTAssertEqual(client.requests.count, 7)
-        await sleepMs(170)
+        await sleepMs(320)
         XCTAssertEqual(client.requests.count, 7, "a deadline alone does not duplicate any piece before it proves slow")
         task.cancel()
         _ = await task.result

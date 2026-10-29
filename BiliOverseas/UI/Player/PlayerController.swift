@@ -692,12 +692,14 @@ final class PlayerController: ObservableObject {
         } else if info.isTrial, target.epId == 0 {
             ToastCenter.shared.show("试看中，充电后可观看完整视频", duration: 3)
         }
-        let start = resolveStartPosition(target, info)
+        // A seek issued while playurl was loading (e.g. a chapter tap) wins over the resume position.
+        let userStart = pendingStartTime
+        let start = userStart ?? resolveStartPosition(target, info)
         lastKnownPosition = start
         if start > 0 {
             timeline.update(time: start, duration: duration, buffered: 0)
             currentTime = start
-            showResumeChip(at: start)
+            if userStart == nil { showResumeChip(at: start) }
         }
         await installStreams(position: start, generation: streamGeneration, reason: .initial)
     }

@@ -118,6 +118,9 @@ final class DanmakuOverlayView: UIView {
     /// Last raw time reported by the provider and the wall time it last changed.
     private var lastRawTime: Double?
     private var lastRawWall: CFTimeInterval = 0
+    /// Wall time and play state of the previous frame (forward-jump detection right after a pause).
+    private var lastFrameWall: CFTimeInterval = 0
+    private var lastFramePlaying = false
     /// Video time the screen currently shows.
     private var renderTime: Double = 0
     /// Danmaku with `time <= lastEmitTime` have been considered for display.
@@ -406,13 +409,18 @@ final class DanmakuOverlayView: UIView {
         }
 
         if let last = lastRawTime {
-            let expected = playing ? (wall - lastRawWall) * rate : 0
+            // The clock stood still while paused: on the first playing frame it can only have
+            // advanced by one frame interval, not by the whole pause (that hid seek+play jumps).
+            let since = lastFramePlaying ? wall - lastRawWall : wall - lastFrameWall
+            let expected = playing ? max(0, since) * rate : 0
             if raw < last - 0.3 || raw > last + expected + 1.0 {
                 jump(to: raw, wall: wall)
             }
         } else {
             jump(to: raw, wall: wall)
         }
+        lastFrameWall = wall
+        lastFramePlaying = playing
 
         var now: Double
         if raw != lastRawTime {

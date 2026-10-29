@@ -79,6 +79,9 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     // MARK: Arbitration
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        // UIKit also asks this view about recognizers of its ancestors (e.g. the page's pop gesture): leave those alone.
+        let own: [UIGestureRecognizer] = [singleTap, doubleTap, longPress, pan]
+        guard own.contains(where: { $0 === gestureRecognizer }) else { return true }
         guard let controller else { return false }
         if gestureRecognizer === singleTap { return true }
         if controller.overlay.isLocked { return false }

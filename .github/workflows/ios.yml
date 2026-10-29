@@ -1,0 +1,83 @@
+name: iOS Build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    name: Core unit tests (swift test)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: swift test
+        run: |
+          set +e
+          swift test > swift-test.log 2>&1
+          STATUS=$?
+          tail -40 swift-test.log
+          exit $STATUS
+      - name: Show errors
+        if: failure()
+        run: |
+          grep -E "error:|failed" swift-test.log | sort -u | head -300 || true
+
+  build-ipa:
+    name: Build unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build (iphoneos, unsigned)
+        run: |
+          set +e
+          xcodebuild \
+            -project BiliOverseas.xcodeproj \
+            -scheme BiliOverseas \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build > build.log 2>&1
+          STATUS=$?
+          grep -E "\*\* BUILD" build.log || tail -50 build.log
+          exit $STATUS
+      - name: Show compile errors
+        if: failure()
+        run: |
+          grep -E "error:" build.log | sort -u | head -300 || true
+      - name: Package IPA
+        run: |
+          APP=build/Build/Products/Release-iphoneos/BiliOverseas.app
+          test -d "$APP"
+          mkdir -p dist/Payload
+          cp -R "$APP" dist/Payload/
+          cd dist && zip -qry BiliOverseas-unsigned.ipa Payload && ls -lh BiliOverseas-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BiliOverseas-unsigned-ipa
+          path: dist/BiliOverseas-unsigned.ipa
+          if-no-files-found: error
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/BiliOverseas-unsigned.ipa
+          generate_release_notes: true

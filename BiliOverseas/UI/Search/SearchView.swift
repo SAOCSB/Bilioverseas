@@ -76,6 +76,7 @@ struct SearchView: View {
     @ObservedObject private var settings = AppSettings.shared
     @State private var text = ""
     @State private var suggestions: [String] = []
+    @State private var resolvingLink = false
     @State private var didAutoFocus = false
     @State private var showAllHot = false
     @State private var confirmClear = false
@@ -374,10 +375,14 @@ struct SearchView: View {
         guard !keyword.isEmpty else { return }
         // A BV / av id or a bilibili.com / b23.tv link (also inside pasted share text) opens that page instead.
         if BiliLinkParser.parse(text: keyword) != nil {
+            // A b23.tv link resolves over the network: a second submit meanwhile must not push the page twice.
+            guard !resolvingLink else { return }
+            resolvingLink = true
             fieldFocused = false
             let text = keyword
             Task {
                 let target = await BiliLinkResolver.resolve(text: text)
+                resolvingLink = false
                 router.push(target?.route ?? .search(keyword: text))
             }
             return

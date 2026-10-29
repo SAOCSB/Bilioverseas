@@ -12,8 +12,9 @@ import Foundation
 //   for a track after 6 consecutive accelerated failures (btr-core §10 / §1.6 FAILURE_LIMIT),
 // - the PrefetchPlanner, re-run on every playhead report, completion and reader detach.
 //
-// Thread-safety: one NSLock guards the mutable state. Streams are never yielded to / finished while that lock is
-// held (their termination handlers call back into the store).
+// Thread-safety: one NSLock guards the mutable state. Streams are never yielded to / finished while that lock or a
+// `SegmentFetch`'s lock is held: their termination handlers take both, and they can run inside `Task.cancel()` of a
+// reader while the runtime holds that task's status lock — which a yield resuming the same reader also needs.
 
 /// Bytes of a track that live in memory for the whole session (init + sidx, or a progressive file's head).
 struct PinnedBytes: Hashable {
@@ -101,15 +102,27 @@ final class SegmentFetch {
         return buffer
     }
 
-    /// Appends verified bytes (in file order). Returns false once cancelled / finished (the producer should stop).
+    /// Appends verified bytes (in file order, from ONE producer at a time). Returns false once cancelled / finished
+    /// (the producer should stop).
+    ///
+    /// Subscribers are yielded to AFTER the lock is released: a yield resumes a reader suspended in `next()`, which
+    /// waits for that reader task's runtime status lock, and a concurrent `Task.cancel()` of the reader holds that
+    /// lock while it runs `onTermination` → `removeSubscriber` (this lock) → deadlock. Order is kept because pieces
+    /// come from a single producer, and a new subscriber gets the buffer snapshot inside `subscribe`'s critical
+    /// section (so it is never in `targets` of a piece already in that snapshot).
     @discardableResult
     func append(_ chunk: Data) -> Bool {
         guard !chunk.isEmpty else { return true }
         lock.lock()
-        defer { lock.unlock() }
-        guard case .running = state, !cancelledFlag else { return false }
+        guard case .running = state, !cancelledFlag else {
+            lock.unlock()
+            return false
+        }
         let room = range.length - Int64(buffer.count)
-        guard room > 0 else { return true }
+        guard room > 0 else {
+            lock.unlock()
+            return true
+        }
         let piece: Data
         if Int64(chunk.count) > room {
             piece = Data(chunk.prefix(Int(room)))
@@ -117,7 +130,9 @@ final class SegmentFetch {
             piece = chunk.startIndex == 0 ? chunk : Data(chunk)
         }
         buffer.append(piece)
-        for continuation in subscribers.values { continuation.yield(piece) }
+        let targets = Array(subscribers.values)
+        lock.unlock()
+        for continuation in targets { continuation.yield(piece) }
         return true
     }
 
@@ -169,6 +184,8 @@ final class SegmentFetch {
             onEnd()
         }
         lock.lock()
+        // Safe under the lock: nobody can be waiting on this brand-new stream yet, so the yield only buffers (it never
+        // resumes a task). Doing it here keeps the snapshot ahead of every piece `append` yields after registration.
         if !buffer.isEmpty { continuation.yield(buffer) }
         switch state {
         case .running:

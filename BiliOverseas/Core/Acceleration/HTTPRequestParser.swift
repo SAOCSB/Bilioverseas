@@ -139,8 +139,11 @@ enum HTTPRangeSpec {
         let second = String(pieces[1])
         guard first.allSatisfy(\.isASCIIDigit), second.allSatisfy(\.isASCIIDigit) else { return nil }
         if first.isEmpty && second.isEmpty { return nil }
+        // Digit strings too long for Int64 are still valid syntax (RFC 9110 §14.1.2): a last-pos / suffix-length at
+        // or beyond the length means "to the end" / "the whole representation"; such a first-pos is unsatisfiable.
         if first.isEmpty {
-            guard let suffix = Int64(second), suffix > 0 else { return nil }
+            guard second.contains(where: { $0 != "0" }) else { return nil }
+            let suffix = Int64(second) ?? Int64.max
             return ByteRange(start: max(0, total - suffix), end: total - 1)
         }
         guard let start = Int64(first) else { return nil }
@@ -148,8 +151,7 @@ enum HTTPRangeSpec {
         if second.isEmpty {
             end = total - 1
         } else {
-            guard let e = Int64(second) else { return nil }
-            end = min(e, total - 1)
+            end = min(Int64(second) ?? Int64.max, total - 1)
         }
         guard start < total, end >= start else { return nil }
         return ByteRange(start: start, end: end)

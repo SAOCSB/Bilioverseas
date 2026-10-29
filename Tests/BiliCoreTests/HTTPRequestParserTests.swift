@@ -79,6 +79,16 @@ final class HTTPRequestParserTests: XCTestCase {
         XCTAssertNil(HTTPRangeSpec.resolve(nil, total: 0))
     }
 
+    /// RFC 9110 §14.1.2: positions too large for Int64 are valid syntax, not a 416.
+    func testOversizedRangeNumbers() {
+        let huge = "99999999999999999999999"
+        XCTAssertEqual(HTTPRangeSpec.resolve("bytes=10-\(huge)", total: 100), ByteRange(start: 10, end: 99))
+        XCTAssertEqual(HTTPRangeSpec.resolve("bytes=-\(huge)", total: 100), ByteRange(start: 0, end: 99))
+        XCTAssertNil(HTTPRangeSpec.resolve("bytes=\(huge)-", total: 100))
+        XCTAssertNil(HTTPRangeSpec.resolve("bytes=-000", total: 100))
+        XCTAssertEqual(HTTPRangeSpec.resolve("bytes=-007", total: 100), ByteRange(start: 93, end: 99))
+    }
+
     func testResponseHeadSerialization() {
         let head = ProxyHTTPResponseHead(status: 206, headers: [("Content-Type", "video/mp4"),
                                                                  ("Content-Range", "bytes 0-9/100"),

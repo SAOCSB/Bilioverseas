@@ -360,7 +360,8 @@ actor DanmakuSegmentLoader {
         return nil
     }
 
-    /// Cancels in-flight requests (e.g. when the player switches video).
+    /// Cancels in-flight requests (e.g. when the player switches video). Their waiters get nil
+    /// (nothing is cached and the XML fallback is not started); later loads work normally.
     func cancelAll() {
         epoch += 1
         for t in inFlight.values { t.cancel() }

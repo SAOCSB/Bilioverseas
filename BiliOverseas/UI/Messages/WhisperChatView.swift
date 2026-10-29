@@ -30,6 +30,8 @@ final class WhisperChatModel: ObservableObject {
     private var maxSeqno: Int64 = 0
     private var ackedSeqno: Int64 = 0
     private var withdrawn: Set<String> = []
+    /// Bumped by `accountChanged`: pages requested for the previous account are dropped.
+    private var generation = 0
 
     init(peer: WhisperPeer) {
         self.peer = peer
@@ -58,12 +60,31 @@ final class WhisperChatModel: ObservableObject {
         if peerFace.isEmpty { peerFace = user.face }
     }
 
+    /// Another account signed in (or the user signed out): this conversation belonged to the previous one.
+    /// Drops everything shown; `loadIfNeeded` loads it again for the current account.
+    func accountChanged() {
+        generation += 1
+        messages = []
+        emotes = [:]
+        withdrawn = []
+        minSeqno = 0
+        maxSeqno = 0
+        ackedSeqno = 0
+        hasMore = false
+        didLoad = false
+        errorMessage = nil
+        isLoading = false
+        isLoadingOlder = false
+    }
+
     /// Loads the newest page and merges it below what is shown (first load, refresh, after sending).
     func loadLatest() async {
         isLoading = true
         errorMessage = nil
+        let gen = generation
         do {
             let page = try await MessageAPI.messages(peer: peer)
+            guard gen == generation else { return }
             if messages.isEmpty || page.minSeqno > maxSeqno {
                 // First page, or more arrived than one page holds: start over from the newest page.
                 messages = []
@@ -77,6 +98,7 @@ final class WhisperChatModel: ObservableObject {
             isLoading = false
             await acknowledge()
         } catch {
+            guard gen == generation else { return }
             if !ListMapping.isCancellation(error) {
                 if messages.isEmpty { errorMessage = error.localizedDescription } else { ToastCenter.shared.show(error: error) }
                 didLoad = true
@@ -89,14 +111,17 @@ final class WhisperChatModel: ObservableObject {
     func loadOlder() async {
         guard didLoad, hasMore, !isLoadingOlder, !isLoading, minSeqno > 0 else { return }
         isLoadingOlder = true
+        let gen = generation
         do {
             let page = try await MessageAPI.messages(peer: peer, before: minSeqno)
+            guard gen == generation else { return }
             let before = messages.count
             merge(page)
             if page.minSeqno > 0 { minSeqno = min(minSeqno, page.minSeqno) }
             // An older page that adds nothing (end_seqno is inclusive) is the end.
             hasMore = page.hasMore && messages.count > before
         } catch {
+            guard gen == generation else { return }
             if !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
         }
         isLoadingOlder = false
@@ -117,8 +142,9 @@ final class WhisperChatModel: ObservableObject {
 
     private func acknowledge() async {
         let seqno = maxSeqno
+        let gen = generation
         guard seqno > ackedSeqno else { return }
-        if await MessageAPI.ack(peer: peer, seqno: seqno) {
+        if await MessageAPI.ack(peer: peer, seqno: seqno), gen == generation {
             ackedSeqno = max(ackedSeqno, seqno)
             await MessageUnreadStore.shared.refresh(force: true)
         }
@@ -160,6 +186,8 @@ struct WhisperChatView: View {
     @State private var thread: MessageThreadSheetItem?
     /// The first page was scrolled to the bottom; only then may the top row load older messages.
     @State private var settled = false
+    /// The 「load older」 spinner at the top is on screen.
+    @State private var topVisible = false
     @FocusState private var inputFocused: Bool
 
     private let bottomID = "whisper-bottom"
@@ -192,6 +220,12 @@ struct WhisperChatView: View {
                 }
             }
         }
+        // Login / logout / 切换账号: what is shown is the previous account's conversation.
+        .onReceive(NotificationCenter.default.publisher(for: AuthService.loginStateDidChange)) { _ in
+            model.accountChanged()
+            settled = false
+            if auth.isLoggedIn { Task { await model.loadIfNeeded() } }
+        }
     }
 
     private var trimmedDraft: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -204,7 +238,11 @@ struct WhisperChatView: View {
                         ProgressView()
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
-                            .onAppear { loadOlder(proxy) }
+                            .onAppear {
+                                topVisible = true
+                                loadOlder(proxy)
+                            }
+                            .onDisappear { topVisible = false }
                     }
                     if let error = model.errorMessage, model.messages.isEmpty {
                         StateMessageView(systemImage: "exclamationmark.bubble", message: error) {
@@ -267,6 +305,9 @@ struct WhisperChatView: View {
             if settle && !settled {
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 settled = true
+                // A first page shorter than the screen leaves the spinner visible: its onAppear came before
+                // `settled` and will not fire again, so start the older page here.
+                if topVisible { loadOlder(proxy) }
             }
         }
     }

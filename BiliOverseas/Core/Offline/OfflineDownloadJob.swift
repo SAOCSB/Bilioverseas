@@ -166,6 +166,11 @@ final class OfflineDownloadJob: @unchecked Sendable {
     private var bytesThisRun: Int64 = 0
     private var lastSample: (at: Double, bytes: Int64)?
     private var smoothedSpeed: Double = 0
+    /// Until then (monotonic ms) new chunks start on the plain path: set when a range needed the fallback (the
+    /// accelerated path failed twice while the plain one works), so dead swapped hosts cost two failed attempts per
+    /// `plainHoldMs` instead of per chunk; the first chunk after the hold tries acceleration again.
+    private var plainUntilMs: Double = 0
+    static let plainHoldMs: Double = 30_000
 
     init(taskID: String, fileURL: URL, written: OfflineRangeSet, total: Int64, config: OfflineJobConfig,
          downloader: BTRDownloading, clock: MonotonicClock = SystemClock.shared,
@@ -252,7 +257,9 @@ final class OfflineDownloadJob: @unchecked Sendable {
         if writer.size() > done.total { try writer.truncate(to: done.total) }
     }
 
-    /// The metadata race over the head of the file; fixes the file size.
+    /// The metadata race over the head of the file; fixes the file size. Like `fetch`, it uses one plain connection
+    /// to Bilibili's own URLs when 加速 is off, and from the second failure on (custom / swapped hosts that do not
+    /// answer must not fail a download the plain path can do).
     private func probe(track: BTRTrackHandle, writer: OfflineFileWriter, refresher: OfflineURLRefresher) async throws {
         var failures = 0
         while true {
@@ -260,9 +267,11 @@ final class OfflineDownloadJob: @unchecked Sendable {
             await refresher.refreshIfExpiring(track)
             do {
                 // A file shorter than the probe is clipped by the CDN, which the metadata race accepts.
-                let fileTotal = try await transfer(OfflineRangePlanner.probeRange, kind: .meta, direct: false,
+                let direct = !config.accelerated || failures >= 2
+                let fileTotal = try await transfer(OfflineRangePlanner.probeRange, kind: .meta, direct: direct,
                                                    track: track, writer: writer)
                 try adopt(fileTotal: fileTotal, probing: true)
+                if direct && config.accelerated { holdPlainPath() }
                 return
             } catch {
                 failures += 1
@@ -272,11 +281,12 @@ final class OfflineDownloadJob: @unchecked Sendable {
     }
 
     /// Downloads what is missing of `chunk`. From the second failure in a row without progress on, it uses one
-    /// plain connection to Bilibili's own URLs (the player's fallback).
+    /// plain connection to Bilibili's own URLs (the player's fallback), and so do the next chunks for a while.
     private func fetch(_ chunk: ByteRange, track: BTRTrackHandle, writer: OfflineFileWriter,
                        refresher: OfflineURLRefresher) async throws {
         var failures = 0
-        var direct = !config.accelerated
+        var direct = !config.accelerated || isHoldingPlainPath()
+        var fellBack = false
         while let range = missingPart(of: chunk) {
             try Task.checkCancellation()
             await refresher.refreshIfExpiring(track)
@@ -284,9 +294,13 @@ final class OfflineDownloadJob: @unchecked Sendable {
             do {
                 let fileTotal = try await transfer(range, kind: .ordinary, direct: direct, track: track, writer: writer)
                 try adopt(fileTotal: fileTotal, probing: false)
+                if fellBack { holdPlainPath() }
             } catch {
                 failures = writtenBytes(in: chunk) > before ? 0 : failures + 1
-                if failures >= 2 { direct = true }
+                if failures >= 2, !direct {
+                    direct = true
+                    fellBack = true
+                }
                 try await recover(from: error, failures: failures, track: track, refresher: refresher)
             }
         }
@@ -356,6 +370,20 @@ final class OfflineDownloadJob: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return chunk.length - written.missing(in: chunk).reduce(0) { $0 + $1.length }
+    }
+
+    private func holdPlainPath() {
+        let until = clock.nowMs() + Self.plainHoldMs
+        lock.lock()
+        plainUntilMs = max(plainUntilMs, until)
+        lock.unlock()
+    }
+
+    private func isHoldingPlainPath() -> Bool {
+        let now = clock.nowMs()
+        lock.lock()
+        defer { lock.unlock() }
+        return now < plainUntilMs
     }
 
     private func keepOnly(fileSize: Int64) {

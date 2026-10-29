@@ -23,6 +23,12 @@ struct MessagesView: View {
         .background(Color(.systemBackground))
         .navigationTitle("消息")
         .navigationBarTitleDisplayMode(.inline)
+        // Login / logout / 切换账号: the sessions shown belong to the previous account.
+        .onReceive(NotificationCenter.default.publisher(for: AuthService.loginStateDidChange)) { _ in
+            reloadOnReturn = false
+            sessions.replace([])
+            if auth.isLoggedIn { Task { await reloadSessions() } }
+        }
     }
 
     private var content: some View {

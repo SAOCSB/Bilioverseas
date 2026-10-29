@@ -50,7 +50,9 @@ final class SegmentStoreTests: XCTestCase {
         XCTAssertEqual(downloader.calls.count, 1)
         XCTAssertEqual(calls(downloader, seg).first?.rangeKind, .startup, "first range after start")
         XCTAssertEqual(calls(downloader, seg).first?.priority, 120)
-        XCTAssertEqual(store.debugCachedIndices(.video), [1])
+        // The readers can finish before the fetch task has filed the segment into the cache.
+        let filed = await engineEventually { store.debugCachedIndices(.video) == [1] }
+        XCTAssertTrue(filed, "\(store.debugCachedIndices(.video))")
         // Later requests come from memory.
         let r3 = try XCTUnwrap(store.reader(kind: .video, range: seg))
         let bytesC = try await engineDrain(r3)
@@ -364,6 +366,32 @@ final class SegmentStoreTests: XCTestCase {
             _ = try await engineDrain(afterClose)
             XCTFail("expected failure")
         } catch {}
+    }
+
+    /// Regression: `close()` cancelled a download's task before failing its fetch, so the cancelled job, unwinding on
+    /// another thread, usually got there first with CancellationError and readers saw that instead of
+    /// `sessionClosed` (the test above failed about half the time on CI).
+    func testCloseFailsPendingReadersWithSessionClosedEveryTime() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [90_000, 90_000], durations: [2000, 2000])
+        var wrong: [String] = []
+        for _ in 0..<100 {
+            let downloader = EngineFakeDownloader(files: [.video: file.data])
+            let gate = EngineAsyncGate()
+            downloader.gate = gate
+            let store = try makeStore(file, downloader: downloader)
+            let reader = try XCTUnwrap(store.reader(kind: .video, range: file.segments[0]))
+            let task = Task { try await engineDrain(reader) }
+            let waiting = await engineEventually { gate.waitingCount == 1 }
+            XCTAssertTrue(waiting)
+            store.close()
+            do {
+                _ = try await task.value
+                wrong.append("no error")
+            } catch {
+                if (error as? MediaProxyError) != .sessionClosed { wrong.append("\(error)") }
+            }
+        }
+        XCTAssertEqual(wrong.count, 0, "\(wrong.prefix(3))")
     }
 
     /// Regression: `SegmentFetch.append` used to yield to subscribers while holding the fetch lock. Yielding resumes a

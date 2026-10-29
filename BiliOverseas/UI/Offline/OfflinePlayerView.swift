@@ -46,15 +46,21 @@ struct OfflinePlayerView: View {
         .onAppear {
             if stackDepth == nil { stackDepth = router.path.count }
             if lifetime.onRelease == nil {
-                let pageModel = model
+                // The player too (the model only holds it weakly): it must outlive the page's state until
+                // the position is saved and playback stopped.
+                let pageModel = model, pagePlayer = player
                 lifetime.onRelease = {
-                    Task { @MainActor in pageModel.close() }
+                    Task { @MainActor in
+                        pageModel.close()
+                        pagePlayer.stop()
+                    }
                 }
             }
             model.attach(player)
             if resumeOnAppear {
                 resumeOnAppear = false
-                player.play()
+                // Not when the part was deleted meanwhile (离线缓存 pushed on top).
+                if model.current != nil { player.play() }
             }
         }
         .onDisappear {
@@ -70,6 +76,11 @@ struct OfflinePlayerView: View {
                 resumeOnAppear = true
                 player.pause()
             }
+        }
+        .onChange(of: model.current == nil) { deleted in
+            // Deleted in 离线缓存 while this page is open (covered, or playing in Picture in Picture): never go
+            // on playing a removed file.
+            if deleted { player.stop() }
         }
         .confirmationDialog("确定删除这个缓存吗？", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("删除缓存", role: .destructive) {
@@ -230,6 +241,8 @@ final class OfflinePlayerModel: ObservableObject {
         player.onEnded = { [weak self] in
             Task { @MainActor in self?.advance() }
         }
+        // 列表循环 with a single cached part: the player loops it itself (the screen lock stays).
+        player.loopsAtEnd = { [weak self] in self?.loopsAlone ?? false }
         guard !started else { return }
         started = true
         play(currentId)
@@ -247,11 +260,33 @@ final class OfflinePlayerModel: ObservableObject {
         updateNext()
     }
 
-    /// The next cached part after the current one finished (and the fullscreen 「下一集」).
+    /// The current part finished: 「播放顺序」 as on the video page — 播完暂停 stops, 顺序播放 / 自动连播 play the next
+    /// cached part, 列表循环 wraps to the first (单个循环 is replayed by the player itself).
     func advance() {
         manager.savePosition(currentId, seconds: 0)
-        guard let next = nextPart() else { return }
+        let next: OfflineTask?
+        switch AppSettings.shared.player.playRepeat {
+        case .pause, .singleCycle:
+            return
+        case .listOrder, .autoPlayRelated:
+            next = nextPart()
+        case .listCycle:
+            guard current != nil else { return }
+            next = nextPart() ?? siblings.first.flatMap { $0.id == currentId ? nil : $0 }
+            if next == nil {
+                // The only cached part (normally looped by the player, `loopsAlone`).
+                player?.play()
+                return
+            }
+        }
+        guard let next else { return }
         play(next.id)
+    }
+
+    /// 列表循环 and no other cached part of this video to go to.
+    private var loopsAlone: Bool {
+        AppSettings.shared.player.playRepeat == .listCycle && current != nil
+            && siblings.allSatisfy { $0.id == currentId }
     }
 
     func savePosition() {

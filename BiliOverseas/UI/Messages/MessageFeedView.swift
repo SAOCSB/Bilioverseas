@@ -33,6 +33,13 @@ struct MessageFeedView: View {
         .background(Color(.systemBackground))
         .navigationTitle(kind.title)
         .navigationBarTitleDisplayMode(.inline)
+        // Login / logout / 切换账号: the rows shown belong to the previous account.
+        .onReceive(NotificationCenter.default.publisher(for: AuthService.loginStateDidChange)) { _ in
+            likeOverrides = [:]
+            markedSystemRead = false
+            list.replace([])
+            if auth.isLoggedIn { Task { await list.refresh() } }
+        }
     }
 
     private var content: some View {

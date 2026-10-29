@@ -78,22 +78,50 @@ final class ToastPassthroughWindow: UIWindow {
 /// Root of the toast window. Status bar, orientations and the home indicator follow whatever the app window
 /// shows on top (the fullscreen player hides the status bar and locks landscape), so a toast never undoes them.
 final class ToastWindowRootController: UIHostingController<ToastOverlay> {
-    private var appTop: UIViewController? {
+    /// The controller UIKit asks in the app window: the root or the topmost controller presented full screen over
+    /// it. A sheet, popover or alert leaves these preferences to the one below, e.g. 弹幕设置 over the fullscreen
+    /// player keeps its hidden status bar and home indicator. The status bar moves only to a `.fullScreen`
+    /// presentation or one that sets `modalPresentationCapturesStatusBarAppearance`.
+    private func appTop(statusBar: Bool = false) -> UIViewController? {
         let windows = (view.window?.windowScene?.windows ?? []).filter { !($0 is ToastPassthroughWindow) }
         var top = (windows.first(where: \.isKeyWindow) ?? windows.first)?.rootViewController
-        while let presented = top?.presentedViewController, !presented.isBeingDismissed {
-            top = presented
+        var current = top
+        while let presented = current?.presentedViewController, !presented.isBeingDismissed {
+            let style = presented.modalPresentationStyle
+            let controls = statusBar
+                ? style == .fullScreen || presented.modalPresentationCapturesStatusBarAppearance
+                : style == .fullScreen || style == .overFullScreen
+            if controls { top = presented }
+            current = presented
         }
         return top
     }
 
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        appTop?.supportedInterfaceOrientations ?? OrientationManager.shared.mask
+    private var statusBarHiddenSource: UIViewController? {
+        var vc = appTop(statusBar: true)
+        while let child = vc?.childForStatusBarHidden { vc = child }
+        return vc
     }
-    override var prefersStatusBarHidden: Bool { appTop?.prefersStatusBarHidden ?? false }
-    override var preferredStatusBarStyle: UIStatusBarStyle { appTop?.preferredStatusBarStyle ?? .default }
-    override var prefersHomeIndicatorAutoHidden: Bool { appTop?.prefersHomeIndicatorAutoHidden ?? false }
+
+    private var statusBarStyleSource: UIViewController? {
+        var vc = appTop(statusBar: true)
+        while let child = vc?.childForStatusBarStyle { vc = child }
+        return vc
+    }
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        appTop()?.supportedInterfaceOrientations ?? OrientationManager.shared.mask
+    }
+    override var prefersStatusBarHidden: Bool { statusBarHiddenSource?.prefersStatusBarHidden ?? false }
+    override var preferredStatusBarStyle: UIStatusBarStyle { statusBarStyleSource?.preferredStatusBarStyle ?? .default }
+    override var prefersHomeIndicatorAutoHidden: Bool {
+        var vc = appTop()
+        while let child = vc?.childForHomeIndicatorAutoHidden { vc = child }
+        return vc?.prefersHomeIndicatorAutoHidden ?? false
+    }
     override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge {
-        appTop?.preferredScreenEdgesDeferringSystemGestures ?? []
+        var vc = appTop()
+        while let child = vc?.childForScreenEdgesDeferringSystemGestures { vc = child }
+        return vc?.preferredScreenEdgesDeferringSystemGestures ?? []
     }
 }

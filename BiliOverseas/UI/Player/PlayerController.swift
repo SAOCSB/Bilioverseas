@@ -228,6 +228,9 @@ final class PlayerController: ObservableObject {
     @Published private(set) var isFullscreen = false
     /// Called when playback reaches the end (after SmartSkip etc.). The detail page decides auto-next.
     var onEnded: (() -> Void)?
+    /// Asked at the end: the page would only replay this item (列表循环 with nothing else to play), so it loops
+    /// here like 单个循环 (no `onEnded`, the screen lock stays).
+    var loopsAtEnd: (() -> Bool)?
 
     /// Optional: when set, the fullscreen bar shows 「下一集」 and the lock screen offers "next track".
     var onNext: (() -> Void)? {
@@ -628,7 +631,16 @@ final class PlayerController: ObservableObject {
     func retry() {
         guard let current = item else { return }
         guard playInfo != nil else {
-            load(current)
+            if current.localFileURL != nil, !isFailed {
+                // A downloaded file has no playurl to refetch, and `load` of the playing item would do nothing:
+                // open the file again where it is now.
+                let position = lastKnownPosition
+                status = .idle
+                load(current)
+                pendingStartTime = position
+            } else {
+                load(current)
+            }
             wantsToPlay = true
             return
         }
@@ -753,16 +765,21 @@ final class PlayerController: ObservableObject {
     }
 
     private func retakeDecision(windowStart: Double, generation lgen: Int) -> RetakeDecision {
-        guard lgen == loadGeneration, forceDirect, !forceNoProxy, !isAccelerated, let target = item else { return .stop }
+        guard lgen == loadGeneration, forceDirect, !forceNoProxy, let target = item else { return .stop }
         let s = AppSettings.shared.acceleration
         guard s.enabled, target.epId == 0 || s.accelerateBangumi,
               ProcessInfo.processInfo.systemUptime - windowStart <= Self.retakeWindow else { return .stop }
-        // Never during a stall, a seek or another rebuild: a healthy direct playback is not interrupted.
+        // Never during a stall, a seek or another rebuild: a healthy direct playback is not interrupted. The
+        // fallback's own direct rebuild may still be preparing (the failed accelerated item is installed until then).
         guard status == .playing, startupDone, !isSeeking, !rebuildPending, let observed = playerItem else { return .wait }
+        guard !isAccelerated else { return .stop }
         let t = displayTime()
         let ahead = Self.bufferInfo(at: t, in: observed).ahead
         let left = duration > 0 ? max(0, duration - t) : .infinity
-        return ahead >= min(10, max(1, left - 1)) ? .go : .wait
+        // Not in the last seconds (wall clock): nothing left to gain, and the item could end while the session
+        // prepares (up to the engine's 10 s metadata timeout).
+        guard left / max(1, effectiveRate) >= 15 else { return .wait }
+        return ahead >= 10 ? .go : .wait
     }
 
     private func performRetake() {
@@ -936,6 +953,8 @@ final class PlayerController: ObservableObject {
 
     private func performInitialLoad(_ target: PlaybackItem, generation gen: Int) async {
         if let file = target.localFileURL {
+            // Like the playurl path: a load replaced before this task ran must not install its file.
+            guard gen == loadGeneration, !Task.isCancelled else { return }
             installLocalFile(file, target: target)
             return
         }
@@ -1084,16 +1103,20 @@ final class PlayerController: ObservableObject {
                 }
             }
             if !retake {
-                audioOnly = false
-                ToastCenter.shared.show("听视频启动失败，已恢复视频画面")
                 if reason == .switchStreams, startupDone {
-                    // The item with picture is still playing.
-                    rebuildPending = false
+                    // The previous item keeps playing: the one with picture, or the 听视频 item itself (an
+                    // acceleration switch while listening).
+                    audioOnly = audioOnlyStream != nil
+                    ToastCenter.shared.show(audioOnly ? "切换失败：\(Self.describe(lastError ?? PlayerLoadError.noStream))"
+                                                      : "听视频启动失败，已恢复视频画面")
                     switchRevert = nil
                     transientMessage = nil
                     pendingSwitchToast = nil
+                    keepCurrentItem()
                     return
                 }
+                audioOnly = false
+                ToastCenter.shared.show("听视频启动失败，已恢复视频画面")
             }
         }
 
@@ -1178,8 +1201,8 @@ final class PlayerController: ObservableObject {
         if retake {
             // The accelerated session did not prepare: the direct item keeps playing (a later attempt may follow).
             guard current() else { return }
-            rebuildPending = false
             scheduleRetake()
+            keepCurrentItem()
             return
         }
 
@@ -1211,6 +1234,7 @@ final class PlayerController: ObservableObject {
             audioOnly = audioOnlyStream != nil
             refreshStreamMenus()
             ToastCenter.shared.show("切换失败：\(Self.describe(lastError ?? PlayerLoadError.noStream))")
+            keepCurrentItem()
             return
         }
         fail(Self.describe(lastError ?? PlayerLoadError.noStream))
@@ -1308,6 +1332,29 @@ final class PlayerController: ObservableObject {
         let sgen = streamGeneration
         loadTask = Task { [weak self] in
             await self?.installStreams(position: position, generation: sgen, reason: reason)
+        }
+    }
+
+    /// A rebuild gave up and the item that was playing stays (failed menu switch, 听视频 start, re-take). `rebuild`
+    /// moved `streamGeneration` on, so the item's observers would ignore its end (auto-next, 单个循环), failures
+    /// (the fallback ladder) and stalls from now on: bind them to the current generation, and catch up on what the
+    /// item reported while the rebuild prepared.
+    private func keepCurrentItem() {
+        rebuildPending = false
+        guard let observed = playerItem, player.currentItem === observed else { return }
+        removeItemObservers()
+        observeItem(observed, generation: streamGeneration)
+        guard !isFailed else { return }
+        switch observed.status {
+        case .failed:
+            handleFailure(message: observed.error.map { ($0 as NSError).localizedDescription })
+        case .readyToPlay where !itemReady:
+            itemStatusChanged(generation: streamGeneration)
+        default:
+            // Played to its end meanwhile (the end notification was dropped): `timeControlChanged` kept the intent.
+            if startupDone, wantsToPlay, !isSeeking, status != .ended, isNearEnd, player.timeControlStatus == .paused {
+                itemDidPlayToEnd(generation: streamGeneration)
+            }
         }
     }
 
@@ -1699,7 +1746,10 @@ final class PlayerController: ObservableObject {
         heartbeat.finished(position: end)
         skipPrompt = nil
         clipPrompt = nil
-        overlay.playbackEnded()
+        // 单个循环 replays right away (below): not an end for the controls or the screen lock.
+        let loops = sleepTimer != .endOfEpisode
+            && (AppSettings.shared.player.playRepeat == .singleCycle || loopsAtEnd?() == true)
+        if !loops { overlay.playbackEnded() }
         PlayerNowPlayingCenter.shared.playbackChanged(self)
         if sleepTimer == .endOfEpisode {
             sleepTimer = .off
@@ -1708,7 +1758,7 @@ final class PlayerController: ObservableObject {
             scheduleAutoExitFullscreen()
             return
         }
-        if AppSettings.shared.player.playRepeat == .singleCycle {
+        if loops {
             // 单个循环 (here, so it also works without a page, e.g. offline files).
             play()
             return

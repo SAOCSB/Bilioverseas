@@ -216,9 +216,15 @@ enum FeedAPI {
             c.kind = .ad
             c.adSignals = signals
             ListMapping.applyIDs(&c, aid: playerArgs["aid"].int64Value, bvid: item["bvid"].stringValue)
+            // `cm_*` creatives keep their title / image in `ad_info.creative_content` [unverified names].
+            let creative = item["ad_info"]["creative_content"]
+            if c.title.isEmpty { c.title = creative["title"].stringValue }
+            if c.cover.isEmpty { c.cover = ListMapping.image(creative["image_url"]) }
+            if c.uri.isEmpty { c.uri = creative["url"].stringValue }
             if c.badge.isEmpty { c.badge = "广告" }
             c.id = (c.id.isEmpty ? "ad" : "ad-\(c.id)") + "-\(position)"
-            return c
+            // An empty ad slot would be a blank, dead card when 屏蔽广告卡片 is off (like the web feed).
+            return c.title.isEmpty && c.cover.isEmpty ? nil : c
         }
         switch cardGoto {
         case "av":

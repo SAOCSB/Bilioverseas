@@ -17,9 +17,29 @@ final class MessageUnreadStore: ObservableObject {
     @Published private(set) var readTalkers: Set<Int64> = []
 
     private var lastFetch: Date?
-    private var fetching = false
+    /// `generation` of the fetch in flight: a fetch started for older state (another account) does not block a new one.
+    private var fetchingGeneration: Int?
     /// Bumped by local changes so a response that was already in flight cannot bring cleared counts back.
     private var generation = 0
+    /// Account the counts (and `readTalkers`) belong to; 0 after a reset.
+    private var accountMid: Int64 = 0
+    private var accountObserver: NSObjectProtocol?
+
+    init() {
+        // Logout, or a login that changed the account (切换账号 keeps `isLoggedIn` true, so the bell's task does
+        // not re-run): drop the previous account's counts at once and fetch the new ones.
+        accountObserver = NotificationCenter.default.addObserver(
+            forName: AuthService.loginStateDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let auth = AuthService.shared
+                if auth.isLoggedIn, auth.mid == self.accountMid { return }
+                self.reset()
+                await self.refresh(force: true)
+            }
+        }
+    }
 
     /// Re-fetches the counters, at most every 30 s unless `force`. Logged out: clears them.
     func refresh(force: Bool = false) async {
@@ -28,10 +48,11 @@ final class MessageUnreadStore: ObservableObject {
             return
         }
         if !force, let lastFetch, Date().timeIntervalSince(lastFetch) < 30 { return }
-        guard !fetching else { return }
-        fetching = true
-        lastFetch = Date()
+        guard fetchingGeneration != generation else { return }
         let gen = generation
+        fetchingGeneration = gen
+        accountMid = AuthService.shared.mid
+        lastFetch = Date()
         do {
             let fresh = try await MessageAPI.unread()
             if gen == generation, AuthService.shared.isLoggedIn { counts = fresh }
@@ -39,7 +60,7 @@ final class MessageUnreadStore: ObservableObject {
             // Keep the last counts; the next refresh retries.
             lastFetch = nil
         }
-        fetching = false
+        if fetchingGeneration == gen { fetchingGeneration = nil }
     }
 
     /// A feed was opened: the server clears its counter as it is read.
@@ -67,6 +88,7 @@ final class MessageUnreadStore: ObservableObject {
         counts = MessageUnread()
         readTalkers = []
         lastFetch = nil
+        accountMid = 0
     }
 }
 

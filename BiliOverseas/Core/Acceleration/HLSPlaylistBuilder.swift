@@ -83,10 +83,19 @@ enum HLSPlaylistBuilder {
             text += "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"\(name)\",LANGUAGE=\"zh\","
                 + "DEFAULT=YES,AUTOSELECT=YES,URI=\"\(audioURI)\"\n"
         }
-        let attributes = videoAttributes(for: video, allowDolbyVision: allowDolbyVision)
         let average = max(1, averageBandwidth ?? video.bandwidth)
         var parts: [String] = []
         if hasAudio { parts.append("AUDIO=\"audio\"") }
+        if isAudioRepresentation(video) {
+            // 听视频: the only track is an audio representation, so no video attributes (RESOLUTION / FRAME-RATE /
+            // VIDEO-RANGE would declare a video rendition that is not there).
+            if !video.codecs.isEmpty { parts.append("CODECS=\"\(video.codecs)\"") }
+            parts.append("BANDWIDTH=\(peakBandwidth(forAverage: average))")
+            parts.append("AVERAGE-BANDWIDTH=\(average)")
+            text += "#EXT-X-STREAM-INF:" + parts.joined(separator: ",") + "\n" + videoURI + "\n"
+            return text
+        }
+        let attributes = videoAttributes(for: video, allowDolbyVision: allowDolbyVision)
         if !attributes.codecs.isEmpty { parts.append("CODECS=\"\(attributes.codecs)\"") }
         if let supplemental = attributes.supplementalCodecs { parts.append("SUPPLEMENTAL-CODECS=\"\(supplemental)\"") }
         if video.width > 0 && video.height > 0 { parts.append("RESOLUTION=\(video.width)x\(video.height)") }
@@ -96,6 +105,13 @@ enum HLSPlaylistBuilder {
         parts.append("VIDEO-RANGE=\(attributes.videoRange)")
         text += "#EXT-X-STREAM-INF:" + parts.joined(separator: ",") + "\n" + videoURI + "\n"
         return text
+    }
+
+    /// An audio DASH representation (MIME `audio/…`, or an audio codec such as mp4a / ec-3 / fLaC).
+    static func isAudioRepresentation(_ stream: DashStream) -> Bool {
+        if stream.mimeType.lowercased().hasPrefix("audio") { return true }
+        let codecs = stream.codecs.lowercased()
+        return ["mp4a", "ec-3", "ac-3", "flac", "opus"].contains { codecs.hasPrefix($0) }
     }
 
     /// A VOD media playlist over one fMP4 file: `EXT-X-MAP` = the init range, one byte-range segment per sidx

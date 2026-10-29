@@ -419,10 +419,44 @@ final class OfflineJobTests: XCTestCase {
         let outcome = await makeJob(client, config: config).run()
         guard case .completed = outcome else { return XCTFail("\(outcome)") }
         XCTAssertEqual(fileBytes, btrPattern(0, Int(MiB + 77)))
-        // The probe is a BTR race; the chunks after it go to the playurl URL only.
-        let ranged = client.requests.filter { $0.range.start > OfflineRangePlanner.probeRange.end }
-        XCTAssertFalse(ranged.isEmpty)
-        XCTAssertTrue(ranged.allSatisfy { $0.host == offlineHostA })
+        // The head probe and the chunks after it all go to the playurl URL (no swapped hosts with 加速 off).
+        XCTAssertTrue(client.requests.contains { $0.range == OfflineRangePlanner.probeRange })
+        XCTAssertTrue(client.requests.contains { $0.range.start > OfflineRangePlanner.probeRange.end })
+        XCTAssertTrue(client.requests.allSatisfy { $0.host == offlineHostA }, "\(Set(client.requests.map(\.host)))")
+    }
+
+    /// Regression: the head probe only ever raced the swapped hosts, so custom hosts that stopped answering failed
+    /// every download although the plain path to Bilibili's own URL works (the chunks already fell back).
+    func testDeadSwappedHostsFallBackToThePlainPath() async throws {
+        let origin = "upos-sz-mirrorcos.bilivideo.com"
+        let client = FakeMediaClient(total: MiB + 5)
+        client.set(offlineHostA, .status(403))
+        client.set(offlineHostB, .status(403))
+        let outcome = await makeJob(client, source: OfflineSourceCounter(urls: [offlineURL(origin)])).run()
+        guard case .completed = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(fileBytes, btrPattern(0, Int(MiB + 5)))
+        XCTAssertTrue(client.requests.contains { $0.host == origin && $0.range == OfflineRangePlanner.probeRange })
+    }
+
+    /// Regression: the fallback was per chunk, so every chunk first paid two failed accelerated attempts (up to
+    /// ~25 s each against hosts that do not answer). A chunk that needed it now keeps the next ones on the plain
+    /// path for `plainHoldMs`.
+    func testOneFallbackKeepsTheNextChunksOnThePlainPath() async throws {
+        let origin = "upos-sz-mirrorcos.bilivideo.com"
+        let client = FakeMediaClient(total: 4 * MiB)
+        let probe = OfflineRangePlanner.probeRange
+        // The swapped hosts answer the head probe, then refuse everything else.
+        client.urlRule = { url, range in url.host != origin && range != probe ? .status(403) : nil }
+        var config = offlineJobConfig()
+        config.chunkBytes = 256 * KiB
+        let outcome = await makeJob(client, source: OfflineSourceCounter(urls: [offlineURL(origin)]),
+                                    config: config).run()
+        guard case .completed = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(fileBytes, btrPattern(0, Int(4 * MiB)))
+        let refusedChunks = Set(client.requests.filter { $0.host != origin && $0.range.start > probe.end }
+            .map { ($0.range.start - probe.end - 1) / (256 * KiB) })
+        XCTAssertFalse(refusedChunks.isEmpty)
+        XCTAssertLessThanOrEqual(refusedChunks.count, config.lanes, "only the chunks in flight when it fell back")
     }
 }
 

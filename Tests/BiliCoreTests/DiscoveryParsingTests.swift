@@ -92,6 +92,26 @@ final class DiscoveryParsingTests: XCTestCase {
         XCTAssertNil(FeedAPI.appFeedback(json(#"[{"type":"dislike","reasons":[{"id":1,"name":"x"}]}]"#), goto: "av", param: 0))
     }
 
+    func testAppRecommendAdCreativeAndEmptySlot() {
+        let data = json(#"""
+        {"items":[
+          {"card_type":"cm_v2","card_goto":"ad_web_s","goto":"ad_web_s","args":{},
+           "ad_info":{"creative_id":7,"creative_content":{"title":"某广告","image_url":"//i0.hdslb.com/ad.jpg",
+                                                        "url":"https://example.com/landing"}}},
+          {"card_type":"cm_v2","card_goto":"ad_web_s","args":{},"idx":2}
+        ]}
+        """#)
+        let page = FeedAPI.parseAppRecommend(data)
+        // The empty ad slot is dropped (it would be a blank card with 屏蔽广告卡片 off); the creative stays typed.
+        XCTAssertEqual(page.items.count, 1)
+        let ad = page.items[0]
+        XCTAssertEqual(ad.kind, .ad)
+        XCTAssertEqual(ad.title, "某广告")
+        XCTAssertEqual(ad.cover, "https://i0.hdslb.com/ad.jpg")
+        XCTAssertEqual(ad.uri, "https://example.com/landing")
+        XCTAssertFalse(FeedFilter(settings: FeedFilterSettings()).allows(ad, scope: .recommend))
+    }
+
     func testHotListsCarryTheZone() {
         let item = json(#"{"aid":170001,"bvid":"BV1xx411c7mD","title":"热门","tname":"单机游戏","owner":{"mid":1,"name":"a"}}"#)
         XCTAssertEqual(ListMapping.hotVideo(item)?.zone, "单机游戏")

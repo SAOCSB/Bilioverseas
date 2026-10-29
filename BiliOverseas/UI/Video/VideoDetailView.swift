@@ -342,6 +342,9 @@ final class VideoDetailModel: ObservableObject {
     private var sideDataLoggedIn = false
     /// Bumped by every local like / coin / favourite change: a relation response requested earlier is stale.
     private var relationEdits = 0
+    /// Bumped by every local follow / unfollow / unblock of the uploader: a `/x/relation` answer requested
+    /// earlier is stale (it would flip the button back).
+    private var followEdits = 0
     /// Archives played on this page (auto-next skips them in 相关推荐 so A → B → A loops do not happen).
     private var playedAids: Set<Int64> = []
     /// 播放全部 list this page was opened with (稍后再看 / 收藏夹); kept across in-place switches.
@@ -766,9 +769,17 @@ final class VideoDetailModel: ObservableObject {
         guard playlist.needsMore(after: aid, bvid: bvid, epId: currentEpisode?.epId ?? 0) else { return }
         Task { [weak self] in
             let added = await playlist.loadMore()
-            guard let self, aid == self.interactionAid else { return }
+            guard let self else { return }
+            // 下一集 / 上一集 / 选集 of whatever plays now (下一集 meanwhile may have moved on to the next entry).
             self.refreshNextAvailability()
-            if added, self.player?.status == .ended { self.advance(manual: false) }
+            guard aid == self.interactionAid else {
+                // That entry may be one of the last loaded ones now: ask for the page after.
+                if added { self.prefetchPlaylistIfNeeded() }
+                return
+            }
+            // A video that ended while waiting goes on: to the new entries, or past the end of the list (the
+            // source had nothing more). A failed request keeps it waiting (`advance` asks again).
+            if self.player?.status == .ended, !self.isPlaylistPending { self.advance(manual: false) }
         }
     }
 
@@ -798,7 +809,12 @@ final class VideoDetailModel: ObservableObject {
                 }
             }
         }
-        guard let step = next else { return }
+        guard let step = next else {
+            // The rest of the 播放全部 list is not loaded yet: a failed page request would otherwise end the
+            // list here. The fetch advances once it arrives (`prefetchPlaylistIfNeeded`).
+            if isPlaylistPending { prefetchPlaylistIfNeeded() }
+            return
+        }
         if !manual && (comments.composerTarget != nil || comments.subRepliesRoot != nil) {
             // Switching to another comment area would close the open composer (losing the draft) or the
             // reply thread the user is reading.
@@ -955,7 +971,9 @@ final class VideoDetailModel: ObservableObject {
     private func loadOwnerRelation(gen: Int) async {
         let mid = ownerMid
         guard mid > 0, mid != BiliHTTP.shared.mid, BiliHTTP.shared.isLoggedIn else { return }
-        guard let state = try? await SpaceAPI.relation(fid: mid), gen == sideGeneration, mid == ownerMid else { return }
+        let edits = followEdits
+        guard let state = try? await SpaceAPI.relation(fid: mid), gen == sideGeneration, mid == ownerMid,
+              edits == followEdits else { return }
         ownerRelation = state
         isFollowingOwner = state.isFollowing
         if state.isFollowing { followedStaff.insert(mid) } else { followedStaff.remove(mid) }
@@ -1192,6 +1210,7 @@ final class VideoDetailModel: ObservableObject {
             }
             if following { followedStaff.remove(mid) } else { followedStaff.insert(mid) }
             if mid == ownerMid {
+                followEdits += 1
                 isFollowingOwner = !following
                 ownerRelation = following ? .notFollowing : .followed
                 if ownerFans > 0 || !following { ownerFans = max(0, ownerFans + (following ? -1 : 1)) }
@@ -1217,7 +1236,10 @@ final class VideoDetailModel: ObservableObject {
         defer { end(.follow) }
         do {
             try await SpaceAPI.modifyRelation(mid: mid, action: .unblock)
-            if mid == ownerMid { ownerRelation = .notFollowing }
+            if mid == ownerMid {
+                followEdits += 1
+                ownerRelation = .notFollowing
+            }
             ToastCenter.shared.show("已解除拉黑")
         } catch {
             ToastCenter.shared.show(error: error)
@@ -1253,6 +1275,8 @@ extension VideoDetailModel {
         player.pageObservation = objectWillChange.sink { [weak self] _ in
             Task { @MainActor [weak self] in self?.syncFullscreenActions() }
         }
+        // 列表循环 with nothing else to play: the player loops the item itself (the screen lock stays).
+        player.loopsAtEnd = { [weak self] in self?.replaysItselfAtEnd ?? false }
     }
 
     /// With every 下一集 refresh (content, part or episode change): 选集 rows, 上一集 and the fullscreen row.
@@ -1395,6 +1419,13 @@ extension VideoDetailModel {
         let bvid = currentEpisode?.bvid ?? detail?.bvid ?? ""
         if case .pending? = playlistPosition(aid: aid, bvid: bvid, epId: currentEpisode?.epId ?? 0) { return true }
         return false
+    }
+
+    /// 列表循环 where the list is just this item (no further part, entry or episode, nothing to wrap to): `advance`
+    /// would only replay it.
+    fileprivate var replaysItselfAtEnd: Bool {
+        hasContent && AppSettings.shared.player.playRepeat == .listCycle && nextStep(includeRelated: false) == nil
+            && !isPlaylistPending && firstListStep() == nil
     }
 
     // MARK: Fullscreen 点赞 / 投币 / 收藏 / 分享

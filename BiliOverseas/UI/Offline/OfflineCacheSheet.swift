@@ -7,7 +7,14 @@ struct OfflineCacheActionItem: View {
     @ObservedObject var model: VideoDetailModel
     @ObservedObject private var manager = OfflineDownloadManager.shared
     @EnvironmentObject private var router: TabRouter
-    @State private var showsSheet = false
+    /// The video and part the sheet was opened for (auto-next may replace the page while it is open).
+    @State private var sheetTarget: SheetTarget?
+
+    private struct SheetTarget: Identifiable {
+        let detail: VideoDetail
+        let cid: Int64
+        var id: Int64 { detail.aid }
+    }
 
     var body: some View {
         if let detail = model.detail, !model.isPGC {
@@ -30,8 +37,8 @@ struct OfflineCacheActionItem: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("离线缓存")
-            .sheet(isPresented: $showsSheet) {
-                OfflineCacheSheet(detail: detail, currentCid: model.currentCid, onShowList: { [router] in
+            .sheet(item: $sheetTarget) { target in
+                OfflineCacheSheet(detail: target.detail, currentCid: target.cid, onShowList: { [router] in
                     router.push(.offline)
                 })
             }
@@ -46,7 +53,7 @@ struct OfflineCacheActionItem: View {
             return task.state == .paused || task.state == .failed
         }
         if queueable {
-            showsSheet = true
+            sheetTarget = SheetTarget(detail: detail, cid: model.currentCid)
             return
         }
         let router = self.router

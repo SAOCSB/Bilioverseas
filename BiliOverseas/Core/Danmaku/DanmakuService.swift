@@ -254,6 +254,18 @@ extension DanmakuSettings {
         }
         return ids
     }
+
+    /// Makes the stored server ids those of account `mid`. Ids stored for another account (logged out, then in as
+    /// someone else) are dropped: those rules stay local, `pendingUploads` offers them to this account again, and
+    /// deleting one no longer sends the other account's id. A set without an owner yet is adopted.
+    mutating func claimCloudRuleIds(for mid: Int64) {
+        guard mid > 0, cloudRulesMid != mid else { return }
+        if cloudRulesMid != 0 {
+            cloudRuleIds = [:]
+            cloudUserRuleIds = [:]
+        }
+        cloudRulesMid = mid
+    }
 }
 
 /// Parses the legacy XML danmaku list:

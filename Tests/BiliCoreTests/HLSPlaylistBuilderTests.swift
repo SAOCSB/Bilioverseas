@@ -52,6 +52,22 @@ final class HLSPlaylistBuilderTests: XCTestCase {
         """)
     }
 
+    /// 听视频 passes the audio representation as the only track: no video attributes.
+    func testAudioOnlyMasterHasNoVideoAttributes() {
+        let text = HLSPlaylistBuilder.masterPlaylist(video: audio, videoURI: "v.m3u8", audio: nil, audioURI: nil)
+        XCTAssertEqual(text, """
+        #EXTM3U
+        #EXT-X-VERSION:6
+        #EXT-X-INDEPENDENT-SEGMENTS
+
+        #EXT-X-STREAM-INF:CODECS="mp4a.40.2",BANDWIDTH=478500,AVERAGE-BANDWIDTH=319000
+        v.m3u8
+
+        """)
+        XCTAssertTrue(HLSPlaylistBuilder.isAudioRepresentation(audio))
+        XCTAssertFalse(HLSPlaylistBuilder.isAudioRepresentation(video(codecs: "avc1.640032")))
+    }
+
     func testDolbyVision84() {
         let stream = video(id: 126, codecs: "dvh1.08.07", width: 3840, height: 2160, fps: 30, bandwidth: 16_000_000)
         let text = HLSPlaylistBuilder.masterPlaylist(video: stream, videoURI: "v.m3u8", audio: audio, audioURI: "a.m3u8")

@@ -932,6 +932,8 @@ final class DanmakuOverlayView: UIView {
     /// Widest bitmap rendered (points); wider items are dropped before they take a lane.
     private static let maxBitmapWidth: CGFloat = 6000
     private static let bitmapCacheBytes = 24 * 1024 * 1024
+    /// Largest mode-7 bitmap in pixels (16 MB).
+    private static let maxSpecialPixels: CGFloat = 4_000_000
 
     private func shownContent(_ item: DanmakuItem) -> String {
         let flat = item.content.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
@@ -1059,7 +1061,10 @@ final class DanmakuOverlayView: UIView {
         else { return nil }
 
         let format = UIGraphicsImageRendererFormat()
-        format.scale = max(traitCollection.displayScale, 1)
+        // Mode-7 text has no length cap: a long multi-line one at 3× would need hundreds of MB, so past
+        // `maxSpecialPixels` it is rendered at a lower resolution.
+        format.scale = min(max(traitCollection.displayScale, 1),
+                           sqrt(DanmakuOverlayView.maxSpecialPixels / (size.width * size.height)))
         format.opaque = false
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
         let image = renderer.image { ctx in

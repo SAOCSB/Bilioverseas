@@ -211,4 +211,6 @@ struct DanmakuSettings: SettingsGroup {
     var cloudRuleIds: [String: Int64] = [:]
     /// Account rule id of each blocked midHash that is also stored on the server.
     var cloudUserRuleIds: [String: Int64] = [:]
+    /// mid of the account `cloudRuleIds` / `cloudUserRuleIds` belong to (0 = none yet).
+    var cloudRulesMid: Int64 = 0
 }

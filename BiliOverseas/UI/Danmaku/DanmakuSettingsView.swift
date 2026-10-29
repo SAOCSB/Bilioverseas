@@ -286,7 +286,10 @@ struct DanmakuBlockListView: View {
     }
 
     private func isSynced(_ rule: String) -> Bool {
-        kind == .user ? settings.danmaku.cloudUserRuleIds[rule] != nil : settings.danmaku.cloudRuleIds[rule] != nil
+        // Ids kept from another account (logged in as someone else since) do not count.
+        let owner = settings.danmaku.cloudRulesMid
+        guard owner == 0 || owner == BiliHTTP.shared.mid else { return false }
+        return kind == .user ? settings.danmaku.cloudUserRuleIds[rule] != nil : settings.danmaku.cloudRuleIds[rule] != nil
     }
 
     private func add() {

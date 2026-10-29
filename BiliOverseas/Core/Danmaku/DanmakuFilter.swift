@@ -213,6 +213,7 @@ extension DanmakuSettings {
         fresh.blockedUserLabels = blockedUserLabels
         fresh.cloudRuleIds = cloudRuleIds
         fresh.cloudUserRuleIds = cloudUserRuleIds
+        fresh.cloudRulesMid = cloudRulesMid
         fresh.enabled = enabled
         self = fresh
     }

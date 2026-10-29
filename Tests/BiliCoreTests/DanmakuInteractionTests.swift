@@ -182,6 +182,30 @@ final class DanmakuCloudSyncTests: XCTestCase {
         XCTAssertEqual(s.cloudRuleIds, ["/c/": 3])
     }
 
+    func testServerIdsBelongToOneAccount() {
+        var s = DanmakuSettings()
+        s.blockedKeywords = ["a", "b"]
+        s.blockedUsers = ["abcd"]
+        s.cloudRuleIds = ["a": 1]
+        s.cloudUserRuleIds = ["abcd": 2]
+        s.claimCloudRuleIds(for: 0)
+        XCTAssertEqual(s.cloudRulesMid, 0, "logged out: nothing to claim")
+        s.claimCloudRuleIds(for: 100)
+        XCTAssertEqual(s.cloudRulesMid, 100, "ids without an owner are adopted")
+        XCTAssertEqual(s.cloudRuleIds, ["a": 1])
+        s.claimCloudRuleIds(for: 100)
+        XCTAssertEqual(s.cloudUserRuleIds, ["abcd": 2])
+        s.resetDisplayOptions()
+        XCTAssertEqual(s.cloudRulesMid, 100)
+
+        // Logged in as another account: the first account's ids are dropped, so its rules upload to this one.
+        s.claimCloudRuleIds(for: 200)
+        XCTAssertEqual(s.cloudRulesMid, 200)
+        XCTAssertTrue(s.cloudRuleIds.isEmpty && s.cloudUserRuleIds.isEmpty)
+        XCTAssertEqual(s.blockedKeywords, ["a", "b"])
+        XCTAssertEqual(DanmakuCloudRule.pendingUploads(s).map(\.rule), ["a", "b", "abcd"])
+    }
+
     func testNewFieldsDecodeFromOlderSaves() throws {
         // A save from before `tapToInteract` / the id maps existed.
         let defaults = UserDefaults(suiteName: "DanmakuCloudSyncTests") ?? .standard

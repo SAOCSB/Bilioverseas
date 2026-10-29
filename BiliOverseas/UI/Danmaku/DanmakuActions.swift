@@ -113,7 +113,9 @@ enum DanmakuBlockSync {
         settings.danmaku.blockedKeywords.append(rule)
         let form = DanmakuCloudRule.cloudForm(keyword: rule)
         upload(type: form.type, filter: form.filter) { id in
-            guard settings.danmaku.blockedKeywords.contains(rule) else { return false }
+            // Deleted meanwhile, or already stored by a sync: the new server copy is deleted again.
+            guard settings.danmaku.blockedKeywords.contains(rule), settings.danmaku.cloudRuleIds[rule] == nil
+            else { return false }
             settings.danmaku.cloudRuleIds[rule] = id
             return true
         }
@@ -128,7 +130,8 @@ enum DanmakuBlockSync {
         settings.danmaku.blockedUsers.append(hash)
         if let label { settings.danmaku.blockedUserLabels[hash] = label }
         upload(type: 2, filter: hash) { id in
-            guard settings.danmaku.blockedUsers.contains(hash) else { return false }
+            guard settings.danmaku.blockedUsers.contains(hash), settings.danmaku.cloudUserRuleIds[hash] == nil
+            else { return false }
             settings.danmaku.cloudUserRuleIds[hash] = id
             return true
         }
@@ -138,9 +141,12 @@ enum DanmakuBlockSync {
     /// Removes rules locally and, for those stored on the account, there too.
     static func remove(keywords: Set<String> = [], users: Set<String> = []) {
         var danmaku = AppSettings.shared.danmaku
+        let owner = danmaku.cloudRulesMid
         let ids = danmaku.removeBlockRules(keywords: keywords, users: users)
         AppSettings.shared.danmaku = danmaku
-        guard !ids.isEmpty, BiliHTTP.shared.isLoggedIn else { return }
+        // Ids stored for another account are not this account's to delete.
+        guard !ids.isEmpty, BiliHTTP.shared.isLoggedIn, let mid = BiliHTTP.shared.mid, owner == 0 || owner == mid
+        else { return }
         Task { @MainActor in
             do {
                 try await DanmakuService.deleteCloudRules(ids: ids)
@@ -159,21 +165,37 @@ enum DanmakuBlockSync {
 
     /// 「同步账号屏蔽列表」: imports the account's rules, then uploads the local ones it does not have yet.
     static func sync() async throws -> SyncResult {
+        let mid = BiliHTTP.shared.mid ?? 0
         let rules = try await DanmakuService.fetchCloudRules()
         var danmaku = AppSettings.shared.danmaku
+        danmaku.claimCloudRuleIds(for: mid)
         var result = SyncResult()
         result.imported = DanmakuCloudRule.merge(rules, into: &danmaku)
         AppSettings.shared.danmaku = danmaku
+        // The rule list can change while the uploads run (the list stays editable): read it fresh each time.
+        func isLocal(_ p: (type: Int, filter: String, rule: String)) -> Bool {
+            let d = AppSettings.shared.danmaku
+            return p.type == 2 ? d.blockedUsers.contains(p.rule) : d.blockedKeywords.contains(p.rule)
+        }
+        func storedID(_ p: (type: Int, filter: String, rule: String)) -> Int64? {
+            let d = AppSettings.shared.danmaku
+            return p.type == 2 ? d.cloudUserRuleIds[p.rule] : d.cloudRuleIds[p.rule]
+        }
         for pending in DanmakuCloudRule.pendingUploads(danmaku) {
+            // Deleted meanwhile, or stored by its own upload (`addKeyword` / `addUser`).
+            guard isLocal(pending), storedID(pending) == nil else { continue }
             do {
                 let stored = try await DanmakuService.addCloudRule(type: pending.type, filter: pending.filter)
                 result.uploaded += 1
                 guard stored.id > 0 else { continue }
+                guard isLocal(pending), storedID(pending) == nil else {
+                    // Deleted here during the upload (or a second copy): an orphan would come back on the next sync.
+                    try? await DanmakuService.deleteCloudRules(ids: [stored.id])
+                    continue
+                }
                 if pending.type == 2 {
-                    if AppSettings.shared.danmaku.blockedUsers.contains(pending.rule) {
-                        AppSettings.shared.danmaku.cloudUserRuleIds[pending.rule] = stored.id
-                    }
-                } else if AppSettings.shared.danmaku.blockedKeywords.contains(pending.rule) {
+                    AppSettings.shared.danmaku.cloudUserRuleIds[pending.rule] = stored.id
+                } else {
                     AppSettings.shared.danmaku.cloudRuleIds[pending.rule] = stored.id
                 }
             } catch {
@@ -187,11 +209,14 @@ enum DanmakuBlockSync {
     /// Uploads one rule when logged in. `store` records the server id and returns false when the local rule is
     /// gone meanwhile, in which case the server copy is deleted again.
     private static func upload(type: Int, filter: String, store: @escaping @MainActor (Int64) -> Bool) {
-        guard BiliHTTP.shared.isLoggedIn else { return }
+        guard BiliHTTP.shared.isLoggedIn, let mid = BiliHTTP.shared.mid else { return }
         Task { @MainActor in
             do {
                 let rule = try await DanmakuService.addCloudRule(type: type, filter: filter)
-                if rule.id > 0, !store(rule.id) { try? await DanmakuService.deleteCloudRules(ids: [rule.id]) }
+                // Logged in as someone else meanwhile: that id is not the current account's.
+                guard rule.id > 0, BiliHTTP.shared.mid == mid else { return }
+                AppSettings.shared.danmaku.claimCloudRuleIds(for: mid)
+                if !store(rule.id) { try? await DanmakuService.deleteCloudRules(ids: [rule.id]) }
             } catch {
                 ToastCenter.shared.show("已在本机屏蔽，同步到账号失败：\(error.localizedDescription)")
             }

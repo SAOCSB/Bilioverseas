@@ -120,13 +120,13 @@ struct DynamicCardView: View {
     /// Avatar / name open the author's space (turned off inside that space).
     var linksAuthor: Bool = true
 
-    @State private var viewer: DynamicImageViewerPayload?
+    @State private var viewer: VideoImageViewerItem?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             DynamicAuthorHeader(item: item, linksAuthor: linksAuthor)
             DynamicContentView(item: item, isForwarded: false) { urls, index in
-                viewer = DynamicImageViewerPayload(urls: urls, index: index)
+                viewer = VideoImageViewerItem(urls: urls, index: index)
             }
             DynamicActionBar(item: item)
         }
@@ -135,7 +135,7 @@ struct DynamicCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.systemBackground))
         .fullScreenCover(item: $viewer) { payload in
-            DynamicImageViewer(urls: payload.urls, startIndex: payload.index)
+            VideoImageViewer(item: payload)
         }
     }
 }

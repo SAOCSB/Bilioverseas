@@ -189,6 +189,10 @@ struct MineView: View {
 
     private var quickEntries: some View {
         HStack(alignment: .top, spacing: 0) {
+            NavigationLink(value: Route.offline) {
+                MineQuickEntryLabel(title: "离线缓存", systemImage: "arrow.down.circle")
+            }
+            .buttonStyle(.plain)
             NavigationLink(value: Route.history) {
                 MineQuickEntryLabel(title: "历史记录", systemImage: "clock.arrow.circlepath")
             }
@@ -205,7 +209,6 @@ struct MineView: View {
                 MineQuickEntryLabel(title: "我的追番", systemImage: "tv")
             }
             .buttonStyle(.plain)
-            // 离线缓存: not offered in this build.
         }
         .padding(.vertical, 14)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))

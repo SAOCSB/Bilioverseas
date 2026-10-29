@@ -5,9 +5,10 @@ import Foundation
 /// The content is a JSON array
 /// `[x, y, "alphaFrom-alphaTo", lifetime, text, rotateZ, rotateY, toX, toY, moveDuration, moveDelay, stroke, font, easing, path]`;
 /// only the first five are required. Lifetime is in seconds, move duration and delay in milliseconds.
-/// Coordinates: a decimal up to 1 is a fraction of the player size; an integer (or anything above 1) is in pixels
-/// of Bilibili's 682 × 438 reference player (DanmakuFlameMaster `BILI_PLAYER_WIDTH/HEIGHT`). Path animations and
-/// custom fonts are not supported: the text moves in a straight line from (x, y) to (toX, toY).
+/// Coordinates: a value up to 1 is a fraction of the player size; anything above 1, or a string without a decimal
+/// point (`"300"`), is in pixels of Bilibili's 682 × 438 reference player (DanmakuFlameMaster
+/// `BILI_PLAYER_WIDTH/HEIGHT`). Path animations and custom fonts are not supported: the text moves in a straight
+/// line from (x, y) to (toX, toY).
 struct DanmakuAdvancedSpec: Equatable, Sendable {
     /// Reference player size for pixel coordinates.
     static let referenceWidth: Double = 682
@@ -119,8 +120,8 @@ struct DanmakuAdvancedSpec: Equatable, Sendable {
         return number(v) == 1
     }
 
-    /// Fraction of the player size: decimals up to 1 as they are, pixels (integers, or anything above 1) divided by
-    /// the reference size.
+    /// Fraction of the player size: values up to 1 as they are, pixels (above 1, or a string without a decimal
+    /// point) divided by the reference size.
     private static func coordinate(_ raw: Any, reference: Double) -> Double? {
         guard let v = number(raw), v.isFinite else { return nil }
         let isPixel: Bool

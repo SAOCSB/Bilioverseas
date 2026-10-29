@@ -873,6 +873,8 @@ struct VideoIntroActionRow: View {
             }
             .buttonStyle(.plain)
             favoriteItem
+            // 缓存 (UGC only; renders nothing for bangumi): UI/Offline.
+            OfflineCacheActionItem(model: model)
             Button {
                 guard requireLogin() else { return }
                 Task { await model.toggleWatchLater() }

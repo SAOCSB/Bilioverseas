@@ -13,6 +13,9 @@ enum Route: Hashable {
     case favFolder(id: Int64, title: String)
     case history
     case watchLater
+    /// 离线缓存 (我的), and one cached part played offline.
+    case offline
+    case offlinePlayer(id: String)
     case bangumiFollows
     /// 番剧索引 (番剧 tab), opened on one season type (1 番剧, 4 国创, 2 电影, 5 电视剧, 3 纪录片).
     case bangumiIndex(seasonType: Int)
@@ -90,6 +93,10 @@ struct RouteView: View {
             HistoryView()
         case .watchLater:
             WatchLaterView()
+        case .offline:
+            OfflineDownloadsView()
+        case .offlinePlayer(let id):
+            OfflinePlayerView(taskId: id)
         case .bangumiFollows:
             MyBangumiFollowsView()
         case .bangumiIndex(let seasonType):

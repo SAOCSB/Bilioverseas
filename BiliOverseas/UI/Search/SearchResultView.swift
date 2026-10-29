@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// Result tabs: 视频 | 番剧 | 用户 | 直播.
+/// Result tabs: 视频 | 番剧 | 用户 | 直播 | 专栏.
 enum SearchResultTab: Int, CaseIterable, Hashable {
-    case video, bangumi, user, live
+    case video, bangumi, user, live, article
 
     var title: String {
         switch self {
@@ -10,6 +10,7 @@ enum SearchResultTab: Int, CaseIterable, Hashable {
         case .bangumi: return "番剧"
         case .user: return "用户"
         case .live: return "直播"
+        case .article: return "专栏"
         }
     }
 }
@@ -27,6 +28,7 @@ final class SearchResultModel: ObservableObject {
     @Published private(set) var bangumi: PagedListModel<VideoCard>
     @Published private(set) var users: PagedListModel<UserBrief>
     @Published private(set) var live: PagedListModel<VideoCard>
+    @Published private(set) var articles: PagedListModel<VideoCard>
     /// Follow state changed from this page (overrides `UserBrief.isFollowed`).
     @Published private(set) var followOverrides: [Int64: Bool] = [:]
     @Published private(set) var followBusy: Set<Int64> = []
@@ -37,6 +39,7 @@ final class SearchResultModel: ObservableObject {
         bangumi = SearchResultModel.makeBangumi(keyword: keyword)
         users = SearchResultModel.makeUsers(keyword: keyword, order: .default)
         live = SearchResultModel.makeLive(keyword: keyword)
+        articles = SearchResultModel.makeArticles(keyword: keyword)
     }
 
     // MARK: List factories
@@ -65,6 +68,12 @@ final class SearchResultModel: ObservableObject {
         }
     }
 
+    static func makeArticles(keyword: String) -> PagedListModel<VideoCard> {
+        PagedListModel<VideoCard>(filter: FeedFilter.liveFilter(scope: .search)) { cursor in
+            try await SearchAPI.searchArticles(keyword: keyword, page: ListCursor.page(cursor))
+        }
+    }
+
     // MARK: Actions
 
     /// Searches `newKeyword` in place (the same keyword refreshes the current tab).
@@ -81,6 +90,7 @@ final class SearchResultModel: ObservableObject {
         bangumi = SearchResultModel.makeBangumi(keyword: k)
         users = SearchResultModel.makeUsers(keyword: k, order: userOrder)
         live = SearchResultModel.makeLive(keyword: k)
+        articles = SearchResultModel.makeArticles(keyword: k)
     }
 
     func refreshCurrentTab() async {
@@ -89,6 +99,7 @@ final class SearchResultModel: ObservableObject {
         case .bangumi: await bangumi.refresh()
         case .user: await users.refresh()
         case .live: await live.refresh()
+        case .article: await articles.refresh()
         }
     }
 
@@ -134,8 +145,8 @@ final class SearchResultModel: ObservableObject {
 }
 
 /// Search results (pushed): the keyword stays editable in the navigation bar (submitting
-/// re-searches in place), tabs 视频 | 番剧 | 用户 | 直播 with swipe paging. A tab loads the first time it
-/// becomes visible, so one search does not fire four requests at once (search is risk-controlled).
+/// re-searches in place), tabs 视频 | 番剧 | 用户 | 直播 | 专栏 with swipe paging. A tab loads the first time
+/// it becomes visible, so one search does not fire five requests at once (search is risk-controlled).
 struct SearchResultView: View {
     @StateObject private var model: SearchResultModel
     @ObservedObject private var history = SearchHistoryStore.shared
@@ -164,6 +175,8 @@ struct SearchResultView: View {
                     .tag(SearchResultTab.user)
                 SearchLivePane(list: model.live, isActive: model.tab == .live)
                     .tag(SearchResultTab.live)
+                SearchArticlePane(list: model.articles, isActive: model.tab == .article)
+                    .tag(SearchResultTab.article)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
         }
@@ -359,6 +372,7 @@ private struct SearchVideoPane: View {
                         HomeRouteLink(card.route) {
                             VideoRowCell(card: card)
                         }
+                        .videoCardMenu(card) { predicate in list.remove(where: predicate) }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .onAppear { list.onItemAppear(card) }
@@ -614,10 +628,10 @@ private struct SearchLevelBadge: View {
 private struct SearchLivePane: View {
     @ObservedObject var list: PagedListModel<VideoCard>
     let isActive: Bool
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     private var columns: [GridItem] {
-        let count = UIDevice.current.userInterfaceIdiom == .pad ? 4 : 2
-        return Array(repeating: GridItem(.flexible(), spacing: 10, alignment: .top), count: count)
+        FeedGridLayout.columns(sizeClass, compactCount: 2)
     }
 
     var body: some View {
@@ -639,5 +653,42 @@ private struct SearchLivePane: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - 专栏
+
+private struct SearchArticlePane: View {
+    @ObservedObject var list: PagedListModel<VideoCard>
+    let isActive: Bool
+
+    var body: some View {
+        SearchPaneContainer(list: list, isActive: isActive, emptyText: "没有找到相关专栏") {
+            LazyVStack(spacing: 0) {
+                ForEach(list.items) { card in
+                    HomeRouteLink(card.route) {
+                        VideoRowCell(card: card, subtitle: SearchArticlePane.subtitle(card))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .onAppear { list.onItemAppear(card) }
+                }
+                ListFooter(isLoading: list.isLoading, hasMore: list.hasMore, isEmpty: list.isEmpty,
+                           error: list.errorMessage, emptyText: "没有找到相关专栏") {
+                    Task { await list.loadMore() }
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    /// 「游戏 · 1.2万阅读 · 30点赞 · 3天前」.
+    static func subtitle(_ card: VideoCard) -> String {
+        var parts: [String] = []
+        if !card.reason.isEmpty { parts.append(card.reason) }
+        if card.viewCount > 0 { parts.append("\(Fmt.count(card.viewCount))阅读") }
+        if card.likeCount > 0 { parts.append("\(Fmt.count(card.likeCount))点赞") }
+        if card.pubdate > 0 { parts.append(Fmt.relativeDate(card.pubdate)) }
+        return parts.joined(separator: " · ")
     }
 }

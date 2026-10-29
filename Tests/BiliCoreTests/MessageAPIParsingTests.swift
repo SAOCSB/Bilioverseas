@@ -294,7 +294,8 @@ final class MessageAPIParsingTests: XCTestCase {
           {"talker_id":55,"session_type":2,"group_name":"粉丝团","group_cover":"https://i0.hdslb.com/g.jpg",
            "session_ts":1700000200000000,
            "last_msg":{"sender_uid":1001,"msg_type":5,"content":"7000000000000000001","msg_seqno":2,"timestamp":1700000200}},
-          {"talker_id":0,"session_type":3}
+          {"talker_id":0,"session_type":3},
+          {"talker_id":77,"session_type":3,"session_ts":1700000100000000}
          ],"has_more":1}
         """#)
         let page = MessageAPI.parseSessions(data)

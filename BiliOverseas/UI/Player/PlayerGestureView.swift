@@ -271,7 +271,8 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         guard pendingDanmaku != nil else { return }
         pendingDanmakuToken += 1
         let token = pendingDanmakuToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
             guard let self, self.pendingDanmakuToken == token else { return }
             self.cancelPendingDanmaku()
         }

@@ -122,6 +122,7 @@ swift test                          # 运行 Core 单元测试（无需签名）
 - [Bilibili-thread-ripper](https://github.com/MrTangLuyao/Bilibili-thread-ripper)（MIT，© 2026 Bilibili-thread-ripper contributors）—— 加速算法来源
 - [Bilibili-thread-ripper-desktop](https://github.com/MrTangLuyao/Bilibili-thread-ripper-desktop)（MIT，© 2026 LouieTang）—— 单块请求轮换节点（inTurns）与小请求单连接规则移植自该项目
 - [BiliSmartSkip](https://github.com/wzy403/BiliSmartSkip)（GPL-2.0）—— 视频内广告识别算法，已移植为 Swift
+- [BilibiliSponsorBlock](https://github.com/hanydd/BilibiliSponsorBlock)（空降助手）—— 「空降助手」通过其公开接口（默认 `www.bsbsb.top`）获取社区提交的片段，片段类别的中文说明取自其 zh_CN 文案；不包含其代码
 - [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus) 及其 BTR 移植分支、[ATV-Bilibili-demo](https://github.com/yichengchen/ATV-Bilibili-demo) —— 接口与行为参考
 - [canvas_danmaku](https://github.com/Predidit/canvas_danmaku)（MIT，© 2024 Predidit）—— 弹幕轨道布局与滚动参数参考
 

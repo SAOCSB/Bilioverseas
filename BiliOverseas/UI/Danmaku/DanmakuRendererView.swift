@@ -376,13 +376,13 @@ final class DanmakuOverlayView: UIView {
     private func sprite(at point: CGPoint) -> DanmakuSprite? {
         guard engine.trackCount > 0 else { return nil }
         let trackH = CGFloat(engine.config.trackHeight)
-        func contains(_ s: DanmakuSprite) -> Bool {
+        func isHit(_ s: DanmakuSprite) -> Bool {
             let top = CGFloat(engine.config.trackY(s.placement.track))
             let frame = s.layer.frame
             return point.y >= top && point.y < top + trackH && point.x >= frame.minX - 6 && point.x <= frame.maxX + 6
         }
-        if let s = sprites.last(where: { $0.placement.kind != .scroll && contains($0) }) { return s }
-        return sprites.last(where: { $0.placement.kind == .scroll && contains($0) })
+        if let s = sprites.last(where: { $0.placement.kind != .scroll && isHit($0) }) { return s }
+        return sprites.last(where: { $0.placement.kind == .scroll && isHit($0) })
     }
 
     // MARK: Interaction state (点赞 / 撤回)

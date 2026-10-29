@@ -1,19 +1,90 @@
 import SwiftUI
 
-/// 动态 tab root: 全部 | 视频投稿 segments, the followed-UP strip and the follow feed.
+/// 动态 tab root: 全部 | 投稿 | 番剧 | 专栏 segments, the followed-UP strip and the follow feed.
 struct DynamicsView: View {
     @ObservedObject private var auth = AuthService.shared
+    @State private var reselect = FeedReselectSignal()
 
     var body: some View {
         Group {
             if auth.isLoggedIn {
-                DynamicsFeedScreen()
+                DynamicsFeedScreen(reselect: reselect)
             } else {
                 LoginRequiredView(message: "登录后查看关注的动态")
             }
         }
         .navigationTitle("动态")
         .navigationBarTitleDisplayMode(.inline)
+        .onReceive(NotificationCenter.default.publisher(for: .mainTabReselected)) { note in
+            guard note.object as? MainTab == .dynamics else { return }
+            reselect.fire(forceRefresh: note.userInfo?[MainTab.forceRefreshKey] as? Bool ?? false)
+        }
+    }
+}
+
+// MARK: - Unread (「检查未读动态」)
+
+/// New dynamics since the 全部 feed was last loaded, shown as the 动态 tab badge. The feed's first 全部
+/// page stores `update_baseline`; `RootTabView` runs `poll` while logged in, in the foreground and
+/// switched on, checking `feed/all/update` every 5 minutes. The endpoint is [unverified]: errors are
+/// ignored and only leave the badge as it was.
+@MainActor
+final class DynamicsUnreadModel: ObservableObject {
+    static let shared = DynamicsUnreadModel()
+    /// 「检查周期」 in seconds.
+    static let pollInterval: UInt64 = 300
+
+    struct PollKey: Equatable {
+        var loggedIn: Bool
+        var active: Bool
+        var enabled: Bool
+    }
+
+    @Published private(set) var count = 0
+    private var baseline: String
+    private static let baselineKey = "bili.dynamics.updateBaseline"
+
+    init() {
+        baseline = UserDefaults.standard.string(forKey: DynamicsUnreadModel.baselineKey) ?? ""
+    }
+
+    /// The 全部 feed's first page arrived: everything up to `newBaseline` has been seen.
+    func feedDidLoad(baseline newBaseline: String) {
+        count = 0
+        guard !newBaseline.isEmpty else { return }
+        baseline = newBaseline
+        UserDefaults.standard.set(newBaseline, forKey: DynamicsUnreadModel.baselineKey)
+    }
+
+    /// Checks now and then every `pollInterval` until cancelled (`RootTabView`'s task restarts on changes).
+    func poll(_ key: PollKey) async {
+        guard key.loggedIn else {
+            count = 0
+            baseline = ""
+            UserDefaults.standard.removeObject(forKey: DynamicsUnreadModel.baselineKey)
+            return
+        }
+        guard key.enabled else {
+            count = 0
+            return
+        }
+        guard key.active else { return }
+        while !Task.isCancelled {
+            await check()
+            try? await Task.sleep(nanoseconds: DynamicsUnreadModel.pollInterval * 1_000_000_000)
+        }
+    }
+
+    private func check() async {
+        guard !baseline.isEmpty else {
+            // Nothing loaded yet on this device: the newest dynamic right now is the starting point.
+            if let first = try? await DynamicsAPI.feedWithBaseline(type: "all"), !Task.isCancelled, baseline.isEmpty {
+                feedDidLoad(baseline: first.updateBaseline)
+            }
+            return
+        }
+        guard let n = try? await DynamicsAPI.newCount(baseline: baseline), !Task.isCancelled else { return }
+        count = max(0, n)
     }
 }
 
@@ -42,31 +113,64 @@ final class DynamicsFeedQuery: @unchecked Sendable {
         let s = query.snapshot
         if s.hostMid != 0 {
             var page = try await DynamicsAPI.feed(hostMid: s.hostMid, offset: cursor)
-            guard s.type == "video" else { return page }
+            guard s.type != "all" else { return page }
             // The per-UP feed has no type filter. An UP posting mostly images / text would give
-            // video-less pages, which stall infinite scroll (or show 「TA还没有发布动态」 while older
-            // videos exist), so skip ahead a few pages until one has a video.
-            var videos = page.items.filter { $0.type == .video }
+            // pages without a match, which stall infinite scroll (or show 「TA还没有发布动态」 while
+            // older ones exist), so skip ahead a few pages until one has a match.
+            var matching = page.items.filter { matches($0, type: s.type) }
             var hops = 0
-            while videos.isEmpty, page.hasMore, let next = page.next, hops < 3 {
+            while matching.isEmpty, page.hasMore, let next = page.next, hops < 3 {
                 hops += 1
                 page = try await DynamicsAPI.feed(hostMid: s.hostMid, offset: next)
-                videos = page.items.filter { $0.type == .video }
+                matching = page.items.filter { matches($0, type: s.type) }
             }
-            page.items = videos
+            page.items = matching
             return page
         }
+        if s.type == "all" && cursor == nil {
+            // The first 全部 page also says up to where the 动态 badge has been seen.
+            let first = try await DynamicsAPI.feedWithBaseline(type: "all")
+            await MainActor.run { DynamicsUnreadModel.shared.feedDidLoad(baseline: first.updateBaseline) }
+            return first.page
+        }
         return try await DynamicsAPI.feed(type: s.type, offset: cursor)
+    }
+
+    /// The feed `type` filter, applied client-side to the per-UP feed.
+    static func matches(_ item: DynamicItem, type: String) -> Bool {
+        switch type {
+        case "video": return item.type == .video
+        case "pgc": return item.type == .pgc
+        case "article": return item.type == .article
+        default: return true
+        }
     }
 }
 
 @MainActor
 final class DynamicsFeedModel: ObservableObject {
     enum Segment: Int, CaseIterable, Identifiable {
-        case all, video
+        case all, video, pgc, article
         var id: Int { rawValue }
-        var title: String { self == .all ? "全部" : "视频投稿" }
-        var apiType: String { self == .all ? "all" : "video" }
+
+        var title: String {
+            switch self {
+            case .all: return "全部"
+            case .video: return "投稿"
+            case .pgc: return "番剧"
+            case .article: return "专栏"
+            }
+        }
+
+        /// `type` of `/x/polymer/web-dynamic/v1/feed/all`.
+        var apiType: String {
+            switch self {
+            case .all: return "all"
+            case .video: return "video"
+            case .pgc: return "pgc"
+            case .article: return "article"
+            }
+        }
     }
 
     @Published private(set) var segment: Segment = .all
@@ -129,6 +233,8 @@ final class DynamicsFeedModel: ObservableObject {
 
 struct DynamicsFeedScreen: View {
     @StateObject private var model = DynamicsFeedModel()
+    /// Re-taps of the 动态 tab bar item (scroll to top / refresh).
+    var reselect = FeedReselectSignal()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -144,7 +250,7 @@ struct DynamicsFeedScreen: View {
 
             Divider()
 
-            DynamicsFeedList(model: model, list: model.list)
+            DynamicsFeedList(model: model, list: model.list, reselect: reselect)
         }
         .background(Color(.systemGroupedBackground))
         .task { await model.loadIfNeeded() }
@@ -159,31 +265,51 @@ struct DynamicsFeedScreen: View {
 struct DynamicsFeedList: View {
     @ObservedObject var model: DynamicsFeedModel
     @ObservedObject var list: PagedListModel<DynamicItem>
+    var reselect = FeedReselectSignal()
+    @State private var topTracker = FeedTopTracker()
+    @State private var isReselectRefreshing = false
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 8) {
-                if !model.ups.isEmpty {
-                    DynamicsUpStrip(ups: model.ups, selectedMid: model.selectedUp?.user.mid) { model.select(up: $0) }
-                }
-                if let up = model.selectedUp {
-                    DynamicsSelectedUpBar(up: up) { model.select(up: nil) }
-                }
-                ForEach(list.items) { item in
-                    DynamicCardView(item: item)
-                        .onAppear { list.onItemAppear(item) }
-                }
-                ListFooter(isLoading: list.isLoading, hasMore: list.hasMore, isEmpty: list.isEmpty,
-                           error: list.errorMessage,
-                           emptyText: model.selectedUp == nil ? "关注的UP主还没有发布动态" : "TA还没有发布动态") {
-                    Task {
-                        if list.isEmpty { await list.refresh() } else { await list.loadMore() }
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    FeedTopAnchor(tracker: topTracker)
+                    if isReselectRefreshing { FeedRefreshingRow() }
+                    LazyVStack(spacing: 8) {
+                        if !model.ups.isEmpty {
+                            DynamicsUpStrip(ups: model.ups, selectedMid: model.selectedUp?.user.mid) { model.select(up: $0) }
+                        }
+                        if let up = model.selectedUp {
+                            DynamicsSelectedUpBar(up: up) { model.select(up: nil) }
+                        }
+                        ForEach(list.items) { item in
+                            DynamicCardView(item: item)
+                                .onAppear { list.onItemAppear(item) }
+                        }
+                        ListFooter(isLoading: list.isLoading, hasMore: list.hasMore, isEmpty: list.isEmpty,
+                                   error: list.errorMessage, emptyText: emptyText) {
+                            Task {
+                                if list.isEmpty { await list.refresh() } else { await list.loadMore() }
+                            }
+                        }
                     }
+                    .padding(.bottom, 8)
                 }
             }
-            .padding(.bottom, 8)
+            .refreshable { await model.reloadAll() }
+            .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
+                await model.reloadAll()
+            }
         }
-        .refreshable { await model.reloadAll() }
+    }
+
+    private var emptyText: String {
+        if model.selectedUp != nil { return "TA还没有发布动态" }
+        switch model.segment {
+        case .all, .video: return "关注的UP主还没有发布动态"
+        case .pgc: return "追的番剧还没有更新动态"
+        case .article: return "关注的UP主还没有发布专栏"
+        }
     }
 }
 

@@ -225,14 +225,22 @@ struct PlayerMenuBuilder {
                           }),
         ]
         rows += controller.adSegments.map { segment in
-            PlayerMenuRow(id: "smartSkip.segment.\(segment.id)",
-                          title: "\(PlayerFormat.time(segment.start)) 至 \(PlayerFormat.time(segment.end))",
-                          detail: segment.label ?? (segment.requiresConfirmation ? nil : "广告"),
-                          badge: segment.requiresConfirmation ? "疑似" : nil, dimmed: !s.enabled,
-                          kind: .action {
-                              close()
-                              controller.smartSkipJump(to: segment)
-                          })
+            // 空降助手 「仅显示」 segments are only marked on the bar (the tracker ignores them): not skippable here.
+            let label = segment.label ?? (segment.requiresConfirmation ? nil : "广告")
+            return PlayerMenuRow(id: "smartSkip.segment.\(segment.id)",
+                                 title: "\(PlayerFormat.time(segment.start)) 至 \(PlayerFormat.time(segment.end))",
+                                 detail: segment.displayOnly ? [label, "仅显示"].compactMap { $0 }.joined(separator: " · ")
+                                     : label,
+                                 badge: segment.requiresConfirmation && !segment.displayOnly ? "疑似" : nil,
+                                 dimmed: !s.enabled || segment.displayOnly,
+                                 kind: .action {
+                                     guard !segment.displayOnly else {
+                                         ToastCenter.shared.show("该片段设置为仅显示，不会跳过")
+                                         return
+                                     }
+                                     close()
+                                     controller.smartSkipJump(to: segment)
+                                 })
         }
         return rows
     }
@@ -241,7 +249,8 @@ struct PlayerMenuBuilder {
         let s = settings.smartSkip
         guard s.enabled else { return "已关闭" }
         let mode = s.mode == .auto ? "自动" : "手动"
-        return controller.adSegments.isEmpty ? mode : "\(mode) · \(controller.adSegments.count)段"
+        let count = controller.adSegments.filter { !$0.displayOnly }.count
+        return count == 0 ? mode : "\(mode) · \(count)段"
     }
 
     private func moreRows() -> [PlayerMenuRow] {

@@ -230,6 +230,9 @@ final class SegmentSubscription {
 
 final class SegmentStore {
     static let failureLimit = 6
+    /// A track suspended after `failureLimit` accelerated failures sends one probe job through the accelerated
+    /// path again this long after the suspension (or the last failed probe): BTR §11.6 re-take.
+    static let retakeAfterMs: Double = 30_000
     static let warmThresholdBytes: Int64 = 64 * 1024
     static let readerStartupPriority = 120
     static let readerPriority = 70
@@ -256,6 +259,8 @@ final class SegmentStore {
         var cache: [Int: Data] = [:]
         var warmEnd: Int64?
         var consecutiveFailures = 0
+        /// When acceleration was suspended (≥ `failureLimit` failures) or last probed while suspended.
+        var suspendedAtMs: Double?
         var failedAtMs: [Int: Double] = [:]
         init(_ spec: SegmentStoreTrack) { self.spec = spec }
         var segments: [SidxSegment] { spec.segments }
@@ -349,7 +354,9 @@ final class SegmentStore {
     var isAccelerating: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return tracks.values.contains { useAcceleratedLocked($0) }
+        return tracks.values.contains {
+            $0.spec.accelerate && $0.consecutiveFailures < Self.failureLimit && accelerationAllowed()
+        }
     }
 
     var startupTargetSeconds: Double? {
@@ -620,8 +627,16 @@ final class SegmentStore {
         order.compactMap { kind in tracks[kind].map { (kind: kind, segments: $0.segments) } }
     }
 
+    /// Whether a new job of `track` takes the accelerated path. A suspended track (a transient outage: Wi-Fi to
+    /// cellular, a tunnel) is not given up for good: every `retakeAfterMs` one job probes acceleration again; its
+    /// success resumes the track (`noteAcceleratedOutcome`), its failure keeps it suspended for another period.
     private func useAcceleratedLocked(_ track: TrackState) -> Bool {
-        track.spec.accelerate && track.consecutiveFailures < Self.failureLimit && accelerationAllowed()
+        guard track.spec.accelerate, accelerationAllowed() else { return false }
+        guard track.consecutiveFailures >= Self.failureLimit else { return true }
+        let now = clock.nowMs()
+        guard now - (track.suspendedAtMs ?? now) >= Self.retakeAfterMs else { return false }
+        track.suspendedAtMs = now
+        return true
     }
 
     /// Range kind + priority for a download a client request is waiting for.
@@ -801,9 +816,16 @@ final class SegmentStore {
     }
 
     private func noteAcceleratedOutcome(_ kind: MediaKind, success: Bool) {
+        let now = clock.nowMs()
         lock.lock()
         if let track = tracks[kind] {
-            track.consecutiveFailures = success ? 0 : track.consecutiveFailures + 1
+            if success {
+                track.consecutiveFailures = 0
+                track.suspendedAtMs = nil
+            } else {
+                track.consecutiveFailures += 1
+                if track.consecutiveFailures >= Self.failureLimit, track.suspendedAtMs == nil { track.suspendedAtMs = now }
+            }
         }
         lock.unlock()
     }

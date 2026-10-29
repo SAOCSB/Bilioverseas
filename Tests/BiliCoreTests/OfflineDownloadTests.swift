@@ -161,6 +161,37 @@ final class OfflineModelTests: XCTestCase {
         XCTAssertEqual(task.videoRef.cid, 99)
     }
 
+    func testTaskFromTheVideoPage() {
+        var detail = VideoDetail()
+        detail.aid = 9
+        detail.bvid = "BV1xx411c7mD"
+        detail.cid = 100
+        detail.title = "上下集"
+        detail.cover = "https://i0.hdslb.com/bfs/archive/a.jpg"
+        detail.owner = UserBrief(mid: 5, name: "UP主")
+        detail.duration = 900
+        var second = VideoPart(cid: 200, page: 2, part: "下集", duration: 450)
+        second.width = 1080
+        second.height = 1920
+        detail.pages = [VideoPart(cid: 100, page: 1, part: "上集", duration: 450), second]
+        let task = OfflineTask(detail: detail, part: second, quality: 64, qualityTitle: "720P 高清")
+        XCTAssertEqual(task.id, "BV1xx411c7mD_200")
+        XCTAssertEqual(task.cid, 200)
+        XCTAssertEqual(task.displayPart, "P2 下集")
+        XCTAssertEqual(task.duration, 450)
+        XCTAssertTrue(task.isVertical)
+        XCTAssertEqual(task.ownerName, "UP主")
+        XCTAssertEqual(task.requestedQuality, 64)
+        XCTAssertEqual(task.qualityTitle, "720P 高清")
+        XCTAssertEqual(task.state, .waiting)
+        // A single-part video without a pages list.
+        detail.pages = []
+        let single = OfflineTask(detail: detail, part: VideoPart(cid: 0), quality: 80)
+        XCTAssertEqual(single.cid, 100)
+        XCTAssertEqual(single.duration, 900)
+        XCTAssertEqual(single.displayPart, "")
+    }
+
     func testManifestRoundTrip() throws {
         var task = OfflineTask(aid: 7, bvid: "BV1ab411c7mD", cid: 8, title: "视频")
         task.state = .paused

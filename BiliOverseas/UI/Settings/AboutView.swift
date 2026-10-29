@@ -185,6 +185,13 @@ enum AboutLicenseTexts {
               usage: "「广告跳过」根据章节、简介、字幕和弹幕识别视频内广告的算法移植自该项目。",
               text: gplNotice(program: "BiliSmartSkip", copyright: "Copyright (C) wzy403", orLater: false),
               url: URL(string: "https://github.com/wzy403/BiliSmartSkip")),
+        Entry(id: "bsbsb",
+              name: "BilibiliSponsorBlock（空降助手）",
+              author: "hanydd 及贡献者",
+              license: "社区数据 · 公开接口",
+              usage: "「空降助手」通过该项目的公开接口（默认 www.bsbsb.top）获取观众提交的片段；片段类别的中文名称与说明取自该项目的 zh_CN 文案（经 PiliPlus 转引）。",
+              text: sponsorBlockNotice,
+              url: URL(string: "https://github.com/hanydd/BilibiliSponsorBlock")),
         Entry(id: "atv",
               name: "ATV-Bilibili-demo",
               author: "yichengchen",
@@ -262,6 +269,14 @@ enum AboutLicenseTexts {
         along with this program; if not, see \(licenseURL)
         """
     }
+
+    static let sponsorBlockNotice = """
+    BilibiliSponsorBlock
+    https://github.com/hanydd/BilibiliSponsorBlock
+
+    本应用不包含 BilibiliSponsorBlock 的程序代码，只在「空降助手」开启时（设置 → 广告跳过 → 空降助手）\
+    按正在播放的视频向其服务器查询片段，不发送账号信息。片段由社区提交，内容、版权与使用条款以该项目及其服务器的说明为准。
+    """
 
     static let gpl3Notice = """
     PiliPlus

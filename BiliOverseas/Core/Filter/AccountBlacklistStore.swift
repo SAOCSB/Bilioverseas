@@ -8,6 +8,9 @@ import Foundation
 final class AccountBlacklistStore {
     static let shared = AccountBlacklistStore()
 
+    /// Posted (on any thread, object: the store) after the set changed, so lists re-apply `FeedFilter`.
+    static let didChange = Notification.Name("AccountBlacklistStoreDidChange")
+
     private let lock = NSLock()
     private var storage: Set<Int64>
     private let defaults: UserDefaults?
@@ -45,25 +48,31 @@ final class AccountBlacklistStore {
 
     /// Replaces the whole set (the account's blacklist was fetched).
     func update(_ mids: Set<Int64>) {
-        lock.lock()
-        defer { lock.unlock() }
-        storage = mids
-        persistLocked()
+        mutate { storage in
+            guard storage != mids else { return false }
+            storage = mids
+            return true
+        }
     }
 
     /// 拉黑 succeeded.
     func insert(_ mid: Int64) {
         guard mid != 0 else { return }
-        lock.lock()
-        defer { lock.unlock() }
-        if storage.insert(mid).inserted { persistLocked() }
+        mutate { $0.insert(mid).inserted }
     }
 
     /// 取消拉黑 succeeded.
     func remove(_ mid: Int64) {
+        mutate { $0.remove(mid) != nil }
+    }
+
+    /// Applies `change` under the lock; when it reports a change, persists and posts `didChange`.
+    private func mutate(_ change: (inout Set<Int64>) -> Bool) {
         lock.lock()
-        defer { lock.unlock() }
-        if storage.remove(mid) != nil { persistLocked() }
+        let changed = change(&storage)
+        if changed { persistLocked() }
+        lock.unlock()
+        if changed { NotificationCenter.default.post(name: AccountBlacklistStore.didChange, object: self) }
     }
 
     /// Logout.

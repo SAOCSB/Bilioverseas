@@ -273,10 +273,12 @@ enum MessageAPI {
 
     static func session(_ j: JSON) -> WhisperSession? {
         let talker = j["talker_id"].int64Value
-        guard talker > 0 else { return nil }
+        let type = j["session_type"].int ?? 1
+        // 1 = user / official account, 2 = 应援团 group; folded containers cannot be opened.
+        guard talker > 0, type == 1 || type == 2 else { return nil }
         var s = WhisperSession()
         s.talkerId = talker
-        s.sessionType = j["session_type"].int ?? 1
+        s.sessionType = type
         s.unreadCount = max(0, j["unread_count"].intValue)
         s.sessionTs = j["session_ts"].int64Value
         s.isPinned = j["top_ts"].int64Value > 0

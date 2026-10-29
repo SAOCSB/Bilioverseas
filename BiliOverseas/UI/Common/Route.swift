@@ -14,6 +14,10 @@ enum Route: Hashable {
     case history
     case watchLater
     case bangumiFollows
+    /// 番剧索引 (番剧 tab), opened on one season type (1 番剧, 4 国创, 2 电影, 5 电视剧, 3 纪录片).
+    case bangumiIndex(seasonType: Int)
+    /// Any comment area (`oid` + `type`, e.g. a 图文 dynamic), shown with the in-app comment UI.
+    case comments(oid: Int64, type: Int, title: String)
     case popularWeekly
     case popularPrecious
     case following(mid: Int64)
@@ -88,6 +92,12 @@ struct RouteView: View {
             WatchLaterView()
         case .bangumiFollows:
             MyBangumiFollowsView()
+        case .bangumiIndex(let seasonType):
+            BangumiIndexView(seasonType: seasonType)
+        case .comments(let oid, let type, let title):
+            VideoCommentsView(oid: oid, type: type)
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
         case .popularWeekly:
             PopularWeeklyView()
         case .popularPrecious:

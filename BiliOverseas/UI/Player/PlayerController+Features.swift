@@ -228,6 +228,7 @@ extension PlayerController {
     /// A row of the in-player 「广告跳过」 list: past that segment (it joins the skip history, so auto mode does
     /// not skip it again when the user comes back).
     func smartSkipJump(to segment: AdSegment) {
+        guard !segment.displayOnly else { return }
         let before = displayTime() < segment.end
         tracker?.markSkipped(id: segment.id)
         skipPrompt = nil

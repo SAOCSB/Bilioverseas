@@ -8,7 +8,6 @@ private func ref(_ aid: Int64, epId: Int64 = 0) -> VideoRef {
 }
 
 final class VideoPlaylistTests: XCTestCase {
-
     @MainActor
     func testDropsUnplayableAndDuplicateEntries() async {
         let list = VideoPlaylist(title: "稍后再看", items: [ref(1), VideoRef(), ref(2), ref(1), ref(0, epId: 9)])

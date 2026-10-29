@@ -401,9 +401,10 @@ struct SearchView: View {
         if !Task.isCancelled { fieldFocused = true }
     }
 
-    /// Debounced (250 ms) suggestions; `.task(id:)` cancels the previous term's request.
+    /// Debounced (250 ms) suggestions; `.task(id:)` cancels the previous term's request. With
+    /// 「搜索建议」 off only the typed text is offered.
     private func loadSuggestions(for term: String) async {
-        guard !term.isEmpty else {
+        guard !term.isEmpty, AppSettings.shared.general.searchSuggestion else {
             suggestions = []
             return
         }

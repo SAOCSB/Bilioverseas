@@ -177,6 +177,21 @@ struct OfflineTask: Codable, Hashable, Identifiable {
         self.title = title
     }
 
+    /// One part of a video page, to be cached at `quality` (the qn picked in the 缓存 sheet).
+    init(detail: VideoDetail, part: VideoPart, quality: Int, qualityTitle: String = "") {
+        self.init(aid: detail.aid, bvid: detail.bvid, cid: part.cid != 0 ? part.cid : detail.cid, title: detail.title)
+        cover = detail.cover
+        ownerName = detail.owner.name
+        ownerMid = detail.owner.mid
+        duration = Double(part.duration > 0 ? part.duration : detail.duration)
+        isVertical = part.width > 0 && part.height > 0 ? part.isVertical : detail.isVertical
+        page = part.page
+        partTitle = part.part
+        partCount = max(1, detail.pages.count)
+        requestedQuality = quality
+        self.qualityTitle = qualityTitle
+    }
+
     /// `BV1xx411c7mD_123456` (`av170001_123456` without a BV id); safe as a directory name.
     static func makeID(aid: Int64, bvid: String, cid: Int64) -> String {
         let video = bvid.isEmpty ? "av\(aid)" : bvid

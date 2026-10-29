@@ -30,7 +30,6 @@ final class WhisperChatModel: ObservableObject {
     private var maxSeqno: Int64 = 0
     private var ackedSeqno: Int64 = 0
     private var withdrawn: Set<String> = []
-    private var generation = 0
 
     init(peer: WhisperPeer) {
         self.peer = peer
@@ -61,12 +60,10 @@ final class WhisperChatModel: ObservableObject {
 
     /// Loads the newest page and merges it below what is shown (first load, refresh, after sending).
     func loadLatest() async {
-        let gen = generation
         isLoading = true
         errorMessage = nil
         do {
             let page = try await MessageAPI.messages(peer: peer)
-            guard gen == generation else { return }
             if messages.isEmpty || page.minSeqno > maxSeqno {
                 // First page, or more arrived than one page holds: start over from the newest page.
                 messages = []
@@ -80,7 +77,6 @@ final class WhisperChatModel: ObservableObject {
             isLoading = false
             await acknowledge()
         } catch {
-            guard gen == generation else { return }
             if !ListMapping.isCancellation(error) {
                 if messages.isEmpty { errorMessage = error.localizedDescription } else { ToastCenter.shared.show(error: error) }
                 didLoad = true
@@ -93,19 +89,17 @@ final class WhisperChatModel: ObservableObject {
     func loadOlder() async {
         guard didLoad, hasMore, !isLoadingOlder, !isLoading, minSeqno > 0 else { return }
         isLoadingOlder = true
-        let gen = generation
         do {
             let page = try await MessageAPI.messages(peer: peer, before: minSeqno)
-            guard gen == generation else { return }
             let before = messages.count
             merge(page)
             if page.minSeqno > 0 { minSeqno = min(minSeqno, page.minSeqno) }
             // An older page that adds nothing (end_seqno is inclusive) is the end.
             hasMore = page.hasMore && messages.count > before
         } catch {
-            if gen == generation, !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
+            if !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
         }
-        if gen == generation { isLoadingOlder = false }
+        isLoadingOlder = false
     }
 
     private func merge(_ page: WhisperMessagePage) {
@@ -548,7 +542,6 @@ struct WhisperCardView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(card.link == nil)
     }
 }
 

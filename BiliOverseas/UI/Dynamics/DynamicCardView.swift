@@ -60,6 +60,16 @@ enum DynamicRoutes {
         return detailURL(for: item).map { Route.web($0) }
     }
 
+    /// 评论: a video / episode / live card opens its own page (comments are there); image, text,
+    /// article and forward posts open their comment area in the app (the web page in Safari would
+    /// not share the app's login).
+    static func commentRoute(for item: DynamicItem) -> Route? {
+        if item.video == nil, item.commentId != 0, item.commentType != 0 {
+            return .comments(oid: item.commentId, type: item.commentType, title: "评论")
+        }
+        return primaryRoute(for: item)
+    }
+
     /// Link used by 转发 (share) and 复制链接.
     static func shareURL(for item: DynamicItem) -> URL? {
         if hasRealId(item) { return URL(string: "https://t.bilibili.com/\(item.idStr)") }
@@ -733,7 +743,7 @@ struct DynamicActionBar: View {
     @ViewBuilder private var commentItem: some View {
         let label = DynamicActionLabel(systemImage: "text.bubble",
                                        text: item.stat.comment > 0 ? Fmt.count(item.stat.comment) : "评论")
-        if let route = DynamicRoutes.primaryRoute(for: item) {
+        if let route = DynamicRoutes.commentRoute(for: item) {
             NavigationLink(value: route) { label }
                 .buttonStyle(.plain)
         } else {

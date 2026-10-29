@@ -200,6 +200,46 @@ final class SegmentStoreTests: XCTestCase {
         store.close()
     }
 
+    /// BTR §11.6 re-take: a suspended track probes the accelerated path again every 30 s (one job); a failed
+    /// probe keeps it suspended, a successful one resumes acceleration.
+    func testSuspendedTrackProbesAccelerationAgainEveryThirtySeconds() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: Array(repeating: 90_000, count: 10),
+                                           durations: Array(repeating: 2000, count: 10))
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        downloader.acceleratedFailures = 7   // six suspend the track, then the first probe fails too
+        downloader.failAfterBytes = 0
+        let clock = EngineTestClock()
+        let store = try makeStore(file, downloader: downloader, clock: clock)
+        func read(_ i: Int) async throws -> ArraySlice<EngineFakeDownloader.Call> {
+            let before = downloader.calls.count
+            let seg = file.segments[i]
+            let bytes = try await engineDrain(try XCTUnwrap(store.reader(kind: .video, range: seg)))
+            XCTAssertEqual(bytes, slice(file, seg), "segment \(i)")
+            return downloader.calls[before...]
+        }
+        for i in 0..<6 { _ = try await read(i) }
+        let six = await engineEventually { store.debugConsecutiveFailures(.video) == 6 }
+        XCTAssertTrue(six)
+        let suspended = try await read(6)
+        XCTAssertEqual(suspended.map(\.direct), [true], "suspended: plain only")
+
+        clock.advance(ms: 30_000)
+        let failedProbe = try await read(7)
+        XCTAssertEqual(failedProbe.map(\.direct), [false, true], "probe, then the per-request fallback")
+        XCTAssertTrue(store.fallbackActive, "a failed probe keeps the track suspended")
+        let waiting = try await read(8)
+        XCTAssertEqual(waiting.map(\.direct), [true], "the next probe waits another period")
+
+        clock.advance(ms: 30_000)
+        let probe = try await read(9)
+        XCTAssertEqual(probe.map(\.direct), [false], "the probe succeeds")
+        let resumed = await engineEventually { store.debugConsecutiveFailures(.video) == 0 }
+        XCTAssertTrue(resumed)
+        XCTAssertTrue(store.isAccelerating)
+        XCTAssertFalse(store.fallbackActive)
+        store.close()
+    }
+
     func testAcceleratedSuccessResetsFailureCount() async throws {
         let file = EngineSyntheticMP4.make(segmentSizes: Array(repeating: 90_000, count: 4),
                                            durations: Array(repeating: 2000, count: 4))

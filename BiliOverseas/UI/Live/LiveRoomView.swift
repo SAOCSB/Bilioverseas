@@ -26,7 +26,8 @@ struct LiveRoomView: View {
                 if !isFullscreen {
                     LiveRoomInfoPanel(model: model)
                     Divider()
-                    LiveRoomChatPanel(chat: model.chat) { model.retryDanmaku() }
+                    LiveRoomChatPanel(chat: model.chat, onRetry: { model.retryDanmaku() },
+                                      onSend: { await model.sendDanmaku($0) })
                 }
             }
         }
@@ -143,6 +144,7 @@ final class LiveRoomModel: ObservableObject {
     @Published var showsDanmakuOverlay = true
     /// Re-requesting play URLs after every line failed (show a spinner, not the error).
     @Published private(set) var isRecovering = false
+    @Published private(set) var isSendingDanmaku = false
 
     private var socket: LiveDanmakuSocket?
     private var socketTask: Task<Void, Never>?
@@ -153,6 +155,9 @@ final class LiveRoomModel: ObservableObject {
     private var startOnAppear = false
     private var resumeOnAppear = false
     private var preferredQn: Int
+    /// The user's 弹幕屏蔽 rules for the chat and the overlay, rebuilt when the settings change.
+    private var danmakuFilter: DanmakuFilter
+    private var danmakuSettingsObserver: AnyCancellable?
 
     /// Last chosen live quality (qn); 10000 = 原画.
     private static let qnKey = "bili.live.preferredQn"
@@ -161,11 +166,19 @@ final class LiveRoomModel: ObservableObject {
         requestedRoomId = roomId
         let saved = UserDefaults.standard.integer(forKey: LiveRoomModel.qnKey)
         preferredQn = saved > 0 ? saved : 10000
+        danmakuFilter = LiveRoomModel.makeDanmakuFilter(AppSettings.shared.danmaku)
         showsDanmakuOverlay = AppSettings.shared.danmaku.enabled
         player.onExhausted = { [weak self] in self?.handleExhausted() }
         player.onPlaying = { [weak self] in self?.refetchBudget = 3 }
         player.onPiPStopped = { [weak self] in self?.pipDidStop() }
         player.owner = self
+        danmakuSettingsObserver = AppSettings.shared.$danmaku
+            .receive(on: RunLoop.main)
+            .sink { [weak self] settings in self?.danmakuFilter = LiveRoomModel.makeDanmakuFilter(settings) }
+    }
+
+    private static func makeDanmakuFilter(_ settings: DanmakuSettings) -> DanmakuFilter {
+        DanmakuFilter(settings: settings, selfMidHash: BiliHTTP.shared.mid.map { DanmakuHash.midHash(mid: $0) })
     }
 
     /// The real room id (short ids resolve through getRoomPlayInfo / getH5InfoByRoom).
@@ -361,6 +374,33 @@ final class LiveRoomModel: ObservableObject {
         }
     }
 
+    /// 弹幕屏蔽 keywords, regexes and blocked UIDs (matched by midHash). Own messages always pass; the
+    /// video-only rules (智能云屏蔽 weight, type blocks) do not apply to live chat.
+    private func passesBlockRules(_ m: LiveDanmakuMessage) -> Bool {
+        let item = DanmakuItem(id: 0, time: 0, midHash: m.uid != 0 ? DanmakuHash.midHash(mid: m.uid) : "",
+                               content: m.text, weight: Int.max)
+        return danmakuFilter.isOwn(item) || danmakuFilter.passesRules(item)
+    }
+
+    /// 发送弹幕; true when it went out (the socket then delivers it into the chat like any other).
+    func sendDanmaku(_ text: String) async -> Bool {
+        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty, !isSendingDanmaku else { return false }
+        guard BiliHTTP.shared.isLoggedIn else {
+            ToastCenter.shared.show("请先登录")
+            return false
+        }
+        isSendingDanmaku = true
+        defer { isSendingDanmaku = false }
+        do {
+            try await LiveAPI.sendMessage(roomId: roomId, text: message)
+            return true
+        } catch {
+            if !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
+            return false
+        }
+    }
+
     /// 重连: new credentials (the token may have expired) and a new socket.
     func retryDanmaku() {
         socket?.stop()
@@ -386,6 +426,7 @@ final class LiveRoomModel: ObservableObject {
                 chat.status = "重连中…"
             }
         case .message(let m):
+            guard passesBlockRules(m) else { return }
             chat.append(m)
             if showsDanmakuOverlay && isLive { danmakuFeed.send(m) }
         case .watched(let text):
@@ -723,6 +764,14 @@ struct LiveRoomInfoPanel: View {
 struct LiveRoomChatPanel: View {
     @ObservedObject var chat: LiveChatStore
     let onRetry: () -> Void
+    /// Sends a danmaku, true when it went out (the field is cleared then). nil hides the input bar.
+    var onSend: ((String) async -> Bool)?
+    @ObservedObject private var auth = AuthService.shared
+    @State private var draft = ""
+    @State private var isSending = false
+
+    /// Longest live danmaku the input accepts (the server may allow fewer for low account levels).
+    private static let maxLength = 40
 
     var body: some View {
         VStack(spacing: 0) {
@@ -764,8 +813,68 @@ struct LiveRoomChatPanel: View {
                     proxy.scrollTo(id, anchor: .bottom)
                 }
             }
+            if let onSend {
+                Divider()
+                sendBar(onSend)
+            }
         }
         .frame(maxHeight: .infinity)
+    }
+
+    private var trimmedDraft: String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @ViewBuilder
+    private func sendBar(_ onSend: @escaping (String) async -> Bool) -> some View {
+        HStack(spacing: 10) {
+            if auth.isLoggedIn {
+                TextField("发个弹幕呗~", text: $draft)
+                    .font(.subheadline)
+                    .submitLabel(.send)
+                    .onSubmit { send(onSend) }
+                    .padding(.horizontal, 12)
+                    .frame(height: 34)
+                    .background(Color(.secondarySystemBackground), in: Capsule())
+                    .onChange(of: draft) { value in
+                        if value.count > LiveRoomChatPanel.maxLength { draft = String(value.prefix(LiveRoomChatPanel.maxLength)) }
+                    }
+                Button {
+                    send(onSend)
+                } label: {
+                    if isSending {
+                        ProgressView()
+                    } else {
+                        Text("发送")
+                    }
+                }
+                .font(.subheadline.weight(.medium))
+                .disabled(trimmedDraft.isEmpty || isSending)
+            } else {
+                NavigationLink(value: Route.login) {
+                    Text("登录后发弹幕")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .frame(height: 34)
+                        .background(Color(.secondarySystemBackground), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private func send(_ onSend: @escaping (String) async -> Bool) {
+        let text = trimmedDraft
+        guard !text.isEmpty, !isSending else { return }
+        isSending = true
+        Task {
+            if await onSend(text) { draft = "" }
+            isSending = false
+        }
     }
 }
 

@@ -105,13 +105,17 @@ final class HomeTabModels: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.reloadRecommend() }
             .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: AccountBlacklistStore.didChange)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.reapplyFilters() }
+            .store(in: &cancellables)
         NotificationCenter.default.publisher(for: AuthService.loginStateDidChange)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.accountMayHaveChanged() }
             .store(in: &cancellables)
     }
 
-    /// The user edited the 屏蔽 rules: hide matching rows that are already on screen.
+    /// The 屏蔽 rules (or the synced blacklist) changed: hide matching rows already on screen.
     func reapplyFilters() {
         recommend.reapplyFilter()
         popular.reapplyFilter()

@@ -347,6 +347,8 @@ struct LivePlayerSurface: UIViewRepresentable {
     func makeUIView(context: Context) -> LivePlayerLayerUIView {
         let view = LivePlayerLayerUIView()
         view.backgroundColor = .black
+        // Taps go to the SwiftUI controls overlay.
+        view.isUserInteractionEnabled = false
         view.playerLayer.videoGravity = .resizeAspect
         view.playerLayer.player = controller.player
         controller.attach(layer: view.playerLayer)

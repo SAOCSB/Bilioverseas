@@ -4,7 +4,7 @@ import Foundation
 //
 // - a table per track (pinned init/index bytes + the sidx segment list),
 // - an in-memory cache of completed segments with a byte budget (evicts segments behind playhead − 30 s first,
-//   then the farthest ahead; btr-core §9.7 / §13.3),
+//   then the rest of what already played, then the farthest ahead — never the one being read; btr-core §9.7 / §13.3),
 // - in-flight segment downloads that late readers JOIN: a client request for a segment that is being prefetched
 //   attaches to that download and streams its bytes as they arrive — a segment is never downloaded twice at once,
 // - fetch execution through the BTR downloader: `.startup` only for start / seek / retry ranges (btr-core §10
@@ -672,7 +672,8 @@ final class SegmentStore {
                 reading[key.index] = entry.readers > 0
                 used += entry.fetch.range.length
             }
-            for (index, data) in track.cache where track.segments[index].endTime < time - 30 {
+            // Exactly what `evictLocked` frees before it touches anything ahead of the playhead.
+            for (index, data) in track.cache where track.segments[index].endTime < time {
                 evictable += Int64(data.count)
             }
             inputs.append(PrefetchPlanner.TrackInput(kind: kind, segments: track.segments,
@@ -703,8 +704,12 @@ final class SegmentStore {
         return cancelled
     }
 
-    /// Over budget: drop segments that ended before playhead − 30 s (oldest first), then the farthest ahead.
-    private func evictLocked(now: Double) {
+    /// Over budget: drop segments that ended before playhead − 30 s, then the rest of what already played (oldest
+    /// first: AVPlayer has those), and only then the farthest ahead (the ahead target shrinks). The segment a client
+    /// is reading right now (`protecting`) is never dropped (btr-core §9.7). Keeping played segments while
+    /// evicting the ones ahead used to throw away fresh downloads — even the one AVPlayer had just asked for — and,
+    /// because the planner counted those played bytes as unreclaimable, stopped prefetching under a tight budget.
+    private func evictLocked(now: Double, protecting: SegmentKey? = nil) {
         guard cachedBytes > budgetBytes else { return }
         let time = playhead.current(at: now)
         struct Candidate {
@@ -714,17 +719,25 @@ final class SegmentStore {
             var end: Double
         }
         var behind: [Candidate] = []
-        var rest: [Candidate] = []
+        var played: [Candidate] = []
+        var ahead: [Candidate] = []
         for (kind, track) in tracks {
-            for index in track.cache.keys {
+            for index in track.cache.keys where SegmentKey(kind: kind, index: index) != protecting {
                 let segment = track.segments[index]
                 let candidate = Candidate(kind: kind, index: index, start: segment.startTime, end: segment.endTime)
-                if segment.endTime < time - 30 { behind.append(candidate) } else { rest.append(candidate) }
+                if segment.endTime < time - 30 {
+                    behind.append(candidate)
+                } else if segment.endTime < time {
+                    played.append(candidate)
+                } else {
+                    ahead.append(candidate)
+                }
             }
         }
         behind.sort { ($0.end, $0.kind.rawValue) < ($1.end, $1.kind.rawValue) }
-        rest.sort { ($0.start, $0.kind.rawValue) > ($1.start, $1.kind.rawValue) }
-        for candidate in behind + rest {
+        played.sort { ($0.end, $0.kind.rawValue) < ($1.end, $1.kind.rawValue) }
+        ahead.sort { ($0.start, $0.kind.rawValue) > ($1.start, $1.kind.rawValue) }
+        for candidate in behind + played + ahead {
             guard cachedBytes > budgetBytes else { break }
             if let track = tracks[candidate.kind], let data = track.cache.removeValue(forKey: candidate.index) {
                 cachedBytes -= Int64(data.count)
@@ -800,9 +813,11 @@ final class SegmentStore {
         let fetch = job.fetch
         let data = fetch.data
         lock.lock()
+        var beingRead: SegmentKey?
         if let key = fetch.key {
             if let entry = inflight[key], entry.fetch === fetch {
                 inflight[key] = nil
+                if entry.readers > 0 { beingRead = key }
                 if !closed, let track = tracks[key.kind], track.cache[key.index] == nil {
                     track.cache[key.index] = data
                     cachedBytes += Int64(data.count)
@@ -816,7 +831,7 @@ final class SegmentStore {
         if let track = tracks[job.kind], track.warmEnd != nil || fetch.range.length > Self.warmThresholdBytes {
             track.warmEnd = fetch.range.end + 1
         }
-        evictLocked(now: now)
+        evictLocked(now: now, protecting: beingRead)
         let cancels = replanLocked(now: now)
         lock.unlock()
         fetch.finish()

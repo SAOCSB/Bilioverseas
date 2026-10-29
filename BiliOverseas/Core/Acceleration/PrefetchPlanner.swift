@@ -52,7 +52,7 @@ struct PrefetchPlanner {
         var budgetBytes: Int64
         /// Cached + in-flight bytes.
         var usedBytes: Int64 = 0
-        /// Cached bytes behind `time − 30 s` (evicted first, so they do not block prefetching).
+        /// Cached bytes of segments that already played (evicted first, so they do not block prefetching).
         var evictableBytes: Int64 = 0
         var tracks: [TrackInput]
     }

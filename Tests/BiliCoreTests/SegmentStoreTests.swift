@@ -133,6 +133,42 @@ final class SegmentStoreTests: XCTestCase {
         store.close()
     }
 
+    /// Regression: with a budget smaller than "30 s behind + forward", eviction kept segments AVPlayer had already
+    /// played and dropped the farthest ahead — the segment AVPlayer had just requested — while the planner counted
+    /// the played bytes as unreclaimable and stopped prefetching. Played segments must go first, and the segment
+    /// being read must survive its own completion.
+    func testTightBudgetEvictsPlayedSegmentsAndKeepsPrefetching() async throws {
+        let n = 40
+        let file = EngineSyntheticMP4.make(segmentSizes: Array(repeating: 100_000, count: n),
+                                           durations: Array(repeating: 2000, count: n))
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let store = try makeStore(file, downloader: downloader, budget: 450_000, forward: 20, clock: clock)
+        var prefetchHits = 0
+        for i in 0..<(n - 1) {
+            store.updatePlayback(time: Double(i) * 2, rate: 1, playing: true, bufferedAhead: 2, cacheFull: false)
+            // AVPlayer asks for the segment after the playing one, once.
+            let k = i + 1
+            if store.debugCachedIndices(.video).contains(k) || store.debugInflight(.video)[k] != nil { prefetchHits += 1 }
+            let reader = try XCTUnwrap(store.reader(kind: .video, range: file.segments[k]))
+            let bytes = try await engineDrain(reader)
+            XCTAssertEqual(bytes, slice(file, file.segments[k]))
+            // The reader can finish before the fetch task has filed the segment into the cache.
+            let filed = await engineEventually { store.debugInflight(.video)[k] == nil }
+            XCTAssertTrue(filed)
+            XCTAssertTrue(store.debugCachedIndices(.video).contains(k), "segment \(k) AVPlayer just read was evicted")
+            XCTAssertLessThanOrEqual(store.cachedByteCount, 450_000 + 100_000)
+            clock.advance(ms: 2000)
+        }
+        let settled = await engineEventually { store.debugInflight(.video).isEmpty }
+        XCTAssertTrue(settled)
+        var downloads: [ByteRange: Int] = [:]
+        for call in downloader.calls { downloads[call.range, default: 0] += 1 }
+        XCTAssertTrue(downloads.values.allSatisfy { $0 == 1 }, "re-downloaded: \(downloads.filter { $0.value > 1 })")
+        XCTAssertGreaterThan(prefetchHits, (n - 1) * 3 / 4, "prefetch starved: \(prefetchHits) hits")
+        store.close()
+    }
+
     func testPerRequestFallbackAndSuspensionAfterSixFailures() async throws {
         let file = EngineSyntheticMP4.make(segmentSizes: Array(repeating: 90_000, count: 8),
                                            durations: Array(repeating: 2000, count: 8))

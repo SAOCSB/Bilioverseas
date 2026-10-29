@@ -407,23 +407,26 @@ final class LocalProxyConnection: @unchecked Sendable {
         case end
     }
 
+    /// Parses the next request head out of the inbox (synchronous: NSLock is not used across suspension points).
+    private func takeNextStep() -> NextStep {
+        lock.lock()
+        defer { lock.unlock() }
+        switch HTTPRequestParser.parse(inbox) {
+        case let .complete(request, consumed):
+            inbox = consumed >= inbox.count ? Data() : Data(inbox[(inbox.startIndex + consumed)...])
+            return .request(request)
+        case .tooLarge:
+            return .reject(431)
+        case .invalid:
+            return .reject(400)
+        case .incomplete:
+            return peerClosed ? .end : .wait(inboxVersion)
+        }
+    }
+
     private func nextRequest() async -> ProxyHTTPRequest? {
         while !Task.isCancelled {
-            let step: NextStep
-            lock.lock()
-            switch HTTPRequestParser.parse(inbox) {
-            case let .complete(request, consumed):
-                inbox = consumed >= inbox.count ? Data() : Data(inbox[(inbox.startIndex + consumed)...])
-                step = .request(request)
-            case .tooLarge:
-                step = .reject(431)
-            case .invalid:
-                step = .reject(400)
-            case .incomplete:
-                step = peerClosed ? .end : .wait(inboxVersion)
-            }
-            lock.unlock()
-            switch step {
+            switch takeNextStep() {
             case .request(let request):
                 return request
             case .reject(let status):

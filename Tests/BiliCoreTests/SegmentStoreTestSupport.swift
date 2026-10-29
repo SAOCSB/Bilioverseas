@@ -184,34 +184,49 @@ final class EngineFakeDownloader: BTRDownloading, @unchecked Sendable {
     func download(_ range: ByteRange, track: BTRTrackHandle, kind: BTRRangeKind, priority: Int,
                   deadline: (() -> Double?)?, onBytes: @escaping (Data) async throws -> Void) async throws -> Int64 {
         let call = Call(kind: track.kind, range: range, rangeKind: kind, priority: priority)
-        lock.lock()
-        recorded.append(call)
-        let fail = acceleratedFailures > 0
-        if fail { acceleratedFailures -= 1 }
-        lock.unlock()
+        let fail = record(call)
         return try await serve(call, track: track, fail: fail, clip: kind == .meta, onBytes: onBytes)
     }
 
     func downloadDirect(_ range: ByteRange, track: BTRTrackHandle,
                         onBytes: @escaping (Data) async throws -> Void) async throws -> Int64 {
         let call = Call(kind: track.kind, range: range, rangeKind: nil, priority: nil)
-        lock.lock()
-        recorded.append(call)
-        let fail = directFailures > 0
-        if fail { directFailures -= 1 }
-        lock.unlock()
+        let fail = record(call)
         return try await serve(call, track: track, fail: fail, clip: false, onBytes: onBytes)
+    }
+
+    /// Records the call; true when it should fail (consumes one injected failure).
+    private func record(_ call: Call) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        recorded.append(call)
+        if call.direct {
+            let fail = directFailures > 0
+            if fail { directFailures -= 1 }
+            return fail
+        }
+        let fail = acceleratedFailures > 0
+        if fail { acceleratedFailures -= 1 }
+        return fail
+    }
+
+    private func snapshot(_ kind: MediaKind) -> (file: Data, failAfter: Int, chunk: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (files[kind] ?? Data(), failAfterBytes, chunkSize)
+    }
+
+    private func noteCancelled(_ call: Call) {
+        lock.lock()
+        cancelled.append(call)
+        lock.unlock()
     }
 
     private func serve(_ call: Call, track: BTRTrackHandle, fail: Bool, clip: Bool,
                        onBytes: @escaping (Data) async throws -> Void) async throws -> Int64 {
         do {
             if let gate, gated?(call) ?? true { try await gate.wait() }
-            lock.lock()
-            let file = files[call.kind] ?? Data()
-            let failAfter = failAfterBytes
-            let size = chunkSize
-            lock.unlock()
+            let (file, failAfter, size) = snapshot(call.kind)
             let total = Int64(file.count)
             var end = call.range.end
             if end >= total {
@@ -236,9 +251,7 @@ final class EngineFakeDownloader: BTRDownloading, @unchecked Sendable {
             return total
         } catch {
             if error is CancellationError || Task.isCancelled {
-                lock.lock()
-                cancelled.append(call)
-                lock.unlock()
+                noteCancelled(call)
                 throw CancellationError()
             }
             throw error

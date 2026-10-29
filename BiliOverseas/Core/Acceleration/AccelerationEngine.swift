@@ -684,22 +684,7 @@ final class PlaybackSession {
     /// 45/90/180/300 s backoff. New URLs are swapped into the existing tracks (`updateURLs`), never a new session.
     func refreshIfDue() async {
         guard let refresh = refreshURLs else { return }
-        let nowMs = clock.nowMs()
-        let nowSeconds = wallClock()
-        lock.lock()
-        let oldDeadline = Self.deadline(of: Array(streams.values))
-        guard !closed, !refreshing,
-              URLRefreshPolicy.isDue(nowSeconds: nowSeconds, deadline: oldDeadline, urgent: urgentRefresh,
-                                     nowMs: nowMs, lastAttemptMs: lastRefreshAttemptMs, failures: refreshFailures)
-        else {
-            lock.unlock()
-            return
-        }
-        refreshing = true
-        urgentRefresh = false
-        lastRefreshAttemptMs = nowMs
-        lock.unlock()
-
+        guard let oldDeadline = beginRefresh(nowMs: clock.nowMs(), nowSeconds: wallClock()) else { return }
         var applied: Double?
         do {
             let fresh = try await withEngineTimeout(seconds: 15) { try await refresh() }
@@ -707,14 +692,35 @@ final class PlaybackSession {
         } catch {
             applied = nil
         }
+        endRefresh(applied: applied, oldDeadline: oldDeadline)
+    }
+
+    /// Claims the refresh slot when one is due; returns the current earliest deadline (inner nil = none), or nil
+    /// when no refresh should start now.
+    private func beginRefresh(nowMs: Double, nowSeconds: Double) -> Double?? {
         lock.lock()
+        defer { lock.unlock() }
+        let oldDeadline = Self.deadline(of: Array(streams.values))
+        guard !closed, !refreshing,
+              URLRefreshPolicy.isDue(nowSeconds: nowSeconds, deadline: oldDeadline, urgent: urgentRefresh,
+                                     nowMs: nowMs, lastAttemptMs: lastRefreshAttemptMs, failures: refreshFailures)
+        else { return nil }
+        refreshing = true
+        urgentRefresh = false
+        lastRefreshAttemptMs = nowMs
+        return .some(oldDeadline)
+    }
+
+    /// Same deadline again (or a failure) backs off further: 45 → 90 → 180 → 300 s.
+    private func endRefresh(applied: Double?, oldDeadline: Double?) {
+        lock.lock()
+        defer { lock.unlock() }
         refreshing = false
         if let newDeadline = applied, oldDeadline == nil || newDeadline > (oldDeadline ?? 0) {
             refreshFailures = 0
         } else {
             refreshFailures += 1
         }
-        lock.unlock()
     }
 
     /// Swaps in the fresh URLs of the SAME files (same URL path); returns the new earliest deadline

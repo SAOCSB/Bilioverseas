@@ -23,10 +23,15 @@ final class PlayerNowPlayingCenter {
     func claim(_ controller: PlayerController) {
         installCommandsIfNeeded()
         if owner !== controller {
+            let previous = owner
             owner = controller
             artwork = nil
             artworkURL = ""
+            // One video at a time: the player that played before (a covered page still in PiP …) pauses.
+            if let previous, previous.wantsToPlay { previous.pause() }
         }
+        // A PiP window left over from a closed page ends (its controller then stops).
+        PlayerPiPKeeper.stopOthers(than: controller)
         setCommandsEnabled(true)
         refresh(controller)
         loadArtworkIfNeeded(controller)

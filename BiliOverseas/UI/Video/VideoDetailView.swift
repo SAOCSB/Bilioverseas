@@ -810,10 +810,19 @@ final class VideoDetailModel: ObservableObject {
         if !sideDataLoggedIn {
             isFollowingOwner = false
             followedStaff = []
+            isFollowingSeason = false
         }
         let gen = sideGeneration
         spawn { await $0.loadRelation(gen: gen) }
         if ownerMid > 0 { spawn { await $0.loadOwnerCard(gen: gen) } }
+        if sideDataLoggedIn, let seasonId = season?.seasonId {
+            // 追番 state comes with the season (`user_status`).
+            spawn { model in
+                guard let fresh = try? await VideoAPI.pgcSeason(seasonId: seasonId, epId: nil),
+                      gen == model.sideGeneration, model.season?.seasonId == seasonId else { return }
+                model.isFollowingSeason = fresh.userStatus.follow
+            }
+        }
         if comments.didLoad {
             let list = comments
             Task { await list.refresh() }   // per-user like state of the comments
@@ -912,6 +921,11 @@ final class VideoDetailModel: ObservableObject {
             counts.like = max(0, counts.like + (target ? 1 : -1))
         } catch {
             ToastCenter.shared.show(error: error)
+            // 65006 已经点过赞了 / 65004 取消点赞失败 (not liked): the shown state was wrong (relation not loaded).
+            if let code = (error as? BiliError)?.apiCode, code == 65006 || code == 65004, aid == interactionAid {
+                relationEdits += 1
+                relation.liked = code == 65006
+            }
         }
     }
 
@@ -934,6 +948,11 @@ final class VideoDetailModel: ObservableObject {
             }
         } catch {
             ToastCenter.shared.show(error: error)
+            // 34005 已达到投币上限: the coins were given before (relation not loaded) — stop offering more.
+            if (error as? BiliError)?.apiCode == 34005, aid == interactionAid {
+                relationEdits += 1
+                relation.coinCount = maxCoins
+            }
         }
     }
 

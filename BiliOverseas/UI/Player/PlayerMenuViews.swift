@@ -241,6 +241,7 @@ struct PlayerMenuPanel: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(Text("返回"))
                 }
                 Text(panel.title)
                     .font(.system(size: 15, weight: .semibold))

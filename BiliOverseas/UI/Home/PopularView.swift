@@ -98,8 +98,14 @@ final class PopularWeeklyModel: ObservableObject {
     private var token = 0
 
     func loadIfNeeded() async {
-        guard issues.isEmpty, !isLoading else { return }
-        await reload()
+        guard !isLoading else { return }
+        if issues.isEmpty {
+            await reload()
+        } else if cards.isEmpty, errorMessage == nil, let current {
+            // The issue's request was cancelled (e.g. switched tabs while it loaded): without this
+            // the page would show 「本期暂无视频」 until a manual refresh.
+            await select(current)
+        }
     }
 
     /// Reloads the issue list and the selected (or newest) issue.

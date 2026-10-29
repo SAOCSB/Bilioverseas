@@ -53,6 +53,11 @@ struct UserSpaceView: View {
         }
         .task { await model.loadIfNeeded() }
         .refreshable { await model.refresh(tab: tab) }
+        .onReceive(NotificationCenter.default.publisher(for: AuthService.loginStateDidChange)) { _ in
+            // 关注 while logged out pushes 登录; back here the relation (已关注 or not) must be the
+            // new account's, or 关注 fails with 「已经关注用户」 / 取消关注 is offered wrongly.
+            Task { await model.loadInfo() }
+        }
     }
 }
 

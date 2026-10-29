@@ -892,6 +892,8 @@ final class PlayerController: ObservableObject {
         newItem.audioTimePitchAlgorithm = .timeDomain
         if start > 0.5 { newSession.playerWillSeek(to: start, outsideBuffer: true) }
         playerItem = newItem
+        // `play()` from the PiP window / headphones uses `defaultRate`: keep it within what this item can do.
+        player.defaultRate = playerRate
         observeItem(newItem, generation: sgen)
         player.replaceCurrentItem(with: newItem)
         old?.close()
@@ -924,6 +926,12 @@ final class PlayerController: ObservableObject {
         // A rebuild already preparing brings a new session anyway.
         guard !rebuildPending else { return }
         rebuild(position: position, reason: .endpoint)
+    }
+
+    /// Rebuild a lost endpoint right away (else on the next play / seek): when this page wants to play, or after a
+    /// port change on the visible page. Never for an engine-closed session of an idle page (see above).
+    private func shouldRebuildLostEndpointNow(_ lost: PlaybackSession) -> Bool {
+        wantsToPlay || (!lost.isClosed && !containerHidden)
     }
 
     private func teardown(reportHeartbeat: Bool) {
@@ -1128,8 +1136,6 @@ final class PlayerController: ObservableObject {
         if player.rate != r { player.rate = r }
         syncStatus()
         PlayerNowPlayingCenter.shared.claim(self)
-        // A PiP window left over from a closed page would keep playing over this one.
-        PlayerPiPKeeper.stopOthers(than: self)
     }
 
     private var isNearEnd: Bool {
@@ -1145,10 +1151,17 @@ final class PlayerController: ObservableObject {
             case .playing:
                 waitingSince = nil
                 stallReported = false
-                if !wantsToPlay { wantsToPlay = true }   // started from PiP / lock screen / headphones
+                if !wantsToPlay {
+                    // Started from the PiP window / headphones: this player now owns playback.
+                    wantsToPlay = true
+                    PlayerNowPlayingCenter.shared.claim(self)
+                }
             case .waitingToPlayAtSpecifiedRate:
                 if waitingSince == nil { waitingSince = now }
-                if !wantsToPlay, player.rate > 0 { wantsToPlay = true }
+                if !wantsToPlay, player.rate > 0 {
+                    wantsToPlay = true
+                    PlayerNowPlayingCenter.shared.claim(self)
+                }
                 if player.reasonForWaitingToPlay == .toMinimizeStalls, wantsToPlay, !isSeeking, !stallReported {
                     stallReported = true
                     session?.playerDidStall()
@@ -1204,7 +1217,7 @@ final class PlayerController: ObservableObject {
         if let session, !session.isEndpointValid {
             // Not the stream's fault: no fallback step. An idle page whose session the engine closed waits for
             // play() (see rebuildForLostEndpoint) instead of showing a spinner forever.
-            if wantsToPlay || !session.isClosed {
+            if shouldRebuildLostEndpointNow(session) {
                 rebuildForLostEndpoint(position: lastKnownPosition)
             } else if !startupDone, status == .loading || status == .buffering {
                 status = .paused
@@ -1421,9 +1434,8 @@ final class PlayerController: ObservableObject {
 
         if let session {
             if !session.isEndpointValid {
-                // A port change is rebuilt right away; a session the engine closed only once this page wants to
-                // play (see rebuildForLostEndpoint). A failed or ended player waits for the user.
-                if wantsToPlay || !session.isClosed, !isFailed, status != .ended {
+                // A failed or ended player waits for the user.
+                if shouldRebuildLostEndpointNow(session), !isFailed, status != .ended {
                     rebuildForLostEndpoint(position: nil)
                 }
             } else {

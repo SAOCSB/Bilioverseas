@@ -48,7 +48,10 @@ final class BangumiHomeModel: ObservableObject {
             if ListMapping.isCancellation(error) { cancelled = true } else { rankError = error.localizedDescription }
         }
         if !cancelled { await loadFollows() }
-        if !days.isEmpty || !rank.isEmpty { hasLoaded = true }
+        // A swipe away cancels the tab's task. If only one request had finished by then, the tab
+        // must not count as loaded: the other section would say 「暂无…」 (and 我的追番 stay
+        // missing) until a manual refresh, because loadIfNeeded() would never run again.
+        if !cancelled, !days.isEmpty || !rank.isEmpty { hasLoaded = true }
         isLoading = false
     }
 

@@ -35,8 +35,20 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        // iPads have the thermal/battery headroom for BTR's full ladder; iPhones stop at 32 threads.
+        AccelerationEngine.maxAutoThreads = UIDevice.current.userInterfaceIdiom == .pad ? 64 : 32
         // Start the local BTR proxy early so the first video does not wait for the listener.
         AccelerationEngine.shared.startIfNeeded()
+        let center = NotificationCenter.default
+        center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { _ in
+            AccelerationEngine.shared.applicationWillEnterForeground()
+        }
+        center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
+            AccelerationEngine.shared.applicationDidEnterBackground()
+        }
+        center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { _ in
+            AccelerationEngine.shared.applicationDidReceiveMemoryWarning()
+        }
         return true
     }
 

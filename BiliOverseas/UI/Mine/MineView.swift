@@ -324,13 +324,13 @@ final class MineViewModel: ObservableObject {
     }
 
     /// 硬币 / B币 amounts: "123" or "123.5".
-    nonisolated static func amountText(_ value: Double) -> String {
+    static func amountText(_ value: Double) -> String {
         if value == value.rounded() { return String(Int64(value)) }
         return String(format: "%.1f", value)
     }
 
     /// "#FB7299" → Color.
-    nonisolated static func color(hex: String) -> Color? {
+    static func color(hex: String) -> Color? {
         var s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.hasPrefix("#") { s.removeFirst() }
         guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }

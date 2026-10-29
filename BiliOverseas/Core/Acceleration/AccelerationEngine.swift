@@ -9,6 +9,22 @@ import Foundation
 // Everything here is Foundation-only (Linux-testable with a fake server / downloader). The concrete Network-based
 // pieces (LocalProxyServer, H1MediaClient …) are wired in `Dependencies.live` at the bottom, under
 // `#if canImport(Network)`.
+//
+// Player wiring (AVPlayer → engine):
+// - App launch: `AccelerationEngine.maxAutoThreads = isPad ? 64 : 32`, then `AccelerationEngine.shared.startIfNeeded()`;
+//   `willEnterForeground` → `applicationWillEnterForeground()`, `didEnterBackground` → `applicationDidEnterBackground()`.
+// - New item / quality change: close the previous session, `let s = try await engine.prepare(request)` (or
+//   `prepareProgressive`), `AVURLAsset(url: s.url)` — no custom headers needed — and keep `s` alive with the item.
+//   On a thrown error retry once with `accelerate: false`, then fall back to the progressive path / show the error.
+// - `preferredForwardBufferDuration = settings.forwardBufferSeconds`.
+// - 0.25 s periodic time observer → `s.update(time:rate:playing:bufferedAhead:cacheFull:)`: bufferedAhead = end of
+//   the `loadedTimeRanges` entry containing currentTime − currentTime; playing = `timeControlStatus == .playing`
+//   and not seeking; cacheFull = bufferedAhead ≥ preferredForwardBufferDuration − 1.
+// - `timeControlStatus == .waitingToPlayAtSpecifiedRate` with `reasonForWaitingToPlay == .toMinimizeStalls` after
+//   playback started (not while seeking / starting), or `AVPlayerItemPlaybackStalled` → `s.playerDidStall()`.
+// - Before every `seek(to:)` → `s.playerWillSeek(to:outsideBuffer:)` (outsideBuffer = no loadedTimeRange contains it).
+// - Item replaced / player closed → `s.close()`. Stats overlay: `s.stats` (1 Hz is plenty).
+// - `s.isEndpointValid == false` (the listener had to change port) → rebuild the item at the current time.
 
 // MARK: - Public API types
 
@@ -362,15 +378,27 @@ final class AccelerationEngine: LocalProxyRequestHandler {
                                       refreshURLs: refreshURLs, refreshInterval: dependencies.refreshCheckInterval)
         relay.session = session
         var evicted: [PlaybackSession] = []
+        // Strong references taken under the lock are released only after it: a session whose owner dropped it
+        // meanwhile must not deinit (→ close → unregister → this lock) while the lock is held.
+        var retained: [PlaybackSession] = []
         lock.lock()
         sessions[token] = EngineWeakSession(session)
-        sessionOrder.append(token)
-        sessionOrder = sessionOrder.filter { sessions[$0]?.session != nil }
-        while sessionOrder.count > dependencies.maxSessions {
-            let oldest = sessionOrder.removeFirst()
+        var order: [String] = []
+        for existing in sessionOrder + [token] {
+            if let live = sessions[existing]?.session {
+                retained.append(live)
+                order.append(existing)
+            } else {
+                sessions[existing] = nil
+            }
+        }
+        while order.count > dependencies.maxSessions {
+            let oldest = order.removeFirst()
             if let s = sessions.removeValue(forKey: oldest)?.session { evicted.append(s) }
         }
+        sessionOrder = order
         lock.unlock()
+        retained.removeAll()
         for old in evicted { old.close() }
         if accelerate { dependencies.auto?.newSession() }
         session.startRefreshLoop()

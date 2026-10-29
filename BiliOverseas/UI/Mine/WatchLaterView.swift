@@ -35,7 +35,8 @@ final class MineWatchLaterModel: ObservableObject {
     func reload() async {
         isLoading = true
         do {
-            items = try await WatchLaterAPI.list()
+            var seen = Set<String>()
+            items = try await WatchLaterAPI.list().filter { seen.insert($0.id).inserted }
             loaded = true
             errorMessage = nil
         } catch {

@@ -172,6 +172,10 @@ struct SettingsView: View {
 
     private var logoutSection: some View {
         Section {
+            // The login page replaces the current session (no 退出登录 first).
+            NavigationLink(value: Route.login) {
+                Text("切换账号")
+            }
             Button(role: .destructive) {
                 showLogoutConfirm = true
             } label: {

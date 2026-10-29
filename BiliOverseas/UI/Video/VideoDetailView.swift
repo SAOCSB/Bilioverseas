@@ -290,7 +290,7 @@ final class VideoDetailModel: ObservableObject {
     }
 
     enum Action: Hashable {
-        case like, coin, triple, favorite, watchLater, follow, seasonFollow
+        case like, dislike, coin, triple, favorite, watchLater, follow, seasonFollow
     }
 
     enum Content {
@@ -326,6 +326,8 @@ final class VideoDetailModel: ObservableObject {
     @Published private(set) var ownerArchiveCount: Int64 = 0
     @Published private(set) var ownerIsVip = false
     @Published private(set) var isFollowingOwner = false
+    /// The uploader's detailed relation (`/x/relation`: 已互关 / 特别关注 / 已拉黑 …); nil until loaded.
+    @Published private(set) var ownerRelation: UserRelationState?
     @Published private(set) var followedStaff: Set<Int64> = []
     @Published private(set) var isFollowingSeason = false
 
@@ -342,6 +344,8 @@ final class VideoDetailModel: ObservableObject {
     private var relationEdits = 0
     /// Archives played on this page (auto-next skips them in 相关推荐 so A → B → A loops do not happen).
     private var playedAids: Set<Int64> = []
+    /// 播放全部 list this page was opened with (稍后再看 / 收藏夹); kept across in-place switches.
+    private let playlist: VideoPlaylist?
     /// Bumped by every content load; stale responses are dropped.
     private var generation = 0
     /// Bumped by every content / part / episode change; stale side data is dropped.
@@ -354,6 +358,7 @@ final class VideoDetailModel: ObservableObject {
         self.ref = ref
         let aid = ref.aid > 0 ? ref.aid : (BVConverter.bv2av(ref.bvid) ?? 0)
         comments = VideoCommentsModel(oid: ref.isPGC ? 0 : aid, type: 1)
+        playlist = ref.playlist
     }
 
     // MARK: Derived state
@@ -410,6 +415,14 @@ final class VideoDetailModel: ObservableObject {
         mid == ownerMid ? isFollowingOwner : followedStaff.contains(mid)
     }
 
+    /// What the follow button shows for `mid`: the uploader's detailed relation once `/x/relation` answered,
+    /// otherwise 已关注 / 关注.
+    func relationState(for mid: Int64) -> UserRelationState {
+        let following = isFollowing(mid)
+        if mid == ownerMid, let r = ownerRelation, r.isFollowing == following { return r }
+        return following ? .followed : .notFollowing
+    }
+
     static func isVertical(width: Int, height: Int, rotate: Int) -> Bool {
         let (w, h) = rotate == 1 ? (height, width) : (width, height)
         return h > w
@@ -422,6 +435,7 @@ final class VideoDetailModel: ObservableObject {
         player.onEnded = { [weak self] in
             Task { @MainActor in self?.advance(manual: false) }
         }
+        connectPlayerPage(player)
         refreshNextAvailability()
         if let item = pendingItem, !isCovered {
             pendingItem = nil
@@ -552,6 +566,7 @@ final class VideoDetailModel: ObservableObject {
         ownerArchiveCount = 0
         ownerIsVip = false
         isFollowingOwner = false
+        ownerRelation = nil
         followedStaff = []
 
         switch content {
@@ -635,12 +650,13 @@ final class VideoDetailModel: ObservableObject {
         return item
     }
 
-    func selectPart(_ part: VideoPart) {
+    /// `startTime`: e.g. the 「上次看到第N P」 chip's position (nil = the usual resume rules).
+    func selectPart(_ part: VideoPart, startTime: Double? = nil) {
         guard part.cid != currentCid else { return }
         cancelPendingSwitch()
         currentCid = part.cid
         sideGeneration += 1
-        playCurrent(startTime: nil)
+        playCurrent(startTime: startTime)
         startOnlinePolling()
     }
 
@@ -679,10 +695,15 @@ final class VideoDetailModel: ObservableObject {
         case video(VideoRef)
     }
 
-    /// Next: next part → next 合集 episode → next PGC episode (same list / section) → first (filtered) related
-    /// video not played on this page yet.
-    private func nextStep() -> NextStep? {
+    /// Next: next part → next 播放全部 entry → next 合集 episode → next PGC episode (same list / section) → first
+    /// (filtered) related video not played on this page yet. A play-all list replaces the 合集 / episode list.
+    private func nextStep(includeRelated: Bool = true) -> NextStep? {
         if let s = season, let ep = currentEpisode {
+            switch playlistPosition(aid: ep.aid, bvid: ep.bvid, epId: ep.epId) {
+            case .next(let r)?: return .video(r)
+            case .pending?, .end?: return nil
+            case nil: break
+            }
             let list: [PGCEpisode]
             if s.episodes.contains(where: { $0.epId == ep.epId }) {
                 list = s.episodes
@@ -698,13 +719,20 @@ final class VideoDetailModel: ObservableObject {
         if let i = d.pages.firstIndex(where: { $0.cid == currentCid }), i + 1 < d.pages.count {
             return .part(d.pages[i + 1])
         }
-        if let ugc = d.ugcSeason {
+        var playlistEnded = false
+        switch playlistPosition(aid: d.aid, bvid: d.bvid) {
+        case .next(let r)?: return .video(r)
+        case .pending?: return nil
+        case .end?: playlistEnded = true
+        case nil: break
+        }
+        if !playlistEnded, let ugc = d.ugcSeason {
             let episodes = ugc.allEpisodes
             if let i = episodes.firstIndex(where: { $0.aid == d.aid }), i + 1 < episodes.count {
                 return .video(episodes[i + 1].videoRef)
             }
         }
-        if let next = related.first(where: { !playedAids.contains($0.aid) }) ?? related.first {
+        if includeRelated, let next = related.first(where: { !playedAids.contains($0.aid) }) ?? related.first {
             var r = next.videoRef
             r.startTime = nil
             return .video(r)
@@ -712,9 +740,65 @@ final class VideoDetailModel: ObservableObject {
         return nil
     }
 
-    /// Automatic advancing at the end honours 「自动连播」; the 下一集 button always advances.
+    private enum PlaylistPosition {
+        /// The following entry.
+        case next(VideoRef)
+        /// Last loaded entry; the next page is still loading (`prefetchPlaylistIfNeeded`).
+        case pending
+        /// Last entry of the list.
+        case end
+    }
+
+    /// Where the 播放全部 list goes after the given video; nil without a list or when the video is not in it
+    /// (e.g. a related video played after the list ended).
+    private func playlistPosition(aid: Int64, bvid: String, epId: Int64 = 0) -> PlaylistPosition? {
+        guard let playlist, playlist.index(aid: aid, bvid: bvid, epId: epId) != nil else { return nil }
+        if let next = playlist.entry(after: aid, bvid: bvid, epId: epId) { return .next(next) }
+        return playlist.hasMore ? .pending : .end
+    }
+
+    /// Loads the next 播放全部 page while one of the last loaded entries plays; a video that ended meanwhile
+    /// advances once it arrives.
+    private func prefetchPlaylistIfNeeded() {
+        guard let playlist, !playlist.isLoading else { return }
+        let aid = interactionAid
+        let bvid = currentEpisode?.bvid ?? detail?.bvid ?? ""
+        guard playlist.needsMore(after: aid, bvid: bvid, epId: currentEpisode?.epId ?? 0) else { return }
+        Task { [weak self] in
+            let added = await playlist.loadMore()
+            guard let self, aid == self.interactionAid else { return }
+            self.refreshNextAvailability()
+            if added, self.player?.status == .ended { self.advance(manual: false) }
+        }
+    }
+
+    /// Automatic advancing at the end follows 「播放顺序」; the 下一集 button always advances.
     private func advance(manual: Bool) {
-        guard manual || AppSettings.shared.player.autoNext, let step = nextStep() else { return }
+        var next = nextStep()
+        if !manual {
+            // 「播放顺序」 (the player replays 单个循环 itself).
+            switch AppSettings.shared.player.playRepeat {
+            case .pause, .singleCycle:
+                return
+            case .listOrder:
+                next = nextStep(includeRelated: false)
+            case .listCycle:
+                next = nextStep(includeRelated: false)
+                if next == nil, !isPlaylistPending {
+                    // Back to the first item; a single video with no list replays itself.
+                    guard let first = firstListStep() else {
+                        player?.play()
+                        return
+                    }
+                    next = first
+                }
+            case .autoPlayRelated:
+                if next == nil, !isPlaylistPending, relatedLoaded || season != nil {
+                    ToastCenter.shared.show("暂无相关视频，停止连播")
+                }
+            }
+        }
+        guard let step = next else { return }
         if !manual && (comments.composerTarget != nil || comments.subRepliesRoot != nil) {
             // Switching to another comment area would close the open composer (losing the draft) or the
             // reply thread the user is reading.
@@ -741,6 +825,7 @@ final class VideoDetailModel: ObservableObject {
                 Task { @MainActor in self?.advance(manual: true) }
             }
         }
+        syncPlayerPage()
     }
 
     // MARK: Side data
@@ -768,8 +853,10 @@ final class VideoDetailModel: ObservableObject {
             if d.tags.isEmpty { spawn { await $0.loadTags(gen: gen) } }
             spawn { await $0.loadRelated(gen: gen) }
             if d.owner.mid > 0 { spawn { await $0.loadOwnerCard(gen: gen) } }
+            if d.owner.mid > 0 { spawn { await $0.loadOwnerRelation(gen: gen) } }
         }
         startOnlinePolling()
+        prefetchPlaylistIfNeeded()
     }
 
     private func loadRelation(gen: Int) async {
@@ -807,6 +894,7 @@ final class VideoDetailModel: ObservableObject {
         relationEdits += 1
         relation = VideoRelation()
         addedToWatchLater = false
+        ownerRelation = nil
         if !sideDataLoggedIn {
             isFollowingOwner = false
             followedStaff = []
@@ -815,6 +903,7 @@ final class VideoDetailModel: ObservableObject {
         let gen = sideGeneration
         spawn { await $0.loadRelation(gen: gen) }
         if ownerMid > 0 { spawn { await $0.loadOwnerCard(gen: gen) } }
+        if ownerMid > 0 { spawn { await $0.loadOwnerRelation(gen: gen) } }
         if sideDataLoggedIn, let seasonId = season?.seasonId {
             // 追番 state comes with the season (`user_status`).
             spawn { model in
@@ -860,6 +949,16 @@ final class VideoDetailModel: ObservableObject {
             isFollowingOwner = true
             followedStaff.insert(mid)
         }
+    }
+
+    /// `/x/relation` for the uploader's follow button (已互关 / 悄悄关注 / 特别关注 / 已拉黑). Login only.
+    private func loadOwnerRelation(gen: Int) async {
+        let mid = ownerMid
+        guard mid > 0, mid != BiliHTTP.shared.mid, BiliHTTP.shared.isLoggedIn else { return }
+        guard let state = try? await SpaceAPI.relation(fid: mid), gen == sideGeneration, mid == ownerMid else { return }
+        ownerRelation = state
+        isFollowingOwner = state.isFollowing
+        if state.isFollowing { followedStaff.insert(mid) } else { followedStaff.remove(mid) }
     }
 
     private func onlineIDs(gen: Int) -> (aid: Int64, cid: Int64, bvid: String)? {
@@ -919,6 +1018,7 @@ final class VideoDetailModel: ObservableObject {
             relationEdits += 1
             relation.liked = target
             counts.like = max(0, counts.like + (target ? 1 : -1))
+            if target { relation.disliked = false }
         } catch {
             ToastCenter.shared.show(error: error)
             // 65006 已经点过赞了 / 65004 取消点赞失败 (not liked): the shown state was wrong (relation not loaded).
@@ -926,6 +1026,28 @@ final class VideoDetailModel: ObservableObject {
                 relationEdits += 1
                 relation.liked = code == 65006
             }
+        }
+    }
+
+    /// 点踩 / 取消点踩 (app endpoint: needs the TV QR login's `access_key`, see `VideoAPI.dislike`). Disliking
+    /// also cancels a like.
+    func toggleDislike() async {
+        let aid = interactionAid
+        guard aid > 0, begin(.dislike) else { return }
+        defer { end(.dislike) }
+        let target = !relation.disliked
+        do {
+            try await VideoAPI.dislike(aid: aid, dislike: target)
+            ToastCenter.shared.show(target ? "点踩成功" : "已取消点踩")
+            guard aid == interactionAid else { return }
+            relationEdits += 1
+            relation.disliked = target
+            if target && relation.liked {
+                relation.liked = false
+                counts.like = max(0, counts.like - 1)
+            }
+        } catch {
+            ToastCenter.shared.show(error: error)
         }
     }
 
@@ -944,6 +1066,7 @@ final class VideoDetailModel: ObservableObject {
             counts.coin += Int64(n)
             if (alsoLike || liked) && !relation.liked {
                 relation.liked = true
+                relation.disliked = false
                 counts.like += 1
             }
         } catch {
@@ -980,6 +1103,7 @@ final class VideoDetailModel: ObservableObject {
             relationEdits += 1
             if result.like && !relation.liked {
                 relation.liked = true
+                relation.disliked = false
                 counts.like += 1
             }
             if result.coin && relation.coinCount < maxCoins {
@@ -1009,14 +1133,46 @@ final class VideoDetailModel: ObservableObject {
         counts.favorite = max(0, counts.favorite + (favored ? 1 : -1))
     }
 
-    func addToWatchLater() async {
+    /// 「快速收藏」 tap: favourites into the default folder, or — when the video is already in folders — removes
+    /// it from all of them (the folder picker stays on long press). Membership comes from the server.
+    func quickFavorite() async {
+        let resource = favoriteResource
+        guard resource.rid > 0, begin(.favorite) else { return }
+        defer { end(.favorite) }
+        do {
+            let folders = try await VideoAPI.favFolders(forAid: resource.rid, resourceType: resource.type)
+            let current = folders.filter(\.isFavorited).map(\.id)
+            if current.isEmpty {
+                guard let target = folders.first(where: \.isDefault) ?? folders.first else {
+                    throw BiliError.other("还没有收藏夹")
+                }
+                try await VideoAPI.updateFav(aid: resource.rid, add: [target.id], remove: [], resourceType: resource.type)
+                favoriteChanged(true, rid: resource.rid)
+                ToastCenter.shared.show("已收藏到「\(target.title)」")
+            } else {
+                try await VideoAPI.updateFav(aid: resource.rid, add: [], remove: current, resourceType: resource.type)
+                favoriteChanged(false, rid: resource.rid)
+                ToastCenter.shared.show("已取消收藏")
+            }
+        } catch {
+            ToastCenter.shared.show(error: error)
+        }
+    }
+
+    /// 稍后再看: adds, or removes again when this page already added it.
+    func toggleWatchLater() async {
         let aid = interactionAid
         guard aid > 0, begin(.watchLater) else { return }
         defer { end(.watchLater) }
+        let remove = addedToWatchLater
         do {
-            try await VideoAPI.addToWatchLater(aid: aid)
-            if aid == interactionAid { addedToWatchLater = true }
-            ToastCenter.shared.show("已添加至稍后再看")
+            if remove {
+                try await VideoAPI.removeFromWatchLater(aid: aid)
+            } else {
+                try await VideoAPI.addToWatchLater(aid: aid)
+            }
+            if aid == interactionAid { addedToWatchLater = !remove }
+            ToastCenter.shared.show(remove ? "已从稍后再看移除" : "已添加至稍后再看")
         } catch {
             ToastCenter.shared.show(error: error)
         }
@@ -1027,14 +1183,42 @@ final class VideoDetailModel: ObservableObject {
         guard mid > 0, begin(.follow) else { return }
         defer { end(.follow) }
         let following = isFollowing(mid)
+        let state = mid == ownerMid ? ownerRelation : nil
         do {
-            if following { try await SpaceAPI.unfollow(mid: mid) } else { try await SpaceAPI.follow(mid: mid) }
+            if following {
+                try await SpaceAPI.modifyRelation(mid: mid, action: state?.unfollowAction ?? .unfollow)
+            } else {
+                try await SpaceAPI.follow(mid: mid)
+            }
             if following { followedStaff.remove(mid) } else { followedStaff.insert(mid) }
             if mid == ownerMid {
                 isFollowingOwner = !following
+                ownerRelation = following ? .notFollowing : .followed
                 if ownerFans > 0 || !following { ownerFans = max(0, ownerFans + (following ? -1 : 1)) }
+                if !following {
+                    // A follow-back makes it 已互关: ask again once the server has settled.
+                    let gen = sideGeneration
+                    spawn { model in
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        await model.loadOwnerRelation(gen: gen)
+                    }
+                }
             }
             ToastCenter.shared.show(following ? "已取消关注" : "关注成功")
+        } catch {
+            ToastCenter.shared.show(error: error)
+        }
+    }
+
+    /// 解除拉黑 the uploader (its follow button reads 已拉黑; following a blocked user fails).
+    func unblockOwner() async {
+        let mid = ownerMid
+        guard mid > 0, begin(.follow) else { return }
+        defer { end(.follow) }
+        do {
+            try await SpaceAPI.modifyRelation(mid: mid, action: .unblock)
+            if mid == ownerMid { ownerRelation = .notFollowing }
+            ToastCenter.shared.show("已解除拉黑")
         } catch {
             ToastCenter.shared.show(error: error)
         }
@@ -1052,6 +1236,229 @@ final class VideoDetailModel: ObservableObject {
         } catch {
             ToastCenter.shared.show(error: error)
         }
+    }
+}
+
+// MARK: - Player integration
+
+/// The page side of the player's 选集, 上一集, 列表循环, 分P resume chip and fullscreen 点赞 / 投币 / 收藏 / 分享
+/// (`PlayerController.episodeEntries` / `onSelectEpisode`, `onPrevious`, `fullscreenActions`).
+extension VideoDetailModel {
+    /// From `attach`: the hooks that do not depend on the content.
+    fileprivate func connectPlayerPage(_ player: PlayerController) {
+        player.onSelectEpisode = { [weak self] id, startTime in
+            Task { @MainActor in self?.selectPlayerEntry(id, startTime: startTime) }
+        }
+        // Like / coin / favourite state changes in many places: follow every change of the page.
+        player.pageObservation = objectWillChange.sink { [weak self] _ in
+            Task { @MainActor [weak self] in self?.syncFullscreenActions() }
+        }
+    }
+
+    /// With every 下一集 refresh (content, part or episode change): 选集 rows, 上一集 and the fullscreen row.
+    fileprivate func syncPlayerPage() {
+        guard let player else { return }
+        let entries = playerEpisodeEntries()
+        if entries != player.episodeEntries { player.episodeEntries = entries }
+        if previousStep() == nil {
+            if player.onPrevious != nil { player.onPrevious = nil }
+        } else if player.onPrevious == nil {
+            player.onPrevious = { [weak self] in
+                Task { @MainActor in self?.goPrevious() }
+            }
+        }
+        syncFullscreenActions()
+    }
+
+    // MARK: 选集
+
+    /// The parts, else the 合集 episodes, else the PGC list of the current episode (ids: `p<cid>`,
+    /// `u<aid>-<cid>`, `e<epId>`).
+    private func playerEpisodeEntries() -> [PlayerEpisodeEntry] {
+        if let s = season, let ep = currentEpisode {
+            let list = pgcList(of: s, containing: ep)
+            guard list.count > 1 else { return [] }
+            return list.map { e in
+                PlayerEpisodeEntry(id: "e\(e.epId)", title: e.displayTitle, badge: e.badge.isEmpty ? nil : e.badge,
+                                   isCurrent: e.epId == ep.epId)
+            }
+        }
+        guard let d = detail else { return [] }
+        if d.pages.count > 1 {
+            return d.pages.map { p in
+                PlayerEpisodeEntry(id: PlayerEpisodeEntry.partID(cid: p.cid),
+                                   title: p.part.isEmpty ? "P\(p.page)" : "P\(p.page) \(p.part)",
+                                   isCurrent: p.cid == currentCid)
+            }
+        }
+        guard let episodes = d.ugcSeason?.allEpisodes, episodes.count > 1 else { return [] }
+        let current = episodes.firstIndex { $0.aid == d.aid }
+        return episodes.enumerated().map { i, e in
+            PlayerEpisodeEntry(id: "u\(e.aid)-\(e.cid)", title: e.title, badge: e.badge.isEmpty ? nil : e.badge,
+                               isCurrent: i == current)
+        }
+    }
+
+    private func selectPlayerEntry(_ id: String, startTime: Double?) {
+        let value = id.dropFirst()
+        switch id.first {
+        case "p"?:
+            if let cid = Int64(value), let part = detail?.pages.first(where: { $0.cid == cid }) {
+                selectPart(part, startTime: startTime)
+            }
+        case "u"?:
+            let ids = value.split(separator: "-").compactMap { Int64($0) }
+            if ids.count == 2,
+               let ep = detail?.ugcSeason?.allEpisodes.first(where: { $0.aid == ids[0] && $0.cid == ids[1] }) {
+                selectSeasonEpisode(ep)
+            }
+        case "e"?:
+            if let epId = Int64(value), let ep = season?.allEpisodes.first(where: { $0.epId == epId }) {
+                selectEpisode(ep)
+            }
+        default:
+            break
+        }
+    }
+
+    /// The PGC list an episode belongs to (正片 or its section), as `nextStep` walks it.
+    private func pgcList(of s: PGCSeason, containing ep: PGCEpisode) -> [PGCEpisode] {
+        if s.episodes.contains(where: { $0.epId == ep.epId }) { return s.episodes }
+        return s.sections.first(where: { $0.episodes.contains(where: { $0.epId == ep.epId }) })?.episodes ?? []
+    }
+
+    // MARK: 上一集 / 列表循环
+
+    private func playlistRef(at index: Int, in list: VideoPlaylist) -> VideoRef {
+        var ref = list.items[index]
+        ref.playlist = list
+        return ref
+    }
+
+    /// 上一集: previous part → previous 播放全部 entry → previous 合集 episode → previous PGC episode (mirrors
+    /// `nextStep`, without 相关推荐).
+    private func previousStep() -> NextStep? {
+        if let s = season, let ep = currentEpisode {
+            if let playlist, let i = playlist.index(aid: ep.aid, bvid: ep.bvid, epId: ep.epId) {
+                return i > 0 ? .video(playlistRef(at: i - 1, in: playlist)) : nil
+            }
+            let list = pgcList(of: s, containing: ep)
+            if let i = list.firstIndex(where: { $0.epId == ep.epId }), i > 0 { return .episode(list[i - 1]) }
+            return nil
+        }
+        guard let d = detail else { return nil }
+        if let i = d.pages.firstIndex(where: { $0.cid == currentCid }), i > 0 { return .part(d.pages[i - 1]) }
+        if let playlist, let i = playlist.index(aid: d.aid, bvid: d.bvid) {
+            return i > 0 ? .video(playlistRef(at: i - 1, in: playlist)) : nil
+        }
+        if let episodes = d.ugcSeason?.allEpisodes, let i = episodes.firstIndex(where: { $0.aid == d.aid }), i > 0 {
+            return .video(episodes[i - 1].videoRef)
+        }
+        return nil
+    }
+
+    private func goPrevious() {
+        guard let step = previousStep() else {
+            ToastCenter.shared.show("已经是第一集了")
+            return
+        }
+        switch step {
+        case .part(let p): selectPart(p)
+        case .episode(let ep): selectEpisode(ep)
+        case .video(let r): replace(with: r)
+        }
+    }
+
+    /// 列表循环 after the last item: the first item of the list being played through (nil = no list, or the
+    /// current video is all of it).
+    private func firstListStep() -> NextStep? {
+        if let s = season, let ep = currentEpisode {
+            if let playlist, let i = playlist.index(aid: ep.aid, bvid: ep.bvid, epId: ep.epId) {
+                return i > 0 ? .video(playlistRef(at: 0, in: playlist)) : nil
+            }
+            let list = pgcList(of: s, containing: ep)
+            if let first = list.first, first.epId != ep.epId { return .episode(first) }
+            return nil
+        }
+        guard let d = detail else { return nil }
+        let firstPart: NextStep? = d.pages.first.flatMap { $0.cid != currentCid ? .part($0) : nil }
+        if let playlist, let i = playlist.index(aid: d.aid, bvid: d.bvid) {
+            return i > 0 ? .video(playlistRef(at: 0, in: playlist)) : firstPart
+        }
+        if let first = d.ugcSeason?.allEpisodes.first, first.aid != d.aid { return .video(first.videoRef) }
+        return firstPart
+    }
+
+    /// The 播放全部 list is still loading the entries after this video (`prefetchPlaylistIfNeeded` advances then).
+    fileprivate var isPlaylistPending: Bool {
+        let aid = currentEpisode?.aid ?? detail?.aid ?? 0
+        let bvid = currentEpisode?.bvid ?? detail?.bvid ?? ""
+        if case .pending? = playlistPosition(aid: aid, bvid: bvid, epId: currentEpisode?.epId ?? 0) { return true }
+        return false
+    }
+
+    // MARK: Fullscreen 点赞 / 投币 / 收藏 / 分享
+
+    private func syncFullscreenActions() {
+        guard let player else { return }
+        let actions = hasContent ? makeFullscreenActions() : nil
+        if player.fullscreenActions != actions { player.fullscreenActions = actions }
+    }
+
+    private func makeFullscreenActions() -> PlayerFullscreenActions {
+        var a = PlayerFullscreenActions()
+        a.liked = relation.liked
+        a.coined = relation.coinCount > 0
+        a.favored = relation.favored
+        a.likeCount = counts.like
+        a.coinCount = counts.coin
+        a.favoriteCount = counts.favorite
+        a.shareCount = counts.share
+        a.shareURL = shareURL
+        a.shareTitle = title
+        a.onLike = { [weak self] in Task { @MainActor in await self?.toggleLike() } }
+        a.onTriple = { [weak self] in Task { @MainActor in await self?.triple() } }
+        a.onCoin = { [weak self] in Task { @MainActor in self?.openPlayerCoinSheet() } }
+        a.onFavorite = { [weak self] in Task { @MainActor in self?.openPlayerFavoriteSheet() } }
+        return a
+    }
+
+    /// The intro tab's coin sheet over the player (fullscreen hides the page; the login page cannot be pushed).
+    private func openPlayerCoinSheet() {
+        guard let player else { return }
+        guard BiliHTTP.shared.isLoggedIn else {
+            ToastCenter.shared.show("请先登录")
+            return
+        }
+        if relation.coinCount >= maxCoins {
+            ToastCenter.shared.show("达到投币上限啦~")
+            return
+        }
+        let aid = interactionAid
+        guard aid > 0 else { return }
+        let sheet = VideoCoinSheet(maxCoins: maxCoins, given: relation.coinCount) { [weak self] count, alsoLike in
+            Task { await self?.giveCoins(count, alsoLike: alsoLike, aid: aid) }
+        }
+        player.presentPageSheet(id: "coin", content: AnyView(sheet))
+    }
+
+    private func openPlayerFavoriteSheet() {
+        guard let player else { return }
+        guard BiliHTTP.shared.isLoggedIn else {
+            ToastCenter.shared.show("请先登录")
+            return
+        }
+        let resource = favoriteResource
+        guard resource.rid > 0 else { return }
+        if AppSettings.shared.player.quickFavorite {
+            Task { await quickFavorite() }
+            return
+        }
+        let rid = resource.rid
+        let sheet = VideoFavFolderSheet(rid: rid, resourceType: resource.type) { [weak self] favored in
+            self?.favoriteChanged(favored, rid: rid)
+        }
+        player.presentPageSheet(id: "favorite", content: AnyView(sheet))
     }
 }
 

@@ -1,8 +1,8 @@
 import SwiftUI
 import Combine
 
-/// 稍后再看: whole list with progress, swipe / multi-select remove, 清除已看完 / 清除失效 / 清空.
-/// Login required.
+/// 稍后再看: whole list with progress, 播放全部, swipe / multi-select remove, 清除已看完 / 清除失效 / 清空.
+/// Login required. Opening an item plays on through the list (`VideoPlaylist`).
 struct WatchLaterView: View {
     @ObservedObject private var auth = AuthService.shared
 
@@ -115,7 +115,19 @@ struct MineWatchLaterContent: View {
                 }
             } header: {
                 if !model.items.isEmpty {
-                    Text("共 \(model.items.count) 个视频")
+                    HStack {
+                        Text("共 \(model.items.count) 个视频")
+                        Spacer()
+                        if !isEditing {
+                            Button(action: playAll) {
+                                Label("播放全部", systemImage: "play.circle")
+                                    .font(.footnote.weight(.medium))
+                                    .foregroundColor(.biliPink)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                    .textCase(nil)
                 }
             }
             Section {
@@ -218,8 +230,26 @@ struct MineWatchLaterContent: View {
         withAnimation { editMode = editing ? .active : .inactive }
     }
 
+    /// The rows as a 播放全部 list (list order).
+    private func makePlaylist() -> VideoPlaylist {
+        VideoPlaylist(title: "稍后再看", items: model.items.compactMap(MineListFormat.playlistRef))
+    }
+
+    /// Opens the item; the video page continues with the items after it.
     private func openCard(_ card: VideoCard) {
         guard let route = MineListFormat.resumeRoute(card) else { return }
-        router.push(route)
+        if case .video(var ref) = route {
+            ref.playlist = makePlaylist()
+            router.push(.video(ref))
+        } else {
+            router.push(route)
+        }
+    }
+
+    private func playAll() {
+        let playlist = makePlaylist()
+        guard var first = playlist.items.first else { return }
+        first.playlist = playlist
+        router.push(.video(first))
     }
 }

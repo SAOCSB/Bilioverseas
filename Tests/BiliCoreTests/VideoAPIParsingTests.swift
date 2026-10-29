@@ -374,6 +374,15 @@ final class VideoAPIDetailParsingTests: XCTestCase {
         let noChapters = VideoAPI.parsePlayerExtra(fixture(#"{"view_points":[{"type":1,"from":0,"to":10,"content":"x"}],"need_login_subtitle":true}"#))
         XCTAssertTrue(noChapters.chapters.isEmpty)
         XCTAssertTrue(noChapters.needLoginSubtitle)
+
+        // SmartSkip's raw view points: any type, invalid rows kept (missing times = NaN).
+        XCTAssertEqual(noChapters.viewPoints, [VideoChapter(from: 0, to: 10, title: "x")])
+        let raw = VideoAPI.parsePlayerExtra(fixture(#"{"view_points":[{"type":1,"from":30,"to":20,"content":"广告"},{"type":1,"content":"y"}]}"#))
+        XCTAssertTrue(raw.chapters.isEmpty)
+        XCTAssertEqual(raw.viewPoints.count, 2)
+        XCTAssertEqual(raw.viewPoints[0], VideoChapter(from: 30, to: 20, title: "广告"))
+        XCTAssertTrue(raw.viewPoints[1].from.isNaN && raw.viewPoints[1].to.isNaN)
+        XCTAssertEqual(x.viewPoints.map(\.title), ["开场", "正文"])
     }
 
     func testSubtitleBody() {

@@ -186,13 +186,7 @@ struct PlayerProgressBar: View {
 
     @ViewBuilder
     private func markers(width: CGFloat, total: Double) -> some View {
-        ForEach(clips, id: \.self) { clip in
-            strip(from: clip.start, to: clip.end, total: total, width: width, color: Color.biliBlue.opacity(0.8))
-        }
-        ForEach(segments) { segment in
-            strip(from: segment.start, to: segment.end, total: total, width: width,
-                  color: segment.requiresConfirmation ? Color.yellow.opacity(0.75) : Color.green.opacity(0.85))
-        }
+        PlayerProgressStrips(segments: segments, clips: clips, total: total, width: width, height: barHeight)
         ForEach(Array(chapters.enumerated()), id: \.offset) { pair in
             if pair.element.from > 0.5, pair.element.from < total - 0.5 {
                 Rectangle()
@@ -202,20 +196,40 @@ struct PlayerProgressBar: View {
             }
         }
     }
+}
 
-    private func strip(from start: Double, to end: Double, total: Double, width: CGFloat, color: Color) -> some View {
+/// PGC 片头/片尾 and SmartSkip / 空降助手 strips over a progress track (shared by the bar and the thin line).
+struct PlayerProgressStrips: View {
+    let segments: [AdSegment]
+    let clips: [PGCClipInfo]
+    let total: Double
+    let width: CGFloat
+    let height: CGFloat
+
+    var body: some View {
+        ForEach(clips, id: \.self) { clip in
+            strip(from: clip.start, to: clip.end, color: Color.biliBlue.opacity(0.8))
+        }
+        ForEach(segments) { segment in
+            strip(from: segment.start, to: segment.end, color: segment.stripColor)
+        }
+    }
+
+    private func strip(from start: Double, to end: Double, color: Color) -> some View {
         let s = min(max(start, 0), total)
         let e = min(max(end, s), total)
         return Rectangle()
             .fill(color)
-            .frame(width: max(2, width * CGFloat((e - s) / total)), height: barHeight)
+            .frame(width: max(2, width * CGFloat((e - s) / total)), height: height)
             .offset(x: width * CGFloat(s / total))
     }
 }
 
-/// 2 pt progress line while the controls are hidden.
+/// 2 pt progress line while the controls are hidden, with the same strips as the bar (features.md §2.4 / §11.4).
 struct PlayerThinProgress: View {
     @ObservedObject var timeline: PlayerTimeline
+    var segments: [AdSegment] = []
+    var clips: [PGCClipInfo] = []
 
     var body: some View {
         GeometryReader { geo in
@@ -227,6 +241,10 @@ struct PlayerThinProgress: View {
                 Rectangle().fill(Color.white.opacity(0.15))
                 Rectangle().fill(Color.white.opacity(0.35)).frame(width: geo.size.width * buffered)
                 Rectangle().fill(Color.biliPink).frame(width: geo.size.width * played)
+                if total > 0, !segments.isEmpty || !clips.isEmpty {
+                    PlayerProgressStrips(segments: segments, clips: clips, total: total,
+                                         width: max(geo.size.width, 1), height: 2)
+                }
             }
         }
         .frame(height: 2)
@@ -497,6 +515,118 @@ struct PlayerResumeChip: View {
         .padding(.vertical, 5)
         .background(Color.black.opacity(0.7), in: Capsule())
         .fixedSize()
+    }
+}
+
+/// 「上次看到第N P，点击跳转」 (bottom-left, like the resume chip).
+struct PlayerResumePartChip: View {
+    let page: Int
+    let onJump: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: onJump) {
+                Text("上次看到第\(page)P，点击跳转")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white)
+            }
+            .buttonStyle(.plain)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.white.opacity(0.7))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("关闭"))
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 6)
+        .padding(.vertical, 5)
+        .background(Color.black.opacity(0.7), in: Capsule())
+        .fixedSize()
+    }
+}
+
+/// Fullscreen 点赞 / 投币 / 收藏 / 分享, right-aligned under the top bar (long press 点赞 = 一键三连).
+struct PlayerFullscreenActionRow: View {
+    let actions: PlayerFullscreenActions
+    /// Any touch keeps the controls up.
+    let onInteraction: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            item(count: actions.likeCount, active: actions.liked) { symbol(actions.liked ? "hand.thumbsup.fill" : "hand.thumbsup") }
+                .onTapGesture {
+                    onInteraction()
+                    actions.onLike()
+                }
+                .onLongPressGesture(minimumDuration: 0.8) {
+                    onInteraction()
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    actions.onTriple()
+                }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(Text(actions.liked ? "取消点赞" : "点赞"))
+                .accessibilityHint(Text("长按一键三连"))
+            Button {
+                onInteraction()
+                actions.onCoin()
+            } label: {
+                item(count: actions.coinCount, active: actions.coined) { coinGlyph }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("投币"))
+            Button {
+                onInteraction()
+                actions.onFavorite()
+            } label: {
+                item(count: actions.favoriteCount, active: actions.favored) { symbol(actions.favored ? "star.fill" : "star") }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("收藏"))
+            if let url = actions.shareURL {
+                ShareLink(item: url, subject: Text(actions.shareTitle), message: Text(actions.shareTitle)) {
+                    item(count: actions.shareCount, active: false) { symbol("arrowshape.turn.up.right") }
+                }
+                .buttonStyle(.plain)
+                .simultaneousGesture(TapGesture().onEnded { onInteraction() })
+                .accessibilityLabel(Text("分享"))
+            }
+        }
+    }
+
+    private func symbol(_ systemName: String) -> some View {
+        Image(systemName: systemName).font(.system(size: 19, weight: .medium))
+    }
+
+    /// 「币」 in a circle (filled once coins were given).
+    private var coinGlyph: some View {
+        ZStack {
+            if actions.coined {
+                Circle().fill(Color.biliPink).frame(width: 20, height: 20)
+            } else {
+                Circle().stroke(Color.white, lineWidth: 1.6).frame(width: 19, height: 19)
+            }
+            Text("币")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.white)
+        }
+        .frame(width: 22, height: 22)
+    }
+
+    private func item<Icon: View>(count: Int64, active: Bool, @ViewBuilder icon: () -> Icon) -> some View {
+        VStack(spacing: 1) {
+            icon()
+            Text(count > 0 ? Fmt.count(count) : " ")
+                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                .lineLimit(1)
+        }
+        .foregroundColor(active ? .biliPink : .white)
+        .frame(width: 42, height: 42)
+        .contentShape(Rectangle())
     }
 }
 

@@ -487,4 +487,10 @@ enum MineListFormat {
         }
         return route
     }
+
+    /// The 播放全部 entry for `card` (resumes like `resumeRoute`); nil for cards that do not open a video.
+    static func playlistRef(_ card: VideoCard) -> VideoRef? {
+        guard let route = resumeRoute(card), case .video(let ref) = route else { return nil }
+        return ref
+    }
 }

@@ -41,6 +41,14 @@ struct RootTabView: View {
             tab = .mine
         }
         .task {
+            // Links opened from other apps (bilioverseas://…) push onto the current tab.
+            DeepLinkCenter.shared.attach { route in
+                switch tab {
+                case .home: homeRouter.push(route)
+                case .dynamics: dynamicsRouter.push(route)
+                case .mine: mineRouter.push(route)
+                }
+            }
             // CI self test (inactive unless launched with -BiliSmokeTest).
             SmokeTest.start(router: homeRouter)
         }

@@ -7,7 +7,7 @@ final class FeedFilterTests: XCTestCase {
     private func video(_ title: String = "普通视频", mid: Int64 = 1, name: String = "某UP", duration: Int = 300,
                        views: Int64 = 0, likes: Int64 = 0, desc: String = "", badge: String = "",
                        reason: String = "", kind: CardKind = .video, signals: [String] = [],
-                       followed: Bool = false) -> VideoCard {
+                       followed: Bool = false, zone: String = "") -> VideoCard {
         var c = VideoCard(id: UUID().uuidString)
         c.kind = kind
         c.title = title
@@ -21,14 +21,15 @@ final class FeedFilterTests: XCTestCase {
         c.reason = reason
         c.adSignals = signals
         c.isFollowed = followed
+        c.zone = zone
         return c
     }
 
     private func filter(_ configure: (inout FeedFilterSettings) -> Void = { _ in },
-                        followed: Set<Int64> = []) -> FeedFilter {
+                        followed: Set<Int64> = [], blacklisted: Set<Int64> = []) -> FeedFilter {
         var s = FeedFilterSettings()
         configure(&s)
-        return FeedFilter(settings: s, followedMids: followed)
+        return FeedFilter(settings: s, followedMids: followed, blacklistedMids: blacklisted)
     }
 
     private let listScopes: [FeedScope] = [.recommend, .popular, .ranking, .search, .related, .dynamics, .space]
@@ -46,6 +47,7 @@ final class FeedFilterTests: XCTestCase {
         XCTAssertEqual(s.minPlayCount, 0)
         XCTAssertTrue(s.exemptFollowed)
         XCTAssertTrue(s.applyToAllLists)
+        XCTAssertTrue(s.blockedZones.isEmpty)
         // A plain video passes everywhere with default settings.
         let f = filter()
         for scope in FeedScope.allCases { XCTAssertTrue(f.allows(video(), scope: scope), "\(scope)") }
@@ -69,6 +71,7 @@ final class FeedFilterTests: XCTestCase {
         XCTAssertEqual(s.minLikeRatio, 0)
         XCTAssertEqual(s.minPlayCount, 0)
         XCTAssertTrue(s.exemptFollowed)
+        XCTAssertEqual(s.blockedZones, [])
     }
 
     // MARK: Ads
@@ -250,9 +253,11 @@ final class FeedFilterTests: XCTestCase {
             XCTAssertTrue(off.allows(card, scope: scope), "\(scope)")
         }
         XCTAssertFalse(off.allows(card, scope: .recommend))
-        for scope in [FeedScope.dynamics, .space, .history, .favorites] {
+        for scope in [FeedScope.space, .history, .favorites] {
             XCTAssertTrue(on.allows(card, scope: scope), "\(scope)")
         }
+        // 动态 is not one of the lists that switch names: its rules apply either way.
+        XCTAssertFalse(off.allows(card, scope: .dynamics))
     }
 
     func testHistoryAndFavoritesAreNeverFiltered() {
@@ -366,6 +371,104 @@ final class FeedFilterTests: XCTestCase {
 
     func testPromotionHeuristicOffByDefault() {
         XCTAssertTrue(filter().allows(video("【恰饭】这款耳机"), scope: .recommend))
+    }
+
+    // MARK: Zones (分区屏蔽)
+
+    func testZoneRulesOnRecommendPopularAndRanking() {
+        let f = filter { $0.blockedZones = ["鬼畜调教", "/^(手游|单机游戏)$/", " "] }
+        XCTAssertEqual(f.reason(for: video(zone: "鬼畜调教"), scope: .recommend), .zone(rule: "鬼畜调教"))
+        XCTAssertEqual(f.reason(for: video(zone: "手游"), scope: .popular), .zone(rule: "/^(手游|单机游戏)$/"))
+        XCTAssertFalse(f.allows(video(zone: "单机游戏"), scope: .ranking))
+        XCTAssertTrue(f.allows(video(zone: "网络游戏"), scope: .ranking))          // regex is anchored
+        XCTAssertTrue(f.allows(video(zone: ""), scope: .recommend))               // unknown zone
+        // Search / related / dynamics cards carry no reliable zone: the rule never runs there.
+        for scope in [FeedScope.search, .related, .dynamics, .space, .history] {
+            XCTAssertTrue(f.allows(video(zone: "鬼畜调教"), scope: scope), "\(scope)")
+        }
+        XCTAssertEqual(f.explain(video(zone: "鬼畜调教"), scope: .recommend), "命中分区 鬼畜调教")
+        // Like the keywords: follow exemption and the 应用到… switch.
+        XCTAssertTrue(filter({ $0.blockedZones = ["鬼畜调教"] }, followed: [1]).allows(video(zone: "鬼畜调教"), scope: .recommend))
+        let recommendOnly = filter { $0.blockedZones = ["鬼畜调教"]; $0.applyToAllLists = false }
+        XCTAssertTrue(recommendOnly.allows(video(zone: "鬼畜调教"), scope: .popular))
+        XCTAssertFalse(recommendOnly.allows(video(zone: "鬼畜调教"), scope: .recommend))
+        // A zone rule never looks at the title, a keyword never at the zone.
+        XCTAssertTrue(f.allows(video("鬼畜调教合集"), scope: .recommend))
+        XCTAssertTrue(filter { $0.blockedKeywords = ["鬼畜"] }.allows(video("正经视频", zone: "鬼畜调教"), scope: .recommend))
+    }
+
+    // MARK: Dynamics (动态)
+
+    func testDynamicsApplyUploaderAndKeywordRulesWithoutFollowExemption() {
+        let f = filter({ $0.blockedUploaders = ["UID:42"]; $0.blockedKeywords = ["抽奖"] }, followed: [42, 7])
+        // Every dynamic is from a followed UP; explicit rules still apply.
+        XCTAssertEqual(f.reason(for: video(mid: 42, followed: true), scope: .dynamics), .uploader(rule: "UID:42"))
+        XCTAssertEqual(f.reason(for: video("转发抽奖", mid: 7, followed: true), scope: .dynamics), .keyword(rule: "抽奖"))
+        // Image / text posts (DynamicFeedFiltering's `.other` stand-in): the post text counts too.
+        let post = video("", mid: 7, desc: "关注+转发，抽奖送三台", kind: .other, followed: true)
+        XCTAssertEqual(f.reason(for: post, scope: .dynamics), .keyword(rule: "抽奖"))
+        // Video dynamics: the title only, not the video description.
+        XCTAssertTrue(f.allows(video("新视频", mid: 7, desc: "上期抽奖结果见置顶", followed: true), scope: .dynamics))
+        XCTAssertTrue(f.allows(video("日常", mid: 7, desc: "今天天气不错", kind: .other), scope: .dynamics))
+        // Thresholds and zones never run on 动态.
+        let g = filter { $0.minDuration = 600; $0.blockedZones = ["生活"] }
+        XCTAssertTrue(g.allows(video(duration: 30, zone: "生活"), scope: .dynamics))
+    }
+
+    // MARK: Account blacklist (拉黑)
+
+    func testAccountBlacklistIsAHardRule() {
+        let f = filter({ $0.applyToAllLists = false; $0.blockAdCards = false }, followed: [9], blacklisted: [9])
+        let c = video(mid: 9, followed: true)
+        for scope in [FeedScope.recommend, .popular, .ranking, .search, .related, .dynamics] {
+            XCTAssertEqual(f.reason(for: c, scope: scope), .blacklisted, "\(scope)")
+        }
+        // Their own space page, history and favorites still show everything.
+        for scope in [FeedScope.space, .history, .favorites] { XCTAssertTrue(f.allows(c, scope: scope), "\(scope)") }
+        XCTAssertTrue(f.allows(video(mid: 0), scope: .recommend))
+        XCTAssertEqual(f.explain(c, scope: .popular), "已拉黑的用户")
+        // An ad card from a blacklisted UP is reported as an ad.
+        XCTAssertEqual(filter(blacklisted: [9]).reason(for: video(mid: 9, kind: .ad), scope: .search), .ad(signal: "kind=ad"))
+    }
+
+    func testAccountBlacklistStoreAndParsing() throws {
+        let store = AccountBlacklistStore(defaults: nil)
+        XCTAssertTrue(store.mids.isEmpty)
+        store.update([1, 2])
+        store.insert(3)
+        store.insert(0)
+        store.remove(1)
+        XCTAssertEqual(store.mids, [2, 3])
+        XCTAssertTrue(store.contains(3))
+        XCTAssertEqual(store.count, 2)
+        store.clear()
+        XCTAssertTrue(store.mids.isEmpty)
+
+        let data = try JSON(string: #"{"list":[{"mid":11,"uname":"a"},{"mid":0},{"mid":"12"},{"uname":"b"}],"re_version":0,"total":3}"#)
+        let page = AccountBlacklistStore.parseBlacks(data)
+        XCTAssertEqual(page.mids, [11, 12])
+        XCTAssertEqual(page.total, 3)
+        XCTAssertTrue(AccountBlacklistStore.parseBlacks(.null).mids.isEmpty)
+
+        let suite = "FeedFilterTests.blacklist.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        AccountBlacklistStore(defaults: defaults).update([5, 6])
+        XCTAssertEqual(AccountBlacklistStore(defaults: defaults).mids, [5, 6])
+        AccountBlacklistStore(defaults: defaults).clear()
+        XCTAssertTrue(AccountBlacklistStore(defaults: defaults).mids.isEmpty)
+
+        let f = FeedFilter(settings: FeedFilterSettings(), isBlacklisted: { store.contains($0) })
+        XCTAssertTrue(f.allows(video(mid: 77), scope: .recommend))
+        store.insert(77)
+        XCTAssertFalse(f.allows(video(mid: 77), scope: .recommend))
+    }
+
+    func testMatchUploader() {
+        let f = filter { $0.blockedUploaders = ["UID:5", "某UP"] }
+        XCTAssertEqual(f.matchUploader(video(mid: 5, name: "x")), "UID:5")
+        XCTAssertEqual(f.matchUploader(video(mid: 6, name: "某up")), "某UP")
+        XCTAssertNil(f.matchUploader(video(mid: 6, name: "其他")))
     }
 
     // MARK: Shared instance / followed store

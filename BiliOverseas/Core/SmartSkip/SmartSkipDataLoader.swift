@@ -78,6 +78,14 @@ struct SmartSkipPlayerInfo: Equatable {
     var subtitles: [SubtitleTrack] = []
 }
 
+/// `SmartSkipDataLoader.load` result.
+struct SmartSkipLoadResult {
+    var context: SmartSkipVideoContext
+    /// A request failed on the way (player API, a danmaku segment or the XML fallback, a subtitle
+    /// body with a usable URL): the inputs may be incomplete, so the result must not be cached.
+    var degraded: Bool
+}
+
 // MARK: - Transport
 
 /// `credentials: 'include' | 'omit'` of `fetch`.
@@ -162,6 +170,38 @@ struct SmartSkipDataLoader {
     /// (`Promise.all`), then the chosen subtitle body. Returns `nil` when no cid can be resolved
     /// (upstream then detects nothing).
     func complete(_ context: SmartSkipVideoContext) async -> SmartSkipVideoContext? {
+        await load(context)?.context
+    }
+
+    /// `complete(_:)` that also reports whether a request failed on the way (the failures still
+    /// become empty data, as upstream).
+    func load(_ context: SmartSkipVideoContext) async -> SmartSkipLoadResult? {
+        guard var c = await resolve(context) else { return nil }
+        let needsPlayerInfo = c.chapters == nil || (c.subtitleLines == nil && c.subtitleTracks == nil)
+        let needsDanmaku = c.danmaku == nil
+        let (bvid, aid, cid, duration) = (c.bvid, c.aid, c.cid, c.duration)
+        async let playerInfo: (info: SmartSkipPlayerInfo, failed: Bool)? = needsPlayerInfo ? loadPlayerInfo(bvid: bvid, aid: aid, cid: cid) : nil
+        async let danmaku: (rows: [SmartSkipDanmaku], degraded: Bool)? = needsDanmaku ? loadDanmakuWithTime(cid: cid, duration: duration) : nil
+        let (player, fetchedDanmaku) = await (playerInfo, danmaku)
+        var degraded = player?.failed == true || fetchedDanmaku?.degraded == true
+        if c.chapters == nil { c.chapters = player?.info.viewPoints ?? [] }
+        if c.subtitleTracks == nil { c.subtitleTracks = player?.info.subtitles ?? [] }
+        if let fetchedDanmaku { c.danmaku = fetchedDanmaku.rows }
+        if c.subtitleLines == nil {
+            if let chosen = Self.chooseSubtitleTrack(c.subtitleTracks ?? []) {
+                let body = await loadSubtitleBody(chosen.url)
+                c.subtitleLines = body.lines
+                if body.failed { degraded = true }
+            } else {
+                c.subtitleLines = []
+            }
+        }
+        return SmartSkipLoadResult(context: c, degraded: degraded)
+    }
+
+    /// The metadata step alone: resolves an unknown `cid` (and fills title / description /
+    /// duration) through the view API. `nil` when no cid can be resolved.
+    func resolve(_ context: SmartSkipVideoContext) async -> SmartSkipVideoContext? {
         var c = context
         if c.cid <= 0 {
             guard let info = await fetchVideoInfo(bvid: c.bvid, aid: c.aid, pageNumber: c.page) else { return nil }
@@ -170,24 +210,7 @@ struct SmartSkipDataLoader {
             if c.desc.isEmpty { c.desc = info.desc }
             c.duration = info.duration
         }
-        guard c.cid > 0 else { return nil }
-        let needsPlayerInfo = c.chapters == nil || (c.subtitleLines == nil && c.subtitleTracks == nil)
-        let needsDanmaku = c.danmaku == nil
-        let (bvid, aid, cid, duration) = (c.bvid, c.aid, c.cid, c.duration)
-        async let playerInfo: SmartSkipPlayerInfo? = needsPlayerInfo ? fetchPlayerInfo(bvid: bvid, aid: aid, cid: cid) : nil
-        async let danmaku: [SmartSkipDanmaku]? = needsDanmaku ? fetchDanmakuWithTime(cid: cid, duration: duration) : nil
-        let (player, fetchedDanmaku) = await (playerInfo, danmaku)
-        if c.chapters == nil { c.chapters = player?.viewPoints ?? [] }
-        if c.subtitleTracks == nil { c.subtitleTracks = player?.subtitles ?? [] }
-        if let fetchedDanmaku { c.danmaku = fetchedDanmaku }
-        if c.subtitleLines == nil {
-            if let chosen = Self.chooseSubtitleTrack(c.subtitleTracks ?? []) {
-                c.subtitleLines = await fetchSubtitleBody(chosen.url)
-            } else {
-                c.subtitleLines = []
-            }
-        }
-        return c
+        return c.cid > 0 ? c : nil
     }
 
     // MARK: api.js
@@ -241,6 +264,11 @@ struct SmartSkipDataLoader {
     /// `fetchPlayerInfo(bvid, cid)`: chapters + subtitle track list from `/x/player/wbi/v2`
     /// (WBI-signed like the web player; cookies included). Any failure → empty lists.
     func fetchPlayerInfo(bvid: String, aid: Int64 = 0, cid: Int64) async -> SmartSkipPlayerInfo {
+        await loadPlayerInfo(bvid: bvid, aid: aid, cid: cid).info
+    }
+
+    /// `fetchPlayerInfo` + whether the request failed.
+    func loadPlayerInfo(bvid: String, aid: Int64 = 0, cid: Int64) async -> (info: SmartSkipPlayerInfo, failed: Bool) {
         do {
             var query = ["cid": String(cid)]
             if bvid.isEmpty { query["aid"] = String(aid) } else { query["bvid"] = bvid }
@@ -249,10 +277,10 @@ struct SmartSkipDataLoader {
             guard json["code"] == .int(0), json["data"].exists else {
                 throw BiliError.api(code: json["code"].intValue, message: json["message"].stringValue)
             }
-            return Self.parsePlayerInfo(json["data"])
+            return (Self.parsePlayerInfo(json["data"]), false)
         } catch {
             SmartSkipUtils.log("fetchPlayerInfo failed:", error)
-            return SmartSkipPlayerInfo()
+            return (SmartSkipPlayerInfo(), true)
         }
     }
 
@@ -278,14 +306,23 @@ struct SmartSkipDataLoader {
     /// `fetchSubtitleBody(subtitleUrl)`: protocol-relative URLs get `https:`; NO cookies. Any
     /// failure (incl. the empty AI-subtitle URL of logged-out users) → `[]`.
     func fetchSubtitleBody(_ subtitleUrl: String) async -> [SubtitleLine] {
+        await loadSubtitleBody(subtitleUrl).lines
+    }
+
+    /// `fetchSubtitleBody` + whether a request failed. An unusable URL (the logged-out AI track's
+    /// empty one) is no failure: retrying cannot help.
+    func loadSubtitleBody(_ subtitleUrl: String) async -> (lines: [SubtitleLine], failed: Bool) {
+        let url = subtitleUrl.hasPrefix("//") ? "https:" + subtitleUrl : subtitleUrl
+        guard URL(string: url)?.scheme != nil else {
+            SmartSkipUtils.log("fetchSubtitleBody failed:", BiliError.invalidURL(url))
+            return ([], false)
+        }
         do {
-            let url = subtitleUrl.hasPrefix("//") ? "https:" + subtitleUrl : subtitleUrl
-            guard URL(string: url)?.scheme != nil else { throw BiliError.invalidURL(url) }
             let data = try await transport.get(url, query: [:], credentials: .omit, wbi: false)
-            return Self.parseSubtitleBody(try JSON(data: data))
+            return (Self.parseSubtitleBody(try JSON(data: data)), false)
         } catch {
             SmartSkipUtils.log("fetchSubtitleBody failed:", error)
-            return []
+            return ([], true)
         }
     }
 
@@ -402,6 +439,8 @@ struct SmartSkipDataLoader {
         let segmentCount: Int
         var nextSegment = 1
         var blocked = false
+        /// Some segment request failed (the rows may be incomplete).
+        var failed = false
         var rows: [SmartSkipDanmaku] = []
         init(segmentCount: Int) { self.segmentCount = segmentCount }
         func take() -> Int? {
@@ -411,6 +450,7 @@ struct SmartSkipDataLoader {
         }
         func add(_ new: [SmartSkipDanmaku]) { rows += new }
         func block() { blocked = true }
+        func fail() { failed = true }
     }
 
     /// `fetchDanmakuWithTime(cid, duration)`: 6-minute protobuf segments (600 s assumed when the
@@ -419,6 +459,12 @@ struct SmartSkipDataLoader {
     /// nothing at all, the public XML (`comment.bilibili.com/{cid}.xml`, no cookies) is tried;
     /// any XML failure → `[]`.
     func fetchDanmakuWithTime(cid: Int64, duration: Double) async -> [SmartSkipDanmaku] {
+        await loadDanmakuWithTime(cid: cid, duration: duration).rows
+    }
+
+    /// `fetchDanmakuWithTime` + `degraded`: a protobuf segment failed (incl. 401/403/412/429) or
+    /// the XML fallback failed, so the rows may be incomplete.
+    func loadDanmakuWithTime(cid: Int64, duration: Double) async -> (rows: [SmartSkipDanmaku], degraded: Bool) {
         let segmentCount = Int(((duration.isFinite && duration > 0 ? duration : 600) / 360).rounded(.up))
         let pool = DanmakuPool(segmentCount: segmentCount)
         await withTaskGroup(of: Void.self) { group in
@@ -431,6 +477,7 @@ struct SmartSkipDataLoader {
                             // Keep successful segments, cap concurrency, and stop scheduling
                             // requests when the server asks us to stop.
                             if let status = Self.httpStatus(of: error), Self.blockingStatuses.contains(status) { await pool.block() }
+                            await pool.fail()
                             SmartSkipUtils.log("danmaku segment \(index) failed:", error)
                         }
                     }
@@ -438,21 +485,22 @@ struct SmartSkipDataLoader {
             }
         }
         let danmaku = await pool.rows
+        let segmentFailed = await pool.failed
         // Cancelled (video switched): the result is discarded anyway — no XML download.
-        if Task.isCancelled { return [] }
+        if Task.isCancelled { return ([], true) }
         if !danmaku.isEmpty {
             SmartSkipUtils.log("danmaku fetched via protobuf: \(danmaku.count) (\(segmentCount) segments)")
-            return SmartSkipJS.stableSorted(danmaku) { $0.time - $1.time }
+            return (SmartSkipJS.stableSorted(danmaku) { $0.time - $1.time }, segmentFailed)
         }
         do {
             // The public XML CDN does not need a login.
             let data = try await transport.get("\(BiliHost.comment)/\(cid).xml", query: [:], credentials: .omit, wbi: false)
             let fallback = try Self.parseDanmakuXML(data)
             SmartSkipUtils.log("danmaku fetched via XML fallback: \(fallback.count)")
-            return fallback
+            return (fallback, segmentFailed)
         } catch {
             SmartSkipUtils.log("danmaku unavailable; continuing with other sources:", error)
-            return []
+            return ([], true)
         }
     }
 

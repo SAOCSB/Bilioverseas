@@ -52,6 +52,11 @@ targets:
           NSAllowsArbitraryLoadsForMedia: true
           NSAllowsLocalNetworking: true
         NSPhotoLibraryAddUsageDescription: 用于保存登录二维码与封面图片到相册
+        # bilioverseas://video/BV…, bilioverseas://open?url=<bilibili.com / b23.tv link> (BiliLinkParser).
+        CFBundleURLTypes:
+          - CFBundleURLName: io.github.bilioverseas.app
+            CFBundleURLSchemes:
+              - bilioverseas
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.bilioverseas.app
@@ -60,10 +65,9 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         GENERATE_INFOPLIST_FILE: NO
-        CODE_SIGN_STYLE: Manual
-        CODE_SIGNING_ALLOWED: NO
-        CODE_SIGNING_REQUIRED: NO
-        CODE_SIGN_IDENTITY: ""
+        # Local device builds: pick your team in Xcode (Signing & Capabilities). CI passes
+        # CODE_SIGNING_ALLOWED=NO on the xcodebuild command line for the unsigned IPA.
+        CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
     scheme:
       gatherCoverageData: false

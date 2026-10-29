@@ -54,6 +54,8 @@ struct VideoCard: Identifiable, Hashable {
     var pageCount: Int = 0
     /// Zone / partition name (`tname`) when known.
     var zone: String = ""
+    /// App-feed 不感兴趣 menu (`three_point_v2`), nil for every other list.
+    var feedback: FeedCardFeedback? = nil
 
     init(id: String) { self.id = id }
 
@@ -77,6 +79,8 @@ struct VideoRef: Hashable {
     var cover: String = ""
     /// Start playback here (seconds) instead of the saved progress.
     var startTime: Double? = nil
+    /// 播放全部 list (稍后再看 / 收藏夹) the video page continues through after this video; nil for a single video.
+    var playlist: VideoPlaylist? = nil
 
     var isPGC: Bool { epId != 0 || seasonId != 0 }
 

@@ -288,7 +288,10 @@ final class DanmakuFilterTests: XCTestCase {
         s.hideBottom = true
         f = DanmakuFilter(settings: s)
         XCTAssertFalse(f.shouldShow(item(1, 0, mode: 4)))
-        XCTAssertFalse(f.shouldShow(item(1, 0, mode: 7)), "advanced hidden by default")
+        XCTAssertTrue(f.shouldShow(item(1, 0, mode: 7)), "advanced shown by default (mode 7 is rendered)")
+        s.hideAdvanced = true
+        f = DanmakuFilter(settings: s)
+        XCTAssertFalse(f.shouldShow(item(1, 0, mode: 7)))
         XCTAssertFalse(f.shouldShow(item(1, 0, mode: 8)))
     }
 

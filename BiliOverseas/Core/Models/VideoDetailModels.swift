@@ -403,6 +403,9 @@ struct PlayerExtraInfo: Hashable {
     var subtitles: [SubtitleTrack] = []
     /// Only filled when the server marks them as chapters (`view_points[0].type == 2`).
     var chapters: [VideoChapter] = []
+    /// Every `view_points` row, unfiltered (any `type`, invalid rows kept; missing times = NaN) —
+    /// SmartSkip's input (`SmartSkipVideoContext.chapters`).
+    var viewPoints: [VideoChapter] = []
     /// Seconds (server `last_play_time` is ms). 0 = none.
     var lastPlayTime: Double = 0
     var lastPlayCid: Int64 = 0

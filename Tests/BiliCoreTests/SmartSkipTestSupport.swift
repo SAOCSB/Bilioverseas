@@ -216,3 +216,13 @@ final class SSFakeTransport: SmartSkipTransport, @unchecked Sendable {
         return Data(out)
     }
 }
+
+/// The logged-in mid seen by `SmartSkipAnalyzer` (its cache key), switchable from a test.
+final class SSAccountBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _mid: Int64 = 0
+    var mid: Int64 {
+        get { lock.lock(); defer { lock.unlock() }; return _mid }
+        set { lock.lock(); _mid = newValue; lock.unlock() }
+    }
+}

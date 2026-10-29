@@ -154,17 +154,42 @@ final class SmartSkipTrackerTests: XCTestCase {
                        "the periodic observer was silent (paused / backgrounded)")
     }
 
-    func testManualModeTrustedSegmentPromptsWithCountdownAndReappearsOnReentry() {
+    /// skipper.js §10.2: a trusted segment's button has no countdown; it stays until the interval is left.
+    func testManualModeTrustedSegmentButtonStaysUntilLeftAndReappearsOnReentry() {
         let h = SSHarness(segments: [A(100, 200)], mode: .manual)
         h.tick(100)
         XCTAssertTrue(h.buttonVisible)
         XCTAssertFalse(h.buttonIsSuspicious)
-        h.advance(5)
-        XCTAssertFalse(h.buttonVisible)
+        XCTAssertEqual(h.prompt?.remaining, .infinity)
+        h.advance(30)
+        XCTAssertTrue(h.buttonVisible, "no countdown for a trusted segment")
         h.tick(210)
+        XCTAssertFalse(h.buttonVisible, "gone once the interval is left")
         h.tick(150)
         XCTAssertTrue(h.buttonVisible, "a new visit offers the button again")
         XCTAssertSeeks(h, [])
+    }
+
+    func testReenteringAnAutoSkippedSegmentOffersALastingButton() {
+        let h = SSHarness(segments: [A(100, 200)], mode: .auto)
+        h.tick(100)
+        XCTAssertSeeks(h, [200.05])
+        h.seeked()
+        h.tick(250)
+        h.tick(150)
+        h.advance(20)
+        XCTAssertTrue(h.buttonVisible, "dragged back in: 「跳过广告」 stays (upstream README)")
+        XCTAssertSeeks(h, [200.05])
+    }
+
+    func testMarkSkippedFromTheSegmentListStopsAutoSkip() {
+        let h = SSHarness(segments: [A(100, 200), A(300, 360)], mode: .auto)
+        h.tracker.markSkipped(id: A(300, 360).id)
+        h.tracker.markSkipped(id: "unknown")
+        h.tick(310)
+        XCTAssertSeeks(h, [], "already skipped from the list: only the button")
+        XCTAssertTrue(h.buttonVisible)
+        XCTAssertEqual(h.tracker.skippedSegmentIDs, [A(300, 360).id])
     }
 
     // MARK: user actions
@@ -199,15 +224,15 @@ final class SmartSkipTrackerTests: XCTestCase {
         XCTAssertEqual(tracker.update(time: 100, isPlaying: true, now: 0), .autoSkip(A(100, 200)))
         XCTAssertNil(tracker.update(time: 100.2, isPlaying: true, now: 0.25), "seek still in flight")
         XCTAssertNil(tracker.update(time: 100.4, isPlaying: true, now: 0.75))
-        XCTAssertEqual(remaining(tracker.update(time: 100.6, isPlaying: true, now: 1.0)), 5,
-                       "the seek never landed: offer the manual button, never auto-skip twice")
+        XCTAssertEqual(remaining(tracker.update(time: 100.6, isPlaying: true, now: 1.0)), .infinity,
+                       "the seek never landed: offer the (lasting) manual button, never auto-skip twice")
     }
 
     func testDidSeekEndsTheInFlightState() {
         let tracker = SmartSkipTracker(segments: [A(100, 200)], mode: .auto)
         _ = tracker.update(time: 100, isPlaying: true, now: 0)
         tracker.didSeek(to: 150)   // e.g. the user scrubbed back in right away
-        XCTAssertEqual(remaining(tracker.update(time: 150, isPlaying: true, now: 0.1)), 5)
+        XCTAssertEqual(remaining(tracker.update(time: 150, isPlaying: true, now: 0.1)), .infinity)
     }
 
     func testSeekingOutHidesThePromptAndSeekingWithinStartsAFreshVisit() {
@@ -247,7 +272,7 @@ final class SmartSkipTrackerTests: XCTestCase {
 
     func testModeSwitchToAutoWhilePromptIsVisibleSkipsOnTheNextTick() {
         let tracker = SmartSkipTracker(segments: [A(100, 200)], mode: .manual)
-        XCTAssertEqual(remaining(tracker.update(time: 100, isPlaying: true, now: 0)), 5)
+        XCTAssertEqual(remaining(tracker.update(time: 100, isPlaying: true, now: 0)), .infinity)
         tracker.mode = .auto
         XCTAssertEqual(tracker.update(time: 100.25, isPlaying: true, now: 0.25), .autoSkip(A(100, 200)))
         XCTAssertFalse(tracker.isPromptVisible)

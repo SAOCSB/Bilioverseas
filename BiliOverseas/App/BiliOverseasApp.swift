@@ -14,8 +14,14 @@ struct BiliOverseasApp: App {
                 .environmentObject(auth)
                 .preferredColorScheme(colorScheme)
                 .tint(.biliPink)
-                .onAppear { applyInterfaceStyle(settings.general.theme) }
+                .onAppear {
+                    // Toasts get their own window above every sheet / full-screen cover.
+                    ToastWindowHost.shared.install()
+                    applyInterfaceStyle(settings.general.theme)
+                }
                 .onChange(of: settings.general.theme) { applyInterfaceStyle($0) }
+                // bilioverseas://video/BV…, bilioverseas://open?url=<bilibili.com or b23.tv link> …
+                .onOpenURL { DeepLinkCenter.shared.handle($0) }
                 .task {
                     await auth.bootstrap()
                 }

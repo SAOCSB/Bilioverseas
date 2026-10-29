@@ -3,29 +3,33 @@ import AVFoundation
 import MediaPlayer
 
 /// Player gestures (features.md §1):
-/// - single tap: toggle the controls (only the lock button while locked);
+/// - single tap: toggle the controls (only the lock button while locked); on a danmaku (「启用点击弹幕」) it opens
+///   the action bubble instead — the danmaku freezes at touch-down — and while the bubble is open a tap elsewhere
+///   only closes it;
 /// - double tap: quarters → seek ∓「双击快进/快退时长」 (when 「双击快退/快进」 is on), centre → play / pause;
 /// - long press 0.3 s while playing: 长按倍速, released → the previous speed;
-/// - horizontal pan: seek preview (90 s per full width, applied on release; top-corner cancel zone);
-/// - vertical pan: left third brightness, right third volume (MPVolumeView slider), middle third fullscreen;
+/// - horizontal pan: seek preview (「滑动快进/快退时长」 per full width, applied on release; top-corner cancel zone);
+/// - vertical pan: left third brightness, right third volume (MPVolumeView slider) — 「左右侧滑动调节亮度/音量」 —,
+///   middle third fullscreen — 「中间滑动进入/退出全屏」;
+/// - pinch: zoom the picture 0.75–2× (「还原屏幕」 on the surface);
 /// - pans starting within 25 pt of an edge are ignored (system edge gestures); direction lock at 3×.
 final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     weak var controller: PlayerController?
 
     static let edgeInset: CGFloat = 25
-    /// A full-width horizontal swipe = 90 s.
-    static let seekWindowSeconds: Double = 90
 
     private let singleTap = UITapGestureRecognizer()
     private let doubleTap = UITapGestureRecognizer()
     private let longPress = UILongPressGestureRecognizer()
     private let pan = UIPanGestureRecognizer()
+    private let pinch = UIPinchGestureRecognizer()
     /// Off-screen system volume control: driving its slider changes the volume without the system HUD.
     private let volumeView = MPVolumeView(frame: CGRect(x: -400, y: -400, width: 10, height: 10))
     private var volumeObservation: NSKeyValueObservation?
 
     private enum PanMode {
-        case undecided, seek, brightness, volume, fullscreen
+        /// `ignored`: a vertical drag in a zone whose switch is off; nothing happens until the finger lifts.
+        case undecided, seek, brightness, volume, fullscreen, ignored
     }
 
     private var panMode: PanMode = .undecided
@@ -44,6 +48,13 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     private var tapAccumulated: Double = 0
     private var tapWindowEnd: CFTimeInterval = 0
 
+    private var pinchStartScale: CGFloat = 1
+    /// The danmaku frozen at touch-down, waiting for the single tap (recognised only once the double tap failed).
+    private var pendingDanmaku: DanmakuOverlayHit?
+    private var pendingDanmakuToken = 0
+    /// The item whose 「最高支持 2 倍速」 hint was shown (once per video).
+    private var boostCapHintCid: Int64?
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
@@ -60,7 +71,8 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         longPress.minimumPressDuration = 0.3
         pan.addTarget(self, action: #selector(handlePan(_:)))
         pan.maximumNumberOfTouches = 1
-        let recognizers: [UIGestureRecognizer] = [singleTap, doubleTap, longPress, pan]
+        pinch.addTarget(self, action: #selector(handlePinch(_:)))
+        let recognizers: [UIGestureRecognizer] = [singleTap, doubleTap, longPress, pan, pinch]
         for recognizer in recognizers {
             recognizer.delegate = self
             addGestureRecognizer(recognizer)
@@ -81,12 +93,13 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         // UIKit also asks this view about recognizers of its ancestors (e.g. the page's pop gesture): leave those alone.
-        let own: [UIGestureRecognizer] = [singleTap, doubleTap, longPress, pan]
+        let own: [UIGestureRecognizer] = [singleTap, doubleTap, longPress, pan, pinch]
         guard own.contains(where: { $0 === gestureRecognizer }) else { return true }
         guard let controller else { return false }
         if gestureRecognizer === singleTap { return true }
         if controller.overlay.isLocked { return false }
         if gestureRecognizer === doubleTap { return controller.item != nil }
+        if gestureRecognizer === pinch { return controller.item != nil && controller.overlay.panel == nil }
         if gestureRecognizer === longPress {
             return controller.status == .playing && AppSettings.shared.player.longPressSpeedEnabled
         }
@@ -122,6 +135,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     /// running 长按倍速 (restore the previous speed) and drop a pending scrub here, so the boost, the preview and
     /// the auto-hide hold can never stay behind.
     private func cancelActiveGestures() {
+        cancelPendingDanmaku()
         if let controller {
             if boosting {
                 boosting = false
@@ -133,7 +147,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             boosting = false
             panMode = .undecided
         }
-        for recognizer in [longPress, pan] as [UIGestureRecognizer]
+        for recognizer in [longPress, pan, pinch] as [UIGestureRecognizer]
         where recognizer.state == .began || recognizer.state == .changed {
             // Disabling a running recognizer cancels it; its `.cancelled` callback is a no-op now.
             recognizer.isEnabled = false
@@ -146,24 +160,43 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     @objc private func handleSingleTap(_ g: UITapGestureRecognizer) {
         guard let controller, g.state == .ended else { return }
         let overlay = controller.overlay
+        let surface = controller.surface
         if overlay.isLocked {
+            cancelPendingDanmaku()
             overlay.toggleControls()
             return
         }
+        // 点击弹幕: with the bubble open, a tap elsewhere only closes it.
+        if surface.isDanmakuBubbleVisible {
+            cancelPendingDanmaku()
+            surface.dismissDanmakuBubble()
+            return
+        }
         if overlay.panel != nil {
+            cancelPendingDanmaku()
             overlay.panel = nil
             return
         }
         // A further tap on the 「快进N秒」 indicator adds another step.
         if let forward = continuingTapZone(at: g.location(in: self)) {
+            cancelPendingDanmaku()
             stepSeek(forward: forward)
             return
         }
+        if let hit = pendingDanmaku, surface.danmaku.hasSuspendedDanmaku {
+            pendingDanmaku = nil
+            pendingDanmakuToken += 1
+            surface.showDanmakuBubble(for: hit, at: g.location(in: self))
+            return
+        }
+        cancelPendingDanmaku()
         overlay.toggleControls()
     }
 
     @objc private func handleDoubleTap(_ g: UITapGestureRecognizer) {
         guard let controller, g.state == .ended, !controller.overlay.isLocked else { return }
+        cancelPendingDanmaku()
+        controller.surface.dismissDanmakuBubble()
         let p = g.location(in: self)
         let w = bounds.width
         if AppSettings.shared.player.doubleTapAction == .seek, p.x < w * 0.25 || p.x >= w * 0.75 {
@@ -199,12 +232,66 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         controller.overlay.showDoubleTapHint(forward: forward, seconds: Int(tapAccumulated))
     }
 
+    // MARK: Tap danmaku (启用点击弹幕, features.md §8.6)
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        guard touches.count == 1, (event?.allTouches?.count ?? 1) == 1, let touch = touches.first else {
+            cancelPendingDanmaku()
+            return
+        }
+        beginDanmakuPress(at: touch.location(in: self))
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        expirePendingDanmaku()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        expirePendingDanmaku()
+    }
+
+    /// Freezes the danmaku under the finger right away: the single tap that opens the bubble is recognised only
+    /// ~0.3 s later (after the double tap failed), by when a scrolling danmaku would have moved away.
+    private func beginDanmakuPress(at p: CGPoint) {
+        cancelPendingDanmaku()
+        guard let controller, AppSettings.shared.danmaku.tapToInteract, controller.item != nil,
+              !controller.overlay.isLocked, controller.overlay.panel == nil,
+              !controller.surface.isDanmakuBubbleVisible
+        else { return }
+        let overlay = controller.surface.danmaku
+        pendingDanmaku = overlay.suspendDanmaku(at: convert(p, to: overlay))
+    }
+
+    /// The touch is over but no single tap may follow (it became a double tap, or moved too far): let the frozen
+    /// danmaku go if nothing claims it shortly.
+    private func expirePendingDanmaku() {
+        guard pendingDanmaku != nil else { return }
+        pendingDanmakuToken += 1
+        let token = pendingDanmakuToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, self.pendingDanmakuToken == token else { return }
+            self.cancelPendingDanmaku()
+        }
+    }
+
+    private func cancelPendingDanmaku() {
+        guard pendingDanmaku != nil else { return }
+        pendingDanmaku = nil
+        pendingDanmakuToken += 1
+        if let surface = controller?.surface, !surface.isDanmakuBubbleVisible { surface.danmaku.resume() }
+    }
+
     // MARK: Long press (长按倍速)
 
     @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
         guard let controller else { return }
         switch g.state {
         case .began:
+            cancelPendingDanmaku()
+            controller.surface.dismissDanmakuBubble()
             if boosting {
                 // A previous press that never reported its end: restore before starting again.
                 boosting = false
@@ -215,6 +302,11 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
                 boosting = true
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 controller.overlay.beginHold()
+                // HLS without I-frame playlists plays at most 2×: say so once per video (the pill shows the real rate).
+                if Double(controller.playerRate) < controller.boostRate - 0.001, boostCapHintCid != controller.item?.cid {
+                    boostCapHintCid = controller.item?.cid
+                    controller.overlay.showHint("当前视频最高支持 2 倍速播放")
+                }
             }
         case .ended, .cancelled, .failed:
             if boosting {
@@ -235,6 +327,8 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         let p = g.location(in: self)
         switch g.state {
         case .began:
+            cancelPendingDanmaku()
+            controller.surface.dismissDanmakuBubble()
             // A previous pan that never reported its end must not keep its preview / hold.
             if panMode != .undecided { finishPan(committed: false, controller) }
             panMode = .undecided
@@ -266,15 +360,20 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             controller.ensureVideoShot()
         } else if dy > 3 * dx {
             let w = bounds.width
-            if panStartPoint.x < w / 3 {
-                panMode = .brightness
-                level = Double(controller.currentBrightness)
-            } else if panStartPoint.x > w * 2 / 3 {
-                panMode = .volume
-                adjustingVolume = true
-                level = Double(AVAudioSession.sharedInstance().outputVolume)
+            let settings = AppSettings.shared.player
+            if panStartPoint.x < w / 3 || panStartPoint.x > w * 2 / 3 {
+                if !settings.slideVolumeBrightness {
+                    panMode = .ignored
+                } else if panStartPoint.x < w / 3 {
+                    panMode = .brightness
+                    level = Double(controller.currentBrightness)
+                } else {
+                    panMode = .volume
+                    adjustingVolume = true
+                    level = Double(AVAudioSession.sharedInstance().outputVolume)
+                }
             } else {
-                panMode = .fullscreen
+                panMode = settings.slideFullscreen ? .fullscreen : .ignored
             }
         }
         lastTranslation = .zero
@@ -285,11 +384,13 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         let w = max(bounds.width, 1)
         let h = max(bounds.height, 1)
         switch panMode {
-        case .undecided:
+        case .undecided, .ignored:
             return
         case .seek:
             let total = controller.duration
-            var target = panStartTime + Self.seekWindowSeconds * Double(t.x / w)
+            // 「滑动快进/快退时长」: a full-width swipe.
+            let window = min(max(AppSettings.shared.player.slideSeekSeconds, 5), 600)
+            var target = panStartTime + window * Double(t.x / w)
             target = max(0, total > 0 ? min(target, total) : target)
             panTarget = target
             let inCancelZone = p.y < h * 0.125 && (p.x < w * 0.125 || p.x > w * 0.875)
@@ -346,11 +447,32 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             controller.overlay.hideLevel(after: 0.2)
         case .brightness:
             controller.overlay.hideLevel(after: 0.2)
-        case .undecided, .fullscreen:
+        case .undecided, .fullscreen, .ignored:
             break
         }
         panMode = .undecided
         panCancelled = false
+    }
+
+    // MARK: Pinch (双指缩放)
+
+    @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
+        guard let controller else { return }
+        let surface = controller.surface
+        switch g.state {
+        case .began:
+            cancelPendingDanmaku()
+            surface.dismissDanmakuBubble()
+            pinchStartScale = surface.zoomScale
+            surface.setZoom(pinchStartScale * g.scale)
+        case .changed:
+            surface.setZoom(pinchStartScale * g.scale)
+        case .ended, .cancelled, .failed:
+            // Within a few percent of the original size: snap back, so 「还原屏幕」 does not stay for nothing.
+            if abs(surface.zoomScale - 1) < 0.04 { surface.resetZoom(animated: true) }
+        default:
+            break
+        }
     }
 
     // MARK: Volume

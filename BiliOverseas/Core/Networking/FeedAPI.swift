@@ -10,7 +10,27 @@ struct PopularWeeklyIssue: Identifiable, Hashable {
     var subject: String = ""
 }
 
-/// Home feeds: 推荐 (web), 热门, 排行榜, 每周必看, 入站必刷.
+/// One 不感兴趣 / 反馈 option of an app-feed card (`three_point_v2[].reasons[]`).
+struct FeedDislikeReason: Identifiable, Hashable {
+    var id: Int64
+    var name: String
+    /// What the official client toasts after it was chosen.
+    var toast: String = ""
+    /// A `feedback` reason (sent as `feedback_id`) rather than a `dislike` one (`reason_id`).
+    var isFeedback: Bool = false
+}
+
+/// What 不感兴趣 tells the app feed about a card: its `card_goto` / `param` and the reasons it offers.
+struct FeedCardFeedback: Hashable {
+    var goto: String
+    var param: Int64
+    var reasons: [FeedDislikeReason] = []
+    var feedbacks: [FeedDislikeReason] = []
+
+    var isEmpty: Bool { reasons.isEmpty && feedbacks.isEmpty }
+}
+
+/// Home feeds: 推荐 (app / web), 热门, 排行榜, 每周必看, 入站必刷.
 enum FeedAPI {
     // MARK: - Recommend (web)
 
@@ -120,6 +140,160 @@ enum FeedAPI {
         }
         if c.title.isEmpty && c.cover.isEmpty { return nil }
         return c
+    }
+
+    // MARK: - Recommend (app)
+
+    /// App home feed (`app.bilibili.com/x/v2/feed/index`, api-lists §2.2). Unlike the web feed it
+    /// carries zone names (分区屏蔽), 不感兴趣 reasons and the 「已关注」 mark. `cursor` is the previous
+    /// page's `next` (nil = refresh); the feed never ends. App-signed; a TV-login `access_key`
+    /// personalises it and is signed with the appkey it was minted for. Ads stay in, typed (§1.5).
+    static func appRecommend(cursor: String?) async throws -> Page<VideoCard> {
+        let idx = max(0, Int(cursor ?? "") ?? 0)
+        var query: [String: Any] = [
+            "build": ListMapping.appBuild, "c_locale": "zh_CN", "channel": "master", "column": 2,
+            "device": "phone", "device_name": "android", "device_type": 0, "disable_rcmd": 0,
+            "flush": 8, "fnval": 976, "fnver": 0, "force_host": 2, "fourk": 1, "guidance": 1,
+            "https_url_req": 1, "idx": idx, "mobi_app": "android_i", "network": "wifi",
+            "platform": "android", "player_net": 1, "pull": idx == 0 ? "true" : "false", "qn": 32,
+            "recsys_mode": 0, "s_locale": "zh_CN", "splash_id": "", "statistics": ListMapping.appStatistics,
+            "voice_balance": 0,
+        ]
+        var key = ListMapping.appKey
+        if let auth = appAuth() {
+            query["access_key"] = auth.token
+            key = auth.key
+        }
+        let data = try await BiliHTTP.shared.api(BiliHost.app + "/x/v2/feed/index", query: query,
+                                                 sign: .app(key), headers: appFeedHeaders())
+        return parseAppRecommend(data, idx: idx)
+    }
+
+    /// `data` of the app feed → cards. `next` = idx + 1.
+    static func parseAppRecommend(_ data: JSON, idx: Int = 0) -> Page<VideoCard> {
+        var cards: [VideoCard] = []
+        for (i, item) in data["items"].arrayValue.enumerated() {
+            if let c = appRecommendCard(item, position: "app\(idx)-\(i)") { cards.append(c) }
+        }
+        return Page(items: cards, hasMore: true, next: String(idx + 1))
+    }
+
+    /// One `data.items[]` entry. Videos (`can_play == 1`), episodes and live rooms are kept; ads are
+    /// kept but typed (`card_goto=ad_*`, `ad_info`, `card_type=cm_*`, `goto=ad`) so `FeedFilter`
+    /// decides; articles, pictures, banners, specials and games are dropped (OURS: av / bangumi only).
+    static func appRecommendCard(_ item: JSON, position: String) -> VideoCard? {
+        let cardGoto = item["card_goto"].stringValue
+        let cardType = item["card_type"].stringValue
+        var signals: [String] = []
+        if cardGoto.hasPrefix("ad") { signals.append("card_goto=\(cardGoto)") }
+        if ListMapping.hasPayload(item["ad_info"]) { signals.append("ad_info") }
+        if cardType.hasPrefix("cm") { signals.append("card_type=\(cardType)") }
+        if item["goto"].stringValue == "ad" { signals.append("goto=ad") }
+
+        let args = item["args"]
+        let playerArgs = item["player_args"]
+        let param = item["param"].int64Value
+        var c = VideoCard(id: "")
+        c.title = item["title"].stringValue
+        c.cover = ListMapping.image(item["cover"])
+        c.uri = item["uri"].stringValue
+        c.desc = item["desc"].stringValue
+        c.zone = args["tname"].stringValue
+        c.ownerMid = args["up_id"].int64Value
+        let upName = args["up_name"].stringValue
+        c.ownerName = cardGoto == "av" && !upName.isEmpty ? upName : item["desc_button"]["text"].stringValue
+        c.viewCount = ListMapping.count(item["cover_left_text_1"])
+        c.danmakuCount = ListMapping.count(item["cover_left_text_2"])
+        var reason = item["rcmd_reason"].object != nil ? item["rcmd_reason"]["content"].stringValue : item["rcmd_reason"].stringValue
+        if reason == "竖屏" { reason = "" }
+        // 「1万点赞」: the only like count this feed gives (used by 点赞率过滤).
+        if reason.contains("赞") { c.likeCount = ListMapping.parseCount(reason) }
+        c.isFollowed = FeedFilter.followedMarkers.contains(reason)
+        c.reason = reason
+        c.feedback = appFeedback(item["three_point_v2"], goto: cardGoto, param: param)
+
+        if !signals.isEmpty {
+            c.kind = .ad
+            c.adSignals = signals
+            ListMapping.applyIDs(&c, aid: playerArgs["aid"].int64Value, bvid: item["bvid"].stringValue)
+            if c.badge.isEmpty { c.badge = "广告" }
+            c.id = (c.id.isEmpty ? "ad" : "ad-\(c.id)") + "-\(position)"
+            return c
+        }
+        switch cardGoto {
+        case "av":
+            guard (item["can_play"].int ?? 1) == 1 else { return nil }
+            ListMapping.applyIDs(&c, aid: playerArgs["aid"].int64 ?? param, bvid: item["bvid"].stringValue)
+            guard !c.id.isEmpty else { return nil }
+            c.kind = .video
+            c.cid = playerArgs["cid"].int64Value
+            let seconds = playerArgs["duration"].intValue
+            c.duration = seconds > 0 ? seconds : ListMapping.duration(item["cover_right_text"])
+        case "bangumi":
+            guard param != 0 else { return nil }
+            c.kind = .bangumi
+            c.epId = param
+            c.id = "ep\(param)"
+            c.badge = item["cover_right_text"].stringValue
+        case "live":
+            var room = param
+            if room == 0 { room = ListMapping.firstCapture(#"live(?:\.bilibili\.com)?/(\d+)"#, in: c.uri).flatMap { Int64($0) } ?? 0 }
+            guard room != 0 else { return nil }
+            c.kind = .live
+            c.roomId = room
+            c.id = "live-\(room)"
+            c.badge = "直播"
+            c.uri = "https://live.bilibili.com/\(room)"
+        default:
+            return nil
+        }
+        if c.title.isEmpty && c.cover.isEmpty { return nil }
+        return c
+    }
+
+    /// `three_point_v2[]` (`{type: dislike | feedback, reasons[{id, name, toast}]}`) → the card's
+    /// 不感兴趣 menu, nil when it offers none.
+    static func appFeedback(_ threePoint: JSON, goto: String, param: Int64) -> FeedCardFeedback? {
+        guard !goto.isEmpty, param != 0 else { return nil }
+        var fb = FeedCardFeedback(goto: goto, param: param)
+        for entry in threePoint.arrayValue {
+            let type = entry["type"].stringValue
+            guard type == "dislike" || type == "feedback" else { continue }
+            let reasons: [FeedDislikeReason] = entry["reasons"].arrayValue.compactMap { r in
+                let name = r["name"].stringValue
+                guard let id = r["id"].int64, !name.isEmpty else { return nil }
+                return FeedDislikeReason(id: id, name: name, toast: r["toast"].stringValue, isFeedback: type == "feedback")
+            }
+            if type == "dislike" { fb.reasons += reasons } else { fb.feedbacks += reasons }
+        }
+        return fb.isEmpty ? nil : fb
+    }
+
+    /// 不感兴趣 / 反馈 for an app-feed card (`GET app.bilibili.com/x/feed/dislike`, `…/dislike/cancel`
+    /// with `undo`). Needs the TV-login `access_key`.
+    static func dislike(_ feedback: FeedCardFeedback, reason: FeedDislikeReason, undo: Bool = false) async throws {
+        guard let auth = appAuth() else { throw BiliError.other("提交反馈需要使用 TV 扫码登录") }
+        var query: [String: Any] = [
+            "goto": feedback.goto, "id": feedback.param, "build": 1, "mobi_app": "android", "access_key": auth.token,
+        ]
+        query[reason.isFeedback ? "feedback_id" : "reason_id"] = reason.id
+        _ = try await BiliHTTP.shared.api(BiliHost.app + (undo ? "/x/feed/dislike/cancel" : "/x/feed/dislike"),
+                                          query: query, sign: .app(auth.key), headers: appFeedHeaders())
+    }
+
+    /// The TV-login `access_key` and the appkey it must be signed with; nil without one.
+    static func appAuth() -> (token: String, key: AppKey)? {
+        guard let token = AuthService.shared.accessKey, let key = AuthService.shared.accessKeyAppKey else { return nil }
+        return (token, key)
+    }
+
+    /// Headers PiliPlus sends with the app feed (the `android_hd` client).
+    private static func appFeedHeaders() -> [String: String] {
+        var h = ListMapping.appHeaders(appKeyHeader: "android_hd")
+        h["User-Agent"] = "Mozilla/5.0 BiliDroid/2.0.1 (bbcallen@gmail.com) os/android model/android_hd mobi_app/android_hd build/2001100 channel/master innerVer/2001100 osVer/15 network/2"
+        h["x-bili-aurora-eid"] = ""
+        h["x-bili-aurora-zone"] = ""
+        return h
     }
 
     // MARK: - Popular

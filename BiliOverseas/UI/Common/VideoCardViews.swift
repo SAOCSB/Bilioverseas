@@ -3,6 +3,8 @@ import SwiftUI
 /// Official-app style grid card: 16:10 cover with play/danmaku counts and duration overlay.
 struct VideoGridCell: View {
     let card: VideoCard
+    /// Leaves room at the end of the owner line for the ⋮ button `VideoCardGrid` lays over it.
+    var reservesMenuSpace: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -39,6 +41,7 @@ struct VideoGridCell: View {
                 Spacer(minLength: 0)
             }
             .foregroundStyle(.secondary)
+            .padding(.trailing, reservesMenuSpace ? 24 : 0)
         }
         .contentShape(Rectangle())
     }
@@ -152,45 +155,395 @@ struct CompactLabelStyle: LabelStyle {
     }
 }
 
-/// Two-column (or settings-driven) grid of cards with infinite scroll, used by feeds.
+// MARK: - Card menu (稍后再看 / 不感兴趣 / 屏蔽UP主)
+
+/// Actions behind a video card's ⋮ button and long-press menu. `remove` drops cards from the list on
+/// screen (e.g. `{ model.remove(where: $0) }`); the 首页 lists also re-apply `FeedFilter` when the
+/// rules change, so a newly blocked UP disappears from them either way.
+@MainActor
+enum VideoCardActions {
+    typealias Remove = @MainActor (_ predicate: (VideoCard) -> Bool) -> Void
+
+    static func canWatchLater(_ card: VideoCard) -> Bool {
+        card.kind == .video && (card.aid != 0 || !card.bvid.isEmpty)
+    }
+
+    static func canBlockUploader(_ card: VideoCard) -> Bool {
+        card.ownerMid != 0 || !card.ownerName.isEmpty
+    }
+
+    /// Whether the menu has anything to offer for this card.
+    static func hasActions(_ card: VideoCard, allowsDislike: Bool) -> Bool {
+        canWatchLater(card) || canBlockUploader(card) || allowsDislike
+    }
+
+    static func addToWatchLater(_ card: VideoCard) {
+        guard BiliHTTP.shared.isLoggedIn else {
+            ToastCenter.shared.show("请先登录")
+            return
+        }
+        Task {
+            do {
+                if card.aid != 0 {
+                    try await WatchLaterAPI.add(aid: card.aid)
+                } else {
+                    try await WatchLaterAPI.add(bvid: card.bvid)
+                }
+                ToastCenter.shared.show("已添加至稍后再看")
+            } catch {
+                if !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
+            }
+        }
+    }
+
+    /// Adds the card's UP to 「UP 主屏蔽」 (`UID:<mid>` when the mid is known) and hides their cards here.
+    static func blockUploader(_ card: VideoCard, remove: Remove?) {
+        let rule = card.ownerMid != 0 ? "UID:\(card.ownerMid)" : card.ownerName
+        let name = card.ownerName.isEmpty ? rule : card.ownerName
+        let added = FeedFilter(settings: AppSettings.shared.feedFilter).matchUploader(card) == nil
+        if added { AppSettings.shared.feedFilter.blockedUploaders.append(rule) }
+        let mid = card.ownerMid
+        let lowerName = card.ownerName.lowercased()
+        withAnimation(.easeInOut(duration: 0.2)) {
+            remove? { c in mid != 0 ? c.ownerMid == mid : (!c.ownerName.isEmpty && c.ownerName.lowercased() == lowerName) }
+        }
+        if added {
+            ToastCenter.shared.show("已屏蔽UP主「\(name)」", duration: 3, actionTitle: "撤销") {
+                AppSettings.shared.feedFilter.blockedUploaders.removeAll { $0 == rule }
+            }
+        } else {
+            ToastCenter.shared.show("已屏蔽UP主「\(name)」")
+        }
+    }
+
+    /// 不感兴趣 with one of the app feed's reasons: hides the card and reports it (TV-login token).
+    static func dislike(_ card: VideoCard, reason: FeedDislikeReason, remove: Remove?) {
+        guard let feedback = card.feedback else { return }
+        let id = card.id
+        withAnimation(.easeInOut(duration: 0.2)) { remove? { $0.id == id } }
+        Task {
+            do {
+                try await FeedAPI.dislike(feedback, reason: reason)
+                let fallback = reason.isFeedback ? "感谢反馈" : "将减少相似内容推荐"
+                ToastCenter.shared.show(reason.toast.isEmpty ? fallback : reason.toast)
+            } catch {
+                if !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
+            }
+        }
+    }
+
+    /// 不感兴趣 without server reasons (web feed, or no TV-login token): hides the card in this list.
+    static func hide(_ card: VideoCard, remove: Remove?) {
+        let id = card.id
+        withAnimation(.easeInOut(duration: 0.2)) { remove? { $0.id == id } }
+        ToastCenter.shared.show("已隐藏该视频")
+    }
+}
+
+/// The card menu's items, shared by the ⋮ `Menu` and the long-press `.contextMenu`.
+struct VideoCardMenuItems: View {
+    let card: VideoCard
+    /// Offer 不感兴趣 (home 推荐).
+    var allowsDislike = false
+    var remove: VideoCardActions.Remove?
+
+    var body: some View {
+        if VideoCardActions.canWatchLater(card) {
+            Button {
+                VideoCardActions.addToWatchLater(card)
+            } label: {
+                Label("稍后再看", systemImage: "clock")
+            }
+        }
+        if allowsDislike {
+            dislikeItems
+        }
+        if VideoCardActions.canBlockUploader(card) {
+            Button(role: .destructive) {
+                VideoCardActions.blockUploader(card, remove: remove)
+            } label: {
+                Label("屏蔽UP主：\(uploaderName)", systemImage: "person.crop.circle.badge.xmark")
+            }
+        }
+    }
+
+    private var uploaderName: String {
+        card.ownerName.isEmpty ? "UID \(card.ownerMid)" : card.ownerName
+    }
+
+    @ViewBuilder private var dislikeItems: some View {
+        if let feedback = card.feedback, FeedAPI.appAuth() != nil {
+            Menu {
+                ForEach(feedback.reasons) { reason in
+                    Button(reason.name) { VideoCardActions.dislike(card, reason: reason, remove: remove) }
+                }
+                if !feedback.feedbacks.isEmpty {
+                    Section("反馈") {
+                        ForEach(feedback.feedbacks) { reason in
+                            Button(reason.name) { VideoCardActions.dislike(card, reason: reason, remove: remove) }
+                        }
+                    }
+                }
+            } label: {
+                Label("不感兴趣", systemImage: "hand.thumbsdown")
+            }
+        } else {
+            Button {
+                VideoCardActions.hide(card, remove: remove)
+            } label: {
+                Label("不感兴趣", systemImage: "hand.thumbsdown")
+            }
+        }
+    }
+}
+
+/// The ⋮ of a grid card. `VideoCardGrid` lays it over the card's owner line, outside the card's
+/// `NavigationLink`, so tapping it opens the menu instead of the video.
+struct VideoCardMenuButton: View {
+    let card: VideoCard
+    var allowsDislike = false
+    var remove: VideoCardActions.Remove?
+
+    var body: some View {
+        Menu {
+            VideoCardMenuItems(card: card, allowsDislike: allowsDislike, remove: remove)
+        } label: {
+            Image(systemName: "ellipsis")
+                .rotationEffect(.degrees(90))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 22)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("更多")
+    }
+}
+
+extension View {
+    /// Long-press menu with the card actions (稍后再看 / 不感兴趣 / 屏蔽UP主) for any video row or card.
+    func videoCardMenu(_ card: VideoCard, allowsDislike: Bool = false,
+                       remove: VideoCardActions.Remove? = nil) -> some View {
+        contextMenu {
+            VideoCardMenuItems(card: card, allowsDislike: allowsDislike, remove: remove)
+        }
+    }
+}
+
+extension PagedListModel {
+    /// Runs `filter` again over the rows already shown (the user changed the rules).
+    func reapplyFilter() {
+        guard let filter else { return }
+        remove(where: { !filter($0) })
+    }
+}
+
+// MARK: - Re-tapping the tab (scroll to top / refresh)
+
+/// A re-tap of the active 首页 / 动态 tab, handed down to the visible feed: it scrolls to the top, or
+/// refreshes when it is already there (and always on a second re-tap within 0.5 s).
+struct FeedReselectSignal: Equatable {
+    private(set) var serial = 0
+    private(set) var forceRefresh = false
+
+    mutating func fire(forceRefresh: Bool) {
+        serial += 1
+        self.forceRefresh = forceRefresh
+    }
+}
+
+/// Whether a feed's `ScrollView` shows its top. A plain object, so scrolling never re-renders the feed.
+final class FeedTopTracker {
+    var isAtTop = true
+}
+
+private struct FeedTopOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// First view of a feed's scroll content: the target of `scrollTo` and the probe for `FeedTopTracker`.
+struct FeedTopAnchor: View {
+    static let id = "feed-top-anchor"
+    static let space = "feed-scroll"
+    let tracker: FeedTopTracker
+
+    var body: some View {
+        Color.clear
+            .frame(height: 0)
+            .id(FeedTopAnchor.id)
+            .background(GeometryReader { geo in
+                Color.clear.preference(key: FeedTopOffsetKey.self,
+                                       value: geo.frame(in: .named(FeedTopAnchor.space)).minY)
+            })
+            .onPreferenceChange(FeedTopOffsetKey.self) { tracker.isAtTop = $0 > -8 }
+    }
+}
+
+/// Spinner row under the anchor while a re-tap refresh runs (pull to refresh has its own).
+struct FeedRefreshingRow: View {
+    var body: some View {
+        ProgressView()
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+    }
+}
+
+extension View {
+    /// Re-tap handling for a feed `ScrollView` (inside `ScrollViewReader`) whose content starts with
+    /// `FeedTopAnchor(tracker:)`: scrolls up when away from the top, refreshes when already there.
+    func feedReselect(_ signal: FeedReselectSignal, proxy: ScrollViewProxy, tracker: FeedTopTracker,
+                      isRefreshing: Binding<Bool>, refresh: @escaping () async -> Void) -> some View {
+        coordinateSpace(name: FeedTopAnchor.space)
+            .onChange(of: signal) { s in
+                let atTop = tracker.isAtTop
+                if !atTop {
+                    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(FeedTopAnchor.id, anchor: .top) }
+                }
+                guard atTop || s.forceRefresh, !isRefreshing.wrappedValue else { return }
+                isRefreshing.wrappedValue = true
+                Task {
+                    await refresh()
+                    isRefreshing.wrappedValue = false
+                }
+            }
+    }
+}
+
+// MARK: - Grid
+
+/// Grid columns of the feeds: phones, and iPads in a compact-width window (Split View / Slide Over),
+/// get `compactCount` equal columns; a regular-width iPad fits as many ≥ `minimumWidth` columns as its
+/// window allows.
+@MainActor
+enum FeedGridLayout {
+    static func isWide(_ sizeClass: UserInterfaceSizeClass?) -> Bool {
+        UIDevice.current.userInterfaceIdiom == .pad && sizeClass == .regular
+    }
+
+    static func columns(_ sizeClass: UserInterfaceSizeClass?, compactCount: Int, minimumWidth: CGFloat = 220) -> [GridItem] {
+        if isWide(sizeClass) {
+            return [GridItem(.adaptive(minimum: minimumWidth, maximum: 420), spacing: 10, alignment: .top)]
+        }
+        return Array(repeating: GridItem(.flexible(), spacing: 10, alignment: .top), count: max(1, compactCount))
+    }
+}
+
+/// 「上次看到这里」 between the cards of the latest refresh and the older ones; tap = back up and refresh.
+struct FeedLastSeenDivider: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Rectangle().fill(Color.secondary.opacity(0.3)).frame(height: 0.5)
+                Text("上次看到这里，点击刷新")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: true, vertical: false)
+                Rectangle().fill(Color.secondary.opacity(0.3)).frame(height: 0.5)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Settings-driven grid (or single-column rows) of cards with infinite scroll, used by feeds. Every card
+/// has the long-press menu; grid cards also get the ⋮ button.
 struct VideoCardGrid: View {
     @ObservedObject var model: PagedListModel<VideoCard>
     @ObservedObject private var settings = AppSettings.shared
+    @Environment(\.horizontalSizeClass) private var sizeClass
     var emptyText: String = "暂无视频"
+    /// Offer 不感兴趣 in the card menus (home 推荐).
+    var allowsDislike: Bool = false
+    /// Re-taps of the tab bar item (scroll to top / refresh).
+    var reselect = FeedReselectSignal()
+    @State private var topTracker = FeedTopTracker()
+    @State private var isReselectRefreshing = false
+
+    private var usesRows: Bool {
+        settings.general.feedColumns == 1 && !FeedGridLayout.isWide(sizeClass)
+    }
 
     private var columns: [GridItem] {
-        let n = UIDevice.current.userInterfaceIdiom == .pad ? 4 : max(1, settings.general.feedColumns)
-        return Array(repeating: GridItem(.flexible(), spacing: 10, alignment: .top), count: n)
+        FeedGridLayout.columns(sizeClass, compactCount: settings.general.feedColumns)
+    }
+
+    /// Where the 「上次看到这里」 divider goes (never above the first card).
+    private var lastSeenIndex: Int? {
+        guard settings.general.showLastSeenHint, let id = model.lastSeenID,
+              let index = model.items.firstIndex(where: { $0.id == id }), index > 0 else { return nil }
+        return index
     }
 
     var body: some View {
-        ScrollView {
-            if settings.general.feedColumns == 1 && UIDevice.current.userInterfaceIdiom != .pad {
-                LazyVStack(spacing: 12) {
-                    ForEach(model.items) { card in
-                        cardLink(card) { VideoRowCell(card: card) }
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    FeedTopAnchor(tracker: topTracker)
+                    if isReselectRefreshing { FeedRefreshingRow() }
+                    VStack(spacing: 14) {
+                        if let split = lastSeenIndex {
+                            cards(model.items[..<split])
+                            FeedLastSeenDivider { refreshFromDivider(proxy) }
+                            cards(model.items[split...])
+                        } else {
+                            cards(model.items[...])
+                        }
+                    }
+                    ListFooter(isLoading: model.isLoading, hasMore: model.hasMore, isEmpty: model.isEmpty,
+                               error: model.errorMessage, emptyText: emptyText) {
+                        Task { await model.loadMore() }
                     }
                 }
-                .padding(.horizontal, 12)
-            } else {
-                LazyVGrid(columns: columns, spacing: 14) {
-                    ForEach(model.items) { card in
-                        cardLink(card) { VideoGridCell(card: card) }
-                    }
-                }
-                .padding(.horizontal, 10)
             }
-            ListFooter(isLoading: model.isLoading, hasMore: model.hasMore, isEmpty: model.isEmpty,
-                       error: model.errorMessage, emptyText: emptyText) {
-                Task { await model.loadMore() }
+            .refreshable { await model.refresh() }
+            .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
+                await model.refresh()
             }
         }
-        .refreshable { await model.refresh() }
         .task { await model.loadIfNeeded() }
     }
 
+    @ViewBuilder private func cards(_ slice: ArraySlice<VideoCard>) -> some View {
+        if usesRows {
+            LazyVStack(spacing: 12) {
+                ForEach(slice) { card in
+                    cardLink(card, menuButton: false) { VideoRowCell(card: card) }
+                }
+            }
+            .padding(.horizontal, 12)
+        } else {
+            LazyVGrid(columns: columns, spacing: 14) {
+                ForEach(slice) { card in
+                    cardLink(card, menuButton: true) { VideoGridCell(card: card, reservesMenuSpace: true) }
+                }
+            }
+            .padding(.horizontal, 10)
+        }
+    }
+
+    private var removeCards: VideoCardActions.Remove {
+        let model = model
+        return { predicate in model.remove(where: predicate) }
+    }
+
+    private func refreshFromDivider(_ proxy: ScrollViewProxy) {
+        withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(FeedTopAnchor.id, anchor: .top) }
+        guard !isReselectRefreshing else { return }
+        isReselectRefreshing = true
+        Task {
+            await model.refresh()
+            isReselectRefreshing = false
+        }
+    }
+
     @ViewBuilder
-    private func cardLink<Content: View>(_ card: VideoCard, @ViewBuilder content: () -> Content) -> some View {
+    private func cardLink<Content: View>(_ card: VideoCard, menuButton: Bool,
+                                         @ViewBuilder content: () -> Content) -> some View {
         Group {
             if let route = card.route {
                 NavigationLink(value: route) { content() }
@@ -199,6 +552,13 @@ struct VideoCardGrid: View {
             }
         }
         .buttonStyle(.plain)
+        .videoCardMenu(card, allowsDislike: allowsDislike, remove: removeCards)
+        .overlay(alignment: .bottomTrailing) {
+            if menuButton && VideoCardActions.hasActions(card, allowsDislike: allowsDislike) {
+                VideoCardMenuButton(card: card, allowsDislike: allowsDislike, remove: removeCards)
+                    .offset(x: 4, y: 2)
+            }
+        }
         .onAppear { model.onItemAppear(card) }
     }
 }

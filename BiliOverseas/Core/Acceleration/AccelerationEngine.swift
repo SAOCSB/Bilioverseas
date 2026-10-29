@@ -16,6 +16,10 @@ import Foundation
 // - New item / quality change: close the previous session, `let s = try await engine.prepare(request)` (or
 //   `prepareProgressive`), `AVURLAsset(url: s.url)` — no custom headers needed — and keep `s` alive with the item.
 //   On a thrown error retry once with `accelerate: false`, then fall back to the progressive path / show the error.
+//   Pass `refreshURLs` (DASH: `PlaybackRequest.refreshURLs`; durl: `progressiveRefresher`) so expiring signed URLs
+//   are renewed in place.
+// - Settings: `AppSettings.acceleration` posts `AppSettings.accelerationDidChange` on every change; the engine copies
+//   it into its thread-safe snapshot right away, so a change made while nothing plays applies to the next session.
 // - `preferredForwardBufferDuration = settings.forwardBufferSeconds`.
 // - 0.25 s periodic time observer → `s.update(time:rate:playing:bufferedAhead:cacheFull:)`: bufferedAhead = end of
 //   the `loadedTimeRanges` entry containing currentTime − currentTime; playing = `timeControlStatus == .playing`
@@ -101,6 +105,9 @@ final class AccelerationEngine: LocalProxyRequestHandler {
         var auto: AutoConcurrencySignals?
         /// Live settings (read on the main thread when possible, see `refreshSettings`).
         var settings: () -> AccelerationSettings
+        /// Posted (on the main thread) whenever those settings change: the engine re-reads them at once instead of
+        /// waiting for the next playing session's tick.
+        var settingsDidChange: Notification.Name? = nil
         var clock: MonotonicClock = SystemClock.shared
         /// Epoch seconds (URL `deadline=` comparison).
         var wallClock: () -> Double = { Date().timeIntervalSince1970 }
@@ -152,12 +159,23 @@ final class AccelerationEngine: LocalProxyRequestHandler {
     private var sessions: [String: EngineWeakSession] = [:]
     private var sessionOrder: [String] = []
     private var clientSwitch: EngineMediaClientSwitch?
+    private var settingsObserver: NSObjectProtocol?
 
     init(dependencies: Dependencies) {
         self.dependencies = dependencies
         settingsBox = EngineSettingsBox(dependencies.settings())
         server = dependencies.makeServer(self)
         server.onPortChange = { [weak self] port in self?.portChanged(port) }
+        if let name = dependencies.settingsDidChange {
+            // Delivered synchronously on the posting (main) thread, where reading the settings is safe.
+            settingsObserver = NotificationCenter.default.addObserver(forName: name, object: nil, queue: nil) {
+                [weak self] _ in self?.refreshSettings()
+            }
+        }
+    }
+
+    deinit {
+        if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
     }
 
     // MARK: App lifecycle
@@ -223,7 +241,6 @@ final class AccelerationEngine: LocalProxyRequestHandler {
     /// file totals are final when AVPlayer asks. Throws `AccelerationEngineError` (the player falls back).
     func prepare(_ request: PlaybackRequest) async throws -> PlaybackSession {
         startIfNeeded()
-        refreshSettingsIfOnMainThread()
         let port = try await readyPort()
         let videoURLs = EngineMediaURLPolicy.allowed(request.video.allURLs)
         guard !videoURLs.isEmpty else { throw AccelerationEngineError.noAllowedURL }
@@ -295,10 +312,12 @@ final class AccelerationEngine: LocalProxyRequestHandler {
                            refreshURLs: request.refreshURLs)
     }
 
-    /// A progressive (durl) MP4 through the proxy as `/<token>/p.mp4` (not HLS).
-    func prepareProgressive(routeKey: String, segment: ProgressiveSegment, accelerate: Bool) async throws -> PlaybackSession {
+    /// A progressive (durl) MP4 through the proxy as `/<token>/p.mp4` (not HLS). `refreshURLs` renews the signed
+    /// URLs of the same file (see `progressiveRefresher`); the session swaps them in like a DASH session does.
+    func prepareProgressive(routeKey: String, segment: ProgressiveSegment, accelerate: Bool,
+                            refreshURLs: (() async throws -> (video: DashStream, audio: DashStream?))? = nil)
+    async throws -> PlaybackSession {
         startIfNeeded()
-        refreshSettingsIfOnMainThread()
         let candidates = [segment.url] + segment.backupURLs.filter { $0 != segment.url }
         if candidates.allSatisfy({ (URLComponents(string: $0)?.path ?? "").lowercased().hasSuffix(".flv") }) {
             throw AccelerationEngineError.unsupportedFormat("FLV")
@@ -336,7 +355,34 @@ final class AccelerationEngine: LocalProxyRequestHandler {
         return makeSession(token: token, port: port, entry: "p.mp4", isHLS: false, tracks: [track],
                            handles: [EngineSessionTrack(kind: .video, handle: handle, stream: stream)],
                            playlists: [:], routes: ["p.mp4": .video], contentTypes: [.video: "video/mp4"],
-                           downloader: downloader, accelerate: accelerate, videoHeight: 0, refreshURLs: nil)
+                           downloader: downloader, accelerate: accelerate, videoHeight: 0, refreshURLs: refreshURLs)
+    }
+
+    /// `prepareProgressive(refreshURLs:)` from a playurl re-fetch: picks the durl entry serving the same file as
+    /// `segment` (same URL path; refreshes only ever swap URLs of the same path) as a `DashStream`.
+    static func progressiveRefresher(for segment: ProgressiveSegment,
+                                     fetch: @escaping () async throws -> [ProgressiveSegment])
+    -> () async throws -> (video: DashStream, audio: DashStream?) {
+        let wanted = URLComponents(string: segment.url)?.path ?? ""
+        return {
+            guard !wanted.isEmpty, let fresh = matchingSegment(path: wanted, in: try await fetch()) else {
+                throw AccelerationEngineError.noAllowedURL
+            }
+            return (video: DashStream(kind: .video, id: 0, baseURL: fresh.url, backupURLs: fresh.backupURLs), audio: nil)
+        }
+    }
+
+    /// The entry whose primary (or, reordered to the front, one backup) URL has `path`.
+    static func matchingSegment(path: String, in segments: [ProgressiveSegment]) -> ProgressiveSegment? {
+        for candidate in segments {
+            let urls = [candidate.url] + candidate.backupURLs
+            guard let hit = urls.first(where: { URLComponents(string: $0)?.path == path }) else { continue }
+            var result = candidate
+            result.url = hit
+            result.backupURLs = urls.filter { $0 != hit }
+            return result
+        }
+        return nil
     }
 
     /// Fixed 2 MiB units after the pinned head, with times estimated from the byte position.
@@ -1182,7 +1228,8 @@ extension AccelerationEngine.Dependencies {
                 BTRDownloader(config: config, client: client, auto: AutoConcurrencyController.shared)
             },
             auto: AutoConcurrencyController.shared,
-            settings: { AppSettings.shared.acceleration })
+            settings: { AppSettings.shared.acceleration },
+            settingsDidChange: AppSettings.accelerationDidChange)
     }
 }
 

@@ -9,7 +9,7 @@ final class PlayerNowPlayingCenter {
     static let shared = PlayerNowPlayingCenter()
 
     enum Command {
-        case play, pause, toggle, skipForward, skipBackward, next
+        case play, pause, toggle, skipForward, skipBackward, next, previous
         case seek(Double)
     }
 
@@ -82,6 +82,7 @@ final class PlayerNowPlayingCenter {
         if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         MPRemoteCommandCenter.shared().nextTrackCommand.isEnabled = controller.hasNext
+        MPRemoteCommandCenter.shared().previousTrackCommand.isEnabled = controller.hasPrevious
     }
 
     private func loadArtworkIfNeeded(_ controller: PlayerController) {
@@ -118,11 +119,11 @@ final class PlayerNowPlayingCenter {
         center.skipBackwardCommand.preferredIntervals = [10]
         center.skipBackwardCommand.addTarget { _ in PlayerNowPlayingCenter.dispatch(.skipBackward) }
         center.nextTrackCommand.addTarget { _ in PlayerNowPlayingCenter.dispatch(.next) }
+        center.previousTrackCommand.addTarget { _ in PlayerNowPlayingCenter.dispatch(.previous) }
         center.changePlaybackPositionCommand.addTarget { event in
             guard let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
             return PlayerNowPlayingCenter.dispatch(.seek(e.positionTime))
         }
-        center.previousTrackCommand.isEnabled = false
     }
 
     private func setCommandsEnabled(_ enabled: Bool) {
@@ -134,6 +135,7 @@ final class PlayerNowPlayingCenter {
         center.skipBackwardCommand.isEnabled = enabled
         center.changePlaybackPositionCommand.isEnabled = enabled
         center.nextTrackCommand.isEnabled = enabled && (owner?.hasNext ?? false)
+        center.previousTrackCommand.isEnabled = enabled && (owner?.hasPrevious ?? false)
     }
 
     nonisolated static func dispatch(_ command: Command) -> MPRemoteCommandHandlerStatus {
@@ -150,6 +152,7 @@ final class PlayerNowPlayingCenter {
         case .skipForward: owner.seek(by: 10)
         case .skipBackward: owner.seek(by: -10)
         case .next: owner.onNext?()
+        case .previous: owner.onPrevious?()
         case .seek(let t): owner.seek(to: t)
         }
     }

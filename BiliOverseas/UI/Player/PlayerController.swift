@@ -3,6 +3,7 @@ import AVFoundation
 import AVKit
 import Combine
 import CoreMedia
+import SwiftUI
 import UIKit
 import VideoToolbox
 
@@ -34,6 +35,53 @@ struct PlaybackItem: Equatable {
     var chapters: [VideoChapter]? = nil
     var startTime: Double? = nil   // explicit start (e.g. history progress); nil → resume from server progress if enabled
     var isVertical: Bool = false   // portrait video (dimension.height > width, rotate handled)
+    /// A downloaded file (离线缓存): AVPlayer plays it directly — no playurl, heartbeat or proxy, and no quality /
+    /// codec / CDN menus. Danmaku and SmartSkip still load when online (failures are ignored).
+    var localFileURL: URL? = nil
+}
+
+/// One entry of the in-player 「选集」 list (parts, 合集 episodes or PGC episodes), supplied by the detail page.
+struct PlayerEpisodeEntry: Identifiable, Equatable {
+    /// Opaque to the player and handed back through `onSelectEpisode`. Parts use `partID(cid:)`, which the
+    /// 「上次看到第N P」 chip looks up.
+    let id: String
+    let title: String
+    var badge: String? = nil
+    var isCurrent = false
+
+    static func partID(cid: Int64) -> String { "p\(cid)" }
+}
+
+/// The fullscreen 点赞 / 投币 / 收藏 / 分享 row (features.md §2.2), supplied by the detail page.
+struct PlayerFullscreenActions: Equatable {
+    var liked = false
+    var coined = false
+    var favored = false
+    var likeCount: Int64 = 0
+    var coinCount: Int64 = 0
+    var favoriteCount: Int64 = 0
+    var shareCount: Int64 = 0
+    var shareURL: URL?
+    var shareTitle = ""
+    var onLike: () -> Void = {}
+    /// Long press on 点赞: 一键三连.
+    var onTriple: () -> Void = {}
+    var onCoin: () -> Void = {}
+    var onFavorite: () -> Void = {}
+
+    /// The displayed state only (the closures always target the page that built them).
+    static func == (a: PlayerFullscreenActions, b: PlayerFullscreenActions) -> Bool {
+        a.liked == b.liked && a.coined == b.coined && a.favored == b.favored && a.likeCount == b.likeCount
+            && a.coinCount == b.coinCount && a.favoriteCount == b.favoriteCount && a.shareCount == b.shareCount
+            && a.shareURL == b.shareURL && a.shareTitle == b.shareTitle
+    }
+}
+
+/// 「上次看到第N P，点击跳转」: the account's history is on another part of this video.
+struct PlayerResumePartPrompt: Equatable {
+    let entryID: String
+    let page: Int
+    let time: Double
 }
 
 enum PlayerStatus: Equatable {
@@ -104,7 +152,8 @@ enum PlayerSeekOrigin {
 }
 
 enum PlayerInstallReason {
-    case initial, switchStreams, fallback, endpoint, retry
+    /// `retake`: acceleration tried again after a fallback to direct (installed only if it prepares).
+    case initial, switchStreams, fallback, endpoint, retry, retake
 }
 
 enum PlayerFallbackStep: Hashable {
@@ -186,6 +235,25 @@ final class PlayerController: ObservableObject {
     }
     @Published private(set) var hasNext = false
 
+    /// Optional: when set, the fullscreen bar shows 「上一集」 and the lock screen offers "previous track".
+    var onPrevious: (() -> Void)? {
+        didSet { hasPrevious = onPrevious != nil }
+    }
+    @Published private(set) var hasPrevious = false
+
+    /// In-player 「选集」 (shown with more than one entry). Set by the page whenever the list or the current item
+    /// changes (assign only on change: the page observes this controller).
+    @Published var episodeEntries: [PlayerEpisodeEntry] = []
+    /// The page switches to that entry; `startTime` nil = its usual resume rules.
+    var onSelectEpisode: ((_ id: String, _ startTime: Double?) -> Void)?
+
+    /// Fullscreen 点赞 / 投币 / 收藏 / 分享 row (nil = hidden).
+    @Published var fullscreenActions: PlayerFullscreenActions?
+    /// Content of `PlayerSheet.page` (see `presentPageSheet`).
+    private(set) var pageSheet: (id: String, content: AnyView)?
+    /// The page's observer that keeps `fullscreenActions` current (lives as long as the player).
+    var pageObservation: AnyCancellable?
+
     // MARK: Stream & menu state
 
     @Published private(set) var qualityEntries: [PlayerQualityEntry] = []
@@ -204,6 +272,10 @@ final class PlayerController: ObservableObject {
     @Published private(set) var hasFirstFrame = false
     @Published private(set) var isAccelerated = false
     @Published private(set) var isProgressive = false
+    /// 「听视频」 chosen (kept for the next items of this page).
+    @Published private(set) var audioOnly = false
+    /// The audio representation the current item plays alone (nil = a normal item with picture).
+    @Published private(set) var audioOnlyStream: DashStream?
     /// 「正在切换至 1080P 高清…」 while a quality / audio / codec switch prepares.
     @Published private(set) var transientMessage: String?
     @Published var aspectMode: PlayerAspectMode = .fit {
@@ -221,6 +293,9 @@ final class PlayerController: ObservableObject {
     @Published var pgcClips: [PGCClipInfo] = []
     @Published var clipPrompt: PGCClipInfo?
     @Published var resumeChipTime: Double?
+    @Published var resumePartPrompt: PlayerResumePartPrompt?
+    /// player/wbi/v2 says the subtitles need a login (and none came): 「字幕（登录后可用）」.
+    @Published var subtitlesNeedLogin = false
     @Published var onlineCount: String?
     @Published var stats: AccelerationStats?
     @Published var networkSpeed: Double = 0
@@ -250,6 +325,15 @@ final class PlayerController: ObservableObject {
     var videoShotTask: Task<Void, Never>?
     var onlineTask: Task<Void, Never>?
     var resumeChipTask: Task<Void, Never>?
+    var resumePartTask: Task<Void, Never>?
+    /// Archives whose 「上次看到第N P」 chip was offered (once per page and video).
+    var resumePartOfferedAids: Set<Int64> = []
+    /// player/wbi/v2 answered (or failed) for this video: SmartSkip may start from the tick when turned on later.
+    var sideDataLoaded = false
+    /// PGC clips skipped automatically (「跳过一次」).
+    var autoSkippedClips: Set<String> = []
+    /// The first clip check after the start ran (a start inside a clip skips it at once).
+    var clipStartChecked = false
     var subtitleLines: [SubtitleLine] = []
     var subtitleCache: [Int64: [SubtitleLine]] = [:]
     var subtitleFetches: [Int64: Task<[SubtitleLine], Never>] = [:]
@@ -316,6 +400,14 @@ final class PlayerController: ObservableObject {
     private var containerHidden = false
     /// Play intent held back while the container is hidden; `play()` runs when it reappears.
     private var resumeOnContainerAppear = false
+    /// 启用海外加速 / 剧集加速 switched while a video plays (applied by rebuilding it).
+    private var accelerationObservation: AnyCancellable?
+    /// Automatic re-take of acceleration after a fallback to direct (`scheduleRetake`).
+    private var retakeTask: Task<Void, Never>?
+    private var retakeAttempts = 0
+    private var retakeWindowStart: Double?
+    private static let retakeDelays: [Double] = [4, 8, 16]
+    private static let retakeWindow: Double = 120
 
     init() {
         let avPlayer = AVPlayer()
@@ -333,6 +425,14 @@ final class PlayerController: ObservableObject {
         pipCoordinator.owner = self
         observePlayer()
         setupPiP()
+        // `@Published` emits before the value is stored: hop once so the handler reads the new settings.
+        accelerationObservation = AppSettings.shared.$acceleration
+            .map { [$0.enabled, $0.accelerateBangumi] }
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in self?.accelerationSwitchesChanged() }
+            }
     }
 
     // MARK: Derived state
@@ -364,6 +464,7 @@ final class PlayerController: ObservableObject {
 
     /// The stream that is playing (for the stats overlay).
     var currentStreamDescription: String {
+        if let audio = audioOnlyStream { return "听视频 · " + DashStream.audioTitle(audio.id) }
         guard let choice else { return isProgressive ? "MP4" : "" }
         var parts = [VideoQuality.title(for: choice.video.id), PlayerStreamPicker.codecTitle(choice.video.codecFamily)]
         if choice.video.width > 0 { parts.append("\(choice.video.width)×\(choice.video.height)") }
@@ -387,6 +488,7 @@ final class PlayerController: ObservableObject {
         teardown(reportHeartbeat: true)
         item = newItem
         isVerticalVideo = newItem.isVertical
+        aspectMode = .stored(forVertical: newItem.isVertical)
         duration = max(0, newItem.duration)
         currentTime = 0
         lastKnownPosition = 0
@@ -536,8 +638,137 @@ final class PlayerController: ObservableObject {
         forceNormalAudio = false
         forceDirect = false
         forceNoProxy = false
+        resetRetake()
         status = .loading
         rebuild(position: lastKnownPosition, reason: .retry)
+    }
+
+    // MARK: Page integration
+
+    /// A 「选集」 row (or the 分P resume chip): the page loads that entry.
+    func selectEpisode(_ id: String, startTime: Double? = nil) {
+        guard let entry = episodeEntries.first(where: { $0.id == id }), !entry.isCurrent || startTime != nil else { return }
+        onSelectEpisode?(id, startTime)
+    }
+
+    /// Presents a sheet the page builds (投币 / 收藏 from the fullscreen action row) over the active stage.
+    func presentPageSheet(id: String, content: AnyView) {
+        pageSheet = (id, content)
+        overlay.panel = nil
+        overlay.sheet = .page(id)
+    }
+
+    // MARK: 听视频
+
+    /// Only DASH answers have a separate audio track (not for local files).
+    var supportsAudioOnly: Bool {
+        guard item?.localFileURL == nil, let info = playInfo else { return false }
+        return info.isDash && !PlayerStreamPicker.allAudios(info).isEmpty
+    }
+
+    /// 「听视频」: rebuilds the item at the current position with only the audio track (saves the video bandwidth),
+    /// or with the picture again.
+    func setAudioOnly(_ on: Bool) {
+        guard on != audioOnly, playInfo != nil, item?.localFileURL == nil else { return }
+        if on, !supportsAudioOnly {
+            ToastCenter.shared.show("该视频暂不支持听视频")
+            return
+        }
+        audioOnly = on
+        beginSwitch(message: on ? "正在切换至听视频…" : "正在恢复视频画面…", toast: on ? "已开启听视频" : "已关闭听视频")
+        rebuild(position: nil, reason: .switchStreams)
+    }
+
+    /// The normal AAC track (Dolby / FLAC stay with the picture): the menu choice when it is one.
+    private func audioOnlyTrack(_ info: PlayInfo) -> DashStream? {
+        var c = constraints()
+        c.forceNormalAudio = true
+        return PlayerStreamPicker.pickAudio(info, c)
+    }
+
+    // MARK: Acceleration switches & re-take
+
+    /// 启用海外加速 / 剧集加速 changed: the playing item is rebuilt on the matching path (btr-core §3).
+    private func accelerationSwitchesChanged() {
+        guard let target = item, target.localFileURL == nil, playInfo != nil, startupDone, !forceNoProxy else { return }
+        switch status {
+        case .failed, .ended, .idle: return
+        default: break
+        }
+        let s = AppSettings.shared.acceleration
+        let want = s.enabled && (target.epId == 0 || s.accelerateBangumi)
+        guard want != isAccelerated else { return }
+        if want {
+            // A manual switch gives acceleration a fresh chance (also after an earlier fallback).
+            forceDirect = false
+            fallbackSteps.remove(.direct)
+            resetRetake()
+        }
+        beginSwitch(message: want ? "正在开启加速…" : "正在关闭加速…", toast: want ? "已开启加速" : "已关闭加速")
+        rebuild(position: nil, reason: .switchStreams)
+    }
+
+    /// Fell back to direct because of acceleration (prepare failure, item failure or the buffering watchdog).
+    private func noteDirectFallback() {
+        forceDirect = true
+        fallbackSteps.insert(.direct)
+        scheduleRetake()
+    }
+
+    private func resetRetake() {
+        retakeTask?.cancel()
+        retakeTask = nil
+        retakeAttempts = 0
+        retakeWindowStart = nil
+    }
+
+    private enum RetakeDecision { case wait, go, stop }
+
+    /// BTR §11.6 step 4: after a fallback to direct, acceleration is re-taken automatically, at most 3 times per
+    /// item: 4 s / 8 s / 16 s after the fallback and within 120 s of the first one. An attempt waits until the
+    /// video plays with buffer to spare, and its item replaces the direct one only once the accelerated session
+    /// prepared (`PlayerInstallReason.retake`), so a failed attempt is not noticeable.
+    private func scheduleRetake() {
+        guard retakeTask == nil, retakeAttempts < Self.retakeDelays.count, item?.localFileURL == nil else { return }
+        let windowStart = retakeWindowStart ?? ProcessInfo.processInfo.systemUptime
+        retakeWindowStart = windowStart
+        let delay = Self.retakeDelays[retakeAttempts]
+        let lgen = loadGeneration
+        retakeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            while !Task.isCancelled {
+                guard let decision = self?.retakeDecision(windowStart: windowStart, generation: lgen) else { return }
+                switch decision {
+                case .wait:
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                case .go:
+                    self?.performRetake()
+                    return
+                case .stop:
+                    self?.retakeTask = nil
+                    return
+                }
+            }
+        }
+    }
+
+    private func retakeDecision(windowStart: Double, generation lgen: Int) -> RetakeDecision {
+        guard lgen == loadGeneration, forceDirect, !forceNoProxy, !isAccelerated, let target = item else { return .stop }
+        let s = AppSettings.shared.acceleration
+        guard s.enabled, target.epId == 0 || s.accelerateBangumi,
+              ProcessInfo.processInfo.systemUptime - windowStart <= Self.retakeWindow else { return .stop }
+        // Never during a stall, a seek or another rebuild: a healthy direct playback is not interrupted.
+        guard status == .playing, startupDone, !isSeeking, !rebuildPending, let observed = playerItem else { return .wait }
+        let t = displayTime()
+        let ahead = Self.bufferInfo(at: t, in: observed).ahead
+        let left = duration > 0 ? max(0, duration - t) : .infinity
+        return ahead >= min(10, max(1, left - 1)) ? .go : .wait
+    }
+
+    private func performRetake() {
+        retakeTask = nil
+        retakeAttempts += 1
+        rebuild(position: nil, reason: .retake)
     }
 
     // MARK: Speed
@@ -650,6 +881,16 @@ final class PlayerController: ObservableObject {
             codecFamilies = []
             return
         }
+        if let audio = audioOnlyStream {
+            // 听视频: no picture to choose (turning it off brings the menus back).
+            qualityEntries = []
+            audioEntries = []
+            codecFamilies = []
+            currentQuality = 0
+            currentAudioId = audio.id
+            currentCodecFamily = ""
+            return
+        }
         var c = constraints()
         c.manualQuality = nil
         c.forceAVC = false
@@ -694,6 +935,10 @@ final class PlayerController: ObservableObject {
     // MARK: Loading
 
     private func performInitialLoad(_ target: PlaybackItem, generation gen: Int) async {
+        if let file = target.localFileURL {
+            installLocalFile(file, target: target)
+            return
+        }
         let quality = AppSettings.shared.player.preferredQuality
         let info: PlayInfo
         do {
@@ -732,7 +977,28 @@ final class PlayerController: ObservableObject {
             currentTime = start
             if userStart == nil { showResumeChip(at: start) }
         }
+        if userStart == nil, target.startTime == nil, AppSettings.shared.player.resumeProgress,
+           info.lastPlayCid > 0, info.lastPlayCid != target.cid {
+            offerResumePart(aid: target.aid, cid: info.lastPlayCid, time: info.lastPlayTime)
+        }
         await installStreams(position: start, generation: streamGeneration, reason: .initial)
+    }
+
+    /// Contract 1 (离线缓存): the downloaded file straight into AVPlayer, from `startTime` when it is usable.
+    private func installLocalFile(_ file: URL, target: PlaybackItem) {
+        let total = target.duration
+        var start = pendingStartTime ?? 0
+        if pendingStartTime == nil, let t = target.startTime, t.isFinite, t > 0, total <= 0 || t < total - 5 {
+            start = t
+            showResumeChip(at: t)
+        }
+        lastKnownPosition = start
+        if start > 0 {
+            timeline.update(time: start, duration: duration, buffered: 0)
+            currentTime = start
+        }
+        installItem(url: file, session: nil, assetOptions: nil, choice: nil, accelerated: false, progressive: true,
+                    position: start, generation: streamGeneration)
     }
 
     /// `startTime` (explicit, 0 = from the beginning) > server progress (same cid, not within 5 s of the end).
@@ -767,14 +1033,70 @@ final class PlayerController: ObservableObject {
 
         let settings = AppSettings.shared
         let pgc = target.epId > 0
-        let wantAccel = settings.acceleration.enabled && (!pgc || settings.acceleration.accelerateBangumi) && !forceDirect
+        let retake = reason == .retake
+        let accelerationOn = settings.acceleration.enabled && (!pgc || settings.acceleration.accelerateBangumi)
+        let wantAccel = accelerationOn && (!forceDirect || retake)
         let allowHDR = settings.player.allowHDR && PlayerDeviceSupport.hdrEligible
         let total = info.duration > 0 ? info.duration : target.duration
-        let attempts: [Bool] = wantAccel ? [true, false] : [false]
+        // A re-take installs only an accelerated session (the direct item keeps playing otherwise).
+        let attempts: [Bool] = retake ? [true] : (wantAccel ? [true, false] : [false])
         let routeKey = PlayerStreamPicker.routeKey(aid: target.aid, bvid: target.bvid, cid: target.cid, epId: target.epId)
         var lastError: Error?
+        if audioOnly, !info.isDash { audioOnly = false }
 
-        if info.isDash, !forceNoProxy {
+        /// A session prepared and is about to be installed.
+        func prepared(accelerated: Bool) {
+            if retake {
+                forceDirect = false
+                fallbackSteps.remove(.direct)
+                ToastCenter.shared.show("加速线路已恢复")
+            } else if wantAccel && !accelerated {
+                noteDirectFallback()
+            }
+        }
+
+        if audioOnly, !forceNoProxy {
+            if let audio = audioOnlyTrack(info) {
+                for accelerate in attempts {
+                    do {
+                        // 听视频: the audio representation is the session's only track (an audio-only variant).
+                        let request = PlaybackRequest(
+                            routeKey: routeKey, video: audio, audio: nil, duration: total, accelerate: accelerate,
+                            allowHDR: false,
+                            refreshURLs: PlayerStreamPicker.makeAudioOnlyRefresher(aid: target.aid, bvid: target.bvid,
+                                                                                  cid: target.cid, epId: target.epId,
+                                                                                  seasonId: target.seasonId,
+                                                                                  audio: audio))
+                        let made = try await AccelerationEngine.shared.prepare(request)
+                        guard current() else {
+                            made.close()
+                            return
+                        }
+                        prepared(accelerated: accelerate)
+                        install(made, choice: nil, audioOnly: audio, accelerated: accelerate, progressive: false,
+                                position: position, generation: sgen)
+                        return
+                    } catch {
+                        guard current() else { return }
+                        lastError = error
+                    }
+                }
+            }
+            if !retake {
+                audioOnly = false
+                ToastCenter.shared.show("听视频启动失败，已恢复视频画面")
+                if reason == .switchStreams, startupDone {
+                    // The item with picture is still playing.
+                    rebuildPending = false
+                    switchRevert = nil
+                    transientMessage = nil
+                    pendingSwitchToast = nil
+                    return
+                }
+            }
+        }
+
+        if !audioOnly, info.isDash, !forceNoProxy {
             if let picked = PlayerStreamPicker.choose(info, constraints()) {
                 for accelerate in attempts {
                     do {
@@ -789,10 +1111,7 @@ final class PlayerController: ObservableObject {
                             made.close()
                             return
                         }
-                        if wantAccel && !accelerate {
-                            forceDirect = true
-                            fallbackSteps.insert(.direct)
-                        }
+                        prepared(accelerated: accelerate)
                         install(made, choice: picked, accelerated: accelerate, progressive: false,
                                 position: position, generation: sgen)
                         return
@@ -807,22 +1126,44 @@ final class PlayerController: ObservableObject {
             }
         }
 
-        if !forceNoProxy, let segment = info.durl.first {
-            if info.durl.count > 1, reason == .initial {
+        var durl = info.durl
+        var wholeFile = false
+        let progressiveQn = manualQuality ?? settings.player.preferredQuality
+        if !audioOnly, !forceNoProxy, durl.count > 1, !pgc {
+            // A segmented (FLV-era) answer: the html5 platform normally returns the whole file as one MP4.
+            let whole = try? await VideoAPI.progressivePlayInfo(aid: target.aid, bvid: target.bvid, cid: target.cid,
+                                                                qn: progressiveQn)
+            guard current() else { return }
+            if let whole, whole.durl.count == 1 {
+                durl = whole.durl
+                wholeFile = true
+            }
+        }
+        if !audioOnly, !forceNoProxy, let segment = durl.first {
+            if durl.count > 1, reason == .initial {
                 ToastCenter.shared.show("该视频为分段视频，目前只能播放第一段")
+            }
+            // Renews the signed URLs of the same file in place (a long pause must not end in 403s).
+            let fromHTML5 = wholeFile
+            let refresher = AccelerationEngine.progressiveRefresher(for: segment) {
+                if fromHTML5 {
+                    return try await VideoAPI.progressivePlayInfo(aid: target.aid, bvid: target.bvid, cid: target.cid,
+                                                                  qn: progressiveQn).durl
+                }
+                return try await PlayerStreamPicker.fetchPlayInfo(aid: target.aid, bvid: target.bvid, cid: target.cid,
+                                                                  epId: target.epId, seasonId: target.seasonId,
+                                                                  quality: progressiveQn).durl
             }
             for accelerate in attempts {
                 do {
                     let made = try await AccelerationEngine.shared.prepareProgressive(routeKey: routeKey, segment: segment,
-                                                                                      accelerate: accelerate)
+                                                                                      accelerate: accelerate,
+                                                                                      refreshURLs: refresher)
                     guard current() else {
                         made.close()
                         return
                     }
-                    if wantAccel && !accelerate {
-                        forceDirect = true
-                        fallbackSteps.insert(.direct)
-                    }
+                    prepared(accelerated: accelerate)
                     install(made, choice: nil, accelerated: accelerate, progressive: true, position: position,
                             generation: sgen)
                     return
@@ -831,6 +1172,14 @@ final class PlayerController: ObservableObject {
                     lastError = error
                 }
             }
+        }
+
+        if retake {
+            // The accelerated session did not prepare: the direct item keeps playing (a later attempt may follow).
+            guard current() else { return }
+            rebuildPending = false
+            scheduleRetake()
+            return
         }
 
         // No usable proxy session (or the proxy already failed this item): the CDN's MP4 without the proxy.
@@ -857,6 +1206,8 @@ final class PlayerController: ObservableObject {
             switchRevert = nil
             transientMessage = nil
             pendingSwitchToast = nil
+            // 听视频 follows the item that keeps playing.
+            audioOnly = audioOnlyStream != nil
             refreshStreamMenus()
             ToastCenter.shared.show("切换失败：\(Self.describe(lastError ?? PlayerLoadError.noStream))")
             return
@@ -885,15 +1236,17 @@ final class PlayerController: ObservableObject {
         return true
     }
 
-    private func install(_ newSession: PlaybackSession, choice picked: PlayerStreamChoice?, accelerated: Bool,
+    private func install(_ newSession: PlaybackSession, choice picked: PlayerStreamChoice?,
+                         audioOnly audio: DashStream? = nil, accelerated: Bool,
                          progressive: Bool, position: Double?, generation sgen: Int) {
-        installItem(url: newSession.url, session: newSession, assetOptions: nil, choice: picked,
+        installItem(url: newSession.url, session: newSession, assetOptions: nil, choice: picked, audioOnly: audio,
                     accelerated: accelerated, progressive: progressive, position: position, generation: sgen)
     }
 
-    /// `session` nil: a URL AVPlayer loads itself (no proxy).
+    /// `session` nil: a URL AVPlayer loads itself (no proxy). `audio`: the 听视频 track the item plays alone.
     private func installItem(url: URL, session newSession: PlaybackSession?, assetOptions: [String: Any]?,
-                             choice picked: PlayerStreamChoice?, accelerated: Bool, progressive: Bool,
+                             choice picked: PlayerStreamChoice?, audioOnly audio: DashStream? = nil,
+                             accelerated: Bool, progressive: Bool,
                              position: Double?, generation sgen: Int) {
         let start = max(0, position ?? displayTime())
         let initial = !heartbeatStarted
@@ -913,6 +1266,7 @@ final class PlayerController: ObservableObject {
         let old = session
         session = newSession
         choice = picked
+        if audioOnlyStream != audio { audioOnlyStream = audio }
         isAccelerated = accelerated
         isProgressive = progressive
         refreshStreamMenus()
@@ -1028,6 +1382,8 @@ final class PlayerController: ObservableObject {
         currentCodecFamily = ""
         isAccelerated = false
         isProgressive = false
+        audioOnlyStream = nil
+        resetRetake()
         resetFeatureState()
     }
 
@@ -1145,7 +1501,8 @@ final class PlayerController: ObservableObject {
         startupDone = true
         waitingSince = nil
         lastKnownPosition = displayTime()
-        if !heartbeatStarted {
+        // A local file (离线缓存) reports no watch history.
+        if !heartbeatStarted, target.localFileURL == nil {
             heartbeatStarted = true
             heartbeat.start(heartbeatContext(target), position: lastKnownPosition)
         }
@@ -1285,8 +1642,15 @@ final class PlayerController: ObservableObject {
             }
         }
         if !fallbackSteps.contains(.direct), isAccelerated {
-            fallbackSteps.insert(.direct)
-            forceDirect = true
+            noteDirectFallback()
+            beginFallback()
+            rebuild(position: position, reason: .fallback)
+            return
+        }
+        if audioOnlyStream != nil {
+            // The audio-only item failed on the direct path too: back to the normal ladder with picture.
+            audioOnly = false
+            ToastCenter.shared.show("听视频播放失败，已恢复视频画面")
             beginFallback()
             rebuild(position: position, reason: .fallback)
             return
@@ -1341,6 +1705,11 @@ final class PlayerController: ObservableObject {
             sleepRemaining = nil
             ToastCenter.shared.show("定时时间已到，已暂停")
             scheduleAutoExitFullscreen()
+            return
+        }
+        if AppSettings.shared.player.playRepeat == .singleCycle {
+            // 单个循环 (here, so it also works without a page, e.g. offline files).
+            play()
             return
         }
         onEnded?()
@@ -1521,8 +1890,7 @@ final class PlayerController: ObservableObject {
         guard isAccelerated, wantsToPlay, !fallbackSteps.contains(.direct), let since = waitingSince else { return }
         let stuck = !startupDone || status == .buffering
         guard stuck, ProcessInfo.processInfo.systemUptime - since >= 60 else { return }
-        fallbackSteps.insert(.direct)
-        forceDirect = true
+        noteDirectFallback()
         waitingSince = nil
         ToastCenter.shared.show("加速线路长时间缓冲，已切换为直连")
         rebuild(position: nil, reason: .fallback)

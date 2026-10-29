@@ -47,43 +47,55 @@ struct LiveHomeView: View {
     @ObservedObject var model: LiveHomeModel
     @ObservedObject var rooms: PagedListModel<LiveRoom>
     @ObservedObject private var auth = AuthService.shared
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// Re-taps of the 首页 tab bar item (scroll to top / refresh).
+    let reselect: FeedReselectSignal
+    @State private var topTracker = FeedTopTracker()
+    @State private var isReselectRefreshing = false
 
-    init(model: LiveHomeModel) {
+    init(model: LiveHomeModel, reselect: FeedReselectSignal = FeedReselectSignal()) {
         _model = ObservedObject(wrappedValue: model)
         _rooms = ObservedObject(wrappedValue: model.rooms)
+        self.reselect = reselect
     }
 
     private var columns: [GridItem] {
-        let count = UIDevice.current.userInterfaceIdiom == .pad ? 4 : 2
-        return Array(repeating: GridItem(.flexible(), spacing: 10, alignment: .top), count: count)
+        FeedGridLayout.columns(sizeClass, compactCount: 2)
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                if auth.isLoggedIn && !model.followed.isEmpty {
-                    followedSection
-                        .padding(.bottom, 6)
-                }
-                HomeSectionHeader("推荐直播")
-                LazyVGrid(columns: columns, spacing: 14) {
-                    ForEach(rooms.items) { room in
-                        NavigationLink(value: Route.live(roomId: room.roomId)) {
-                            HomeLiveCardCell(card: room.card)
+        ScrollViewReader { proxy in
+            ScrollView {
+                // The zero-height anchor plus the stack spacing make the 12 pt top inset.
+                VStack(alignment: .leading, spacing: 12) {
+                    FeedTopAnchor(tracker: topTracker)
+                    if isReselectRefreshing { FeedRefreshingRow() }
+                    if auth.isLoggedIn && !model.followed.isEmpty {
+                        followedSection
+                            .padding(.bottom, 6)
+                    }
+                    HomeSectionHeader("推荐直播")
+                    LazyVGrid(columns: columns, spacing: 14) {
+                        ForEach(rooms.items) { room in
+                            NavigationLink(value: Route.live(roomId: room.roomId)) {
+                                HomeLiveCardCell(card: room.card)
+                            }
+                            .buttonStyle(.plain)
+                            .onAppear { rooms.onItemAppear(room) }
                         }
-                        .buttonStyle(.plain)
-                        .onAppear { rooms.onItemAppear(room) }
+                    }
+                    .padding(.horizontal, 10)
+                    ListFooter(isLoading: rooms.isLoading, hasMore: rooms.hasMore, isEmpty: rooms.isEmpty,
+                               error: rooms.errorMessage, emptyText: "暂无直播") {
+                        Task { await rooms.loadMore() }
                     }
                 }
-                .padding(.horizontal, 10)
-                ListFooter(isLoading: rooms.isLoading, hasMore: rooms.hasMore, isEmpty: rooms.isEmpty,
-                           error: rooms.errorMessage, emptyText: "暂无直播") {
-                    Task { await rooms.loadMore() }
-                }
             }
-            .padding(.top, 12)
+            .refreshable { await model.refresh() }
+            .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
+                await model.refresh()
+            }
         }
-        .refreshable { await model.refresh() }
         .task { await rooms.loadIfNeeded() }
         .task(id: auth.isLoggedIn) { await model.loadFollowed() }
     }

@@ -5,6 +5,8 @@ import SwiftUI
 enum Route: Hashable {
     case video(VideoRef)
     case user(mid: Int64)
+    /// A user's space opened on its 动态 tab (我的 → 动态).
+    case userDynamics(mid: Int64)
     case searchHome
     case search(keyword: String)
     case favorites(mid: Int64?)
@@ -24,8 +26,14 @@ enum Route: Hashable {
     case settingsDanmaku
     case settingsFeedFilter
     case settingsSmartSkip
+    /// 广告跳过 → 空降助手 (BilibiliSponsorBlock source settings).
+    case settingsSponsorBlock
     case about
     case web(URL)
+    /// 消息中心 (首页 bell), one of its feeds, and a 私信 conversation.
+    case messages
+    case messageFeed(MessageFeedKind)
+    case whisper(WhisperPeer)
 }
 
 extension VideoCard {
@@ -64,6 +72,8 @@ struct RouteView: View {
             VideoDetailView(ref: ref)
         case .user(let mid):
             UserSpaceView(mid: mid)
+        case .userDynamics(let mid):
+            UserSpaceView(mid: mid, initialTab: .dynamics)
         case .searchHome:
             SearchView()
         case .search(let keyword):
@@ -102,6 +112,8 @@ struct RouteView: View {
             FeedFilterSettingsView()
         case .settingsSmartSkip:
             SmartSkipSettingsView()
+        case .settingsSponsorBlock:
+            SponsorBlockSettingsView()
         case .about:
             AboutView()
         case .web(let url):
@@ -112,6 +124,12 @@ struct RouteView: View {
             } else {
                 ExternalLinkView(url: url)
             }
+        case .messages:
+            MessagesView()
+        case .messageFeed(let kind):
+            MessageFeedView(kind: kind)
+        case .whisper(let peer):
+            WhisperChatView(peer: peer)
         }
     }
 }

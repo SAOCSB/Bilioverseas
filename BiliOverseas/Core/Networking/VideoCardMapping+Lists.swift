@@ -195,6 +195,7 @@ enum ListMapping {
         c.reason = reason.object != nil ? reason["content"].stringValue : reason.stringValue
         c.badge = hotBadge(j)
         c.pageCount = j["videos"].intValue
+        c.zone = j["tname"].stringValue
         let redirect = j["redirect_url"].stringValue
         if !redirect.isEmpty {
             c.uri = redirect

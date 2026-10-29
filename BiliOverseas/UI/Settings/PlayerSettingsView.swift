@@ -10,6 +10,7 @@ struct PlayerSettingsView: View {
 
     static let longPressSpeedOptions: [Double] = [1.5, 2.0, 2.5, 3.0]
     static let seekStepOptions: [Double] = [5, 10, 15, 30]
+    static let slideSeekOptions: [Double] = [25, 50, 90, 100]
 
     /// `'av01'` FourCC; spelled out so this does not depend on the `kCMVideoCodecType_AV1` constant.
     private static let av1CodecType: CMVideoCodecType = 0x6176_3031
@@ -23,7 +24,9 @@ struct PlayerSettingsView: View {
             speedSection
             gestureSection
             playbackSection
+            subtitleSection
             backgroundSection
+            videoPageSection
 
             Section {
                 Button("恢复播放默认设置") { showResetConfirm = true }
@@ -103,7 +106,7 @@ struct PlayerSettingsView: View {
         } header: {
             Text("倍速")
         } footer: {
-            Text("长按播放器画面时临时加速播放，松手恢复原来的速度。在播放器中切换的倍速只对当前视频生效。")
+            Text("长按播放器画面时临时加速播放，松手恢复原来的速度。在播放器中切换的倍速只对当前视频生效。经加速代理（HLS）播放时最高 2 倍速：选择 2.5x 或 3.0x 会按 2.0x 播放，只有直连 MP4 播放支持更高倍速。")
         }
     }
 
@@ -117,6 +120,12 @@ struct PlayerSettingsView: View {
             .pickerStyle(.menu)
             SettingsValuePicker(title: "快进快退步长", selection: $settings.player.seekStep,
                                 options: Self.seekStepOptions) { SettingsFormat.seconds($0) }
+            SettingsValuePicker(title: "滑动快进/快退时长", selection: $settings.player.slideSeekSeconds,
+                                options: Self.slideSeekOptions) { SettingsFormat.seconds($0) }
+            SettingsToggleRow(title: "左右侧滑动调节亮度/音量", subtitle: "在画面左侧上下滑动调节亮度，右侧调节音量",
+                              isOn: $settings.player.slideVolumeBrightness)
+            SettingsToggleRow(title: "中间滑动进入/退出全屏", subtitle: "在画面中间上滑进入全屏，下滑退出全屏",
+                              isOn: $settings.player.slideFullscreen)
         } header: {
             Text("手势")
         } footer: {
@@ -124,19 +133,57 @@ struct PlayerSettingsView: View {
         }
     }
 
+    /// 「字幕设置」 (features.md §3.7), applied live to the player's subtitle line.
+    private var subtitleSection: some View {
+        Section {
+            DanmakuSliderRow(title: "字体大小", value: $settings.player.subtitleFontScale, range: 0.5...2.5, step: 0.01,
+                             format: DanmakuSliderRow.percent)
+            DanmakuSliderRow(title: "全屏字体大小", value: $settings.player.subtitleFontScaleFullscreen, range: 0.5...2.5,
+                             step: 0.01, format: DanmakuSliderRow.percent)
+            Stepper(value: $settings.player.subtitleFontWeight, in: 0...8) {
+                DanmakuValueLabel(title: "字体粗细", value: "\(settings.player.subtitleFontWeight + 1)")
+            }
+            DanmakuSliderRow(title: "背景不透明度", value: $settings.player.subtitleBgOpacity, range: 0...1, step: 0.01,
+                             format: DanmakuSliderRow.percent)
+            DanmakuSliderRow(title: "描边粗细", value: $settings.player.subtitleStrokeWidth, range: 0...5, step: 0.5,
+                             format: { String(format: "%.1f", $0) })
+            DanmakuSliderRow(title: "左右边距", value: $settings.player.subtitlePaddingH, range: 0...100, step: 1,
+                             format: { "\(Int($0))" })
+            DanmakuSliderRow(title: "底部边距", value: $settings.player.subtitleBottomPadding, range: 0...200, step: 1,
+                             format: { "\(Int($0))" })
+        } header: {
+            Text("字幕设置")
+        } footer: {
+            Text("描边只在背景不透明度为 0 时显示。显示控制栏时字幕会上移，避免被遮挡。")
+        }
+    }
+
     private var playbackSection: some View {
         Section {
             SettingsToggleRow(title: "自动播放", subtitle: "打开视频页后自动开始播放",
                               isOn: $settings.player.autoPlay)
-            SettingsToggleRow(title: "自动连播", subtitle: "播完后自动播放下一P、下一集或相关推荐",
-                              isOn: $settings.player.autoNext)
+            Picker("播放顺序", selection: $settings.player.playRepeat) {
+                ForEach(PlayRepeat.allCases) { mode in
+                    Text(verbatim: mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
             SettingsToggleRow(title: "记忆播放进度", subtitle: "从上次看到的位置继续播放",
                               isOn: $settings.player.resumeProgress)
             Toggle("默认显示字幕", isOn: $settings.player.showSubtitles)
             SettingsToggleRow(title: "横屏自动全屏", subtitle: "横屏视频旋转手机时自动进入全屏",
                               isOn: $settings.player.autoFullscreenOnRotate)
+            Picker("番剧片头/片尾", selection: $settings.player.pgcSkipType) {
+                ForEach(PGCClipSkipType.allCases) { type in
+                    Text(verbatim: type.title).tag(type)
+                }
+            }
+            .pickerStyle(.menu)
         } header: {
             Text("播放")
+        } footer: {
+            Text("播放顺序：" + settings.player.playRepeat.explanation
+                 + "番剧片头/片尾：「跳过一次」每集只自动跳过一次，「手动跳过」显示跳过按钮，「仅显示」只在进度条上标出。")
         }
     }
 
@@ -150,6 +197,15 @@ struct PlayerSettingsView: View {
             Text("后台与画中画")
         } footer: {
             Text("画中画窗口中不显示弹幕。")
+        }
+    }
+
+    private var videoPageSection: some View {
+        Section {
+            SettingsToggleRow(title: "快速收藏", subtitle: "点击收藏直接加入默认收藏夹，长按选择收藏夹",
+                              isOn: $settings.player.quickFavorite)
+        } header: {
+            Text("视频页")
         }
     }
 

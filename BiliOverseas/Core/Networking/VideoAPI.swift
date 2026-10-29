@@ -548,6 +548,10 @@ enum VideoAPI {
         let tracks = data[path: "subtitle.subtitles"].arrayValue.enumerated().compactMap { parseSubtitleTrack($1, index: $0) }
         info.subtitles = sortSubtitles(tracks)
         let points = data["view_points"].arrayValue
+        // SmartSkip reads them raw (same mapping as `SmartSkipDataLoader.parsePlayerInfo`).
+        info.viewPoints = points.map { p in
+            VideoChapter(from: p["from"].double ?? .nan, to: p["to"].double ?? .nan, title: p["content"].stringValue)
+        }
         if points.first?["type"].intValue == 2 {
             info.chapters = points.compactMap { p in
                 let from = p["from"].doubleValue, to = p["to"].doubleValue
@@ -665,6 +669,30 @@ enum VideoAPI {
 
     static func parseTriple(_ data: JSON) -> (like: Bool, coin: Bool, fav: Bool) {
         (data["like"].boolValue, data["coin"].boolValue, data["fav"].boolValue || data["favorite"].boolValue)
+    }
+
+    // MARK: - Dislike (app endpoint)
+
+    static let dislikeNeedsTVLoginMessage = "点踩需要 TV 扫码登录"
+
+    /// 点踩 / 取消点踩: `POST app /x/v2/view/dislike`, app-signed with the TV QR login's `access_key` (there is
+    /// no web cookie variant; without the token it throws `dislikeNeedsTVLoginMessage`). Also works with a PGC
+    /// episode's aid.
+    static func dislike(aid: Int64, dislike: Bool) async throws {
+        guard let auth = AuthService.shared.appAuth else { throw BiliError.other(dislikeNeedsTVLoginMessage) }
+        do {
+            _ = try await http.api(BiliHost.app + "/x/v2/view/dislike", method: "POST",
+                                   form: dislikeForm(aid: aid, dislike: dislike, auth: auth.params), sign: .app(auth.key))
+        } catch {
+            throw mapError(error)
+        }
+    }
+
+    /// Unsigned form of `dislike`: `dislike` 0 = 点踩, 1 = 取消.
+    static func dislikeForm(aid: Int64, dislike: Bool, auth: [String: String]) -> [String: Any] {
+        var form: [String: Any] = ["aid": aid, "dislike": dislike ? 0 : 1]
+        for (k, v) in auth { form[k] = v }
+        return form
     }
 
     /// PGC like/coin/favourite state of an episode (`/pgc/season/episode/community`).

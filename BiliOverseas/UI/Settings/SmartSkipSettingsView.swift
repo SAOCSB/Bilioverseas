@@ -15,8 +15,25 @@ struct SmartSkipSettingsView: View {
             Section {
                 Toggle("启用广告跳过", isOn: $settings.smartSkip.enabled)
             } footer: {
-                Text("识别视频中 UP 主插入的口播广告、恰饭片段，并在播放到时跳过或提示。识别全部在本机完成。")
+                Text("识别视频中 UP 主插入的口播广告、恰饭片段，并在播放到时跳过或提示。本地识别全部在本机完成；「空降助手」使用观众提交的片段。")
             }
+
+            Section {
+                Toggle("本地识别", isOn: $settings.smartSkip.localDetection)
+                NavigationLink(value: Route.settingsSponsorBlock) {
+                    HStack {
+                        Text("空降助手")
+                        Spacer()
+                        Text(settings.smartSkip.sponsorBlockEnabled ? "已开启" : "已关闭")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("识别来源")
+            } footer: {
+                Text("本地识别：分析章节、简介、弹幕和字幕（见下方「识别原理」）。空降助手：BilibiliSponsorBlock 社区提交的赞助、开场动画、片尾等片段，与本地结果合并；两者重叠时以空降助手的赞助/推广片段为准。")
+            }
+            .disabled(!settings.smartSkip.enabled)
 
             Section {
                 Picker("模式", selection: $settings.smartSkip.mode) {
@@ -71,12 +88,12 @@ struct SmartSkipSettingsView: View {
     }
 
     private var modeFooter: String {
-        let countdown = "跳过按钮显示 \(settings.smartSkip.countdownSeconds) 秒后自动隐藏（暂停播放时倒计时暂停），隐藏后不会跳过。"
+        let countdown = "「跳过疑似广告」按钮显示 \(settings.smartSkip.countdownSeconds) 秒后自动隐藏（暂停播放时倒计时暂停），隐藏后不会跳过；「跳过广告」按钮一直显示到离开这段广告。播放时也可以在「更多设置」→「广告跳过」中切换模式或跳过识别到的片段。"
         switch settings.smartSkip.mode {
         case .auto:
-            return "自动跳过：只有边界可靠的广告段（明确的广告章节或简介时间轴、观众明确的「空降」指令、完整的口播段落）会被自动跳过，其余显示「跳过广告」按钮。" + countdown
+            return "自动跳过：只有边界可靠的广告段（明确的广告章节或简介时间轴、观众明确的「空降」指令、完整的口播段落）会被自动跳过，其余显示「跳过疑似广告」按钮。" + countdown
         case .manual:
-            return "手动：识别到的广告段只显示「跳过广告」按钮，点击后跳过。" + countdown
+            return "手动：识别到的广告段只显示跳过按钮，点击后跳过。" + countdown
         }
     }
 

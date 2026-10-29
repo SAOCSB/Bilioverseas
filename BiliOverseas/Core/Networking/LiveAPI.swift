@@ -228,6 +228,23 @@ enum LiveAPI {
 
     // MARK: - Danmaku
 
+    /// 发送直播弹幕 (`POST api.live.bilibili.com/msg/send`, WBI query `web_location=444.8`, csrf in the
+    /// form, as PiliPlus `sendLiveMsg`). Login required; the server enforces length and rate limits.
+    static func sendMessage(roomId: Int64, text: String, color: UInt32 = 0xFFFFFF, fontSize: Int = 25) async throws {
+        let http = BiliHTTP.shared
+        guard let csrf = http.csrf else { throw BiliError.notLoggedIn }
+        _ = try await http.api(
+            BiliHost.live + "/msg/send", method: "POST", query: ["web_location": "444.8"],
+            form: [
+                "bubble": 0, "msg": text, "color": Int(color & 0xFFFFFF), "mode": 1, "room_type": 0, "jumpfrom": 0,
+                "reply_mid": 0, "reply_attr": 0, "replay_dmid": "", "statistics": #"{"appId":100,"platform":5}"#,
+                "reply_type": 0, "reply_uname": "", "fontsize": fontSize, "rnd": Int(Date().timeIntervalSince1970),
+                "roomid": roomId, "csrf": csrf, "csrf_token": csrf,
+            ],
+            sign: .wbi,
+            headers: ["Origin": "https://live.bilibili.com", "Referer": "https://live.bilibili.com/\(roomId)"])
+    }
+
     static func danmuInfo(roomId: Int64) async throws -> LiveDanmuInfo {
         let data = try await BiliHTTP.shared.api(
             BiliHost.live + "/xlive/web-room/v1/index/getDanmuInfo",

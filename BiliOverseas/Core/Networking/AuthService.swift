@@ -95,6 +95,14 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Account params for app endpoints that need the user (e.g. `/x/v2/view/dislike`): `access_key` plus the
+    /// appkey that minted it, which the request must be signed with (`sign: .app(auth.key)`). nil without a TV
+    /// QR login. Never add it to requests signed with another appkey.
+    var appAuth: (params: [String: String], key: AppKey)? {
+        guard let token = accessKey, let key = accessKeyAppKey else { return nil }
+        return (["access_key": token], key)
+    }
+
     /// Whether a web `refresh_token` (ac_time_value) is stored, i.e. cookie refresh is possible.
     var canRefreshCookies: Bool { !(locked { tokens.refreshToken } ?? "").isEmpty }
 

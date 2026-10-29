@@ -46,7 +46,12 @@ final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
     @Published var general: GeneralSettings { didSet { SettingsStore.save(general, key: "settings.general") } }
-    @Published var acceleration: AccelerationSettings { didSet { SettingsStore.save(acceleration, key: "settings.acceleration") } }
+    @Published var acceleration: AccelerationSettings {
+        didSet {
+            SettingsStore.save(acceleration, key: "settings.acceleration")
+            NotificationCenter.default.post(name: Self.accelerationDidChange, object: self)
+        }
+    }
     @Published var player: PlayerSettings { didSet { SettingsStore.save(player, key: "settings.player") } }
     @Published var danmaku: DanmakuSettings { didSet { SettingsStore.save(danmaku, key: "settings.danmaku") } }
     @Published var smartSkip: SmartSkipSettings { didSet { SettingsStore.save(smartSkip, key: "settings.smartSkip") } }
@@ -60,6 +65,10 @@ final class AppSettings: ObservableObject {
         smartSkip = SettingsStore.load(key: "settings.smartSkip")
         feedFilter = SettingsStore.load(key: "settings.feedFilter")
     }
+
+    /// Posted on the changing (main) thread after every `acceleration` change; the acceleration engine copies the
+    /// new values into the snapshot its download threads read.
+    static let accelerationDidChange = Notification.Name("AppSettings.accelerationDidChange")
 
     func resetAll() {
         general = GeneralSettings()
@@ -95,4 +104,15 @@ struct GeneralSettings: SettingsGroup {
     var reportHistory: Bool = true
     /// Keep local search history.
     var saveSearchHistory: Bool = true
+    /// 「首页使用app端推荐」: 推荐 comes from the app feed (`FeedAPI.appRecommend`, with 不感兴趣 reasons);
+    /// the web feed is the fallback when it fails.
+    var useAppFeed: Bool = true
+    /// 「保留首页推荐刷新」: pull to refresh on 推荐 puts the new cards above the ones already shown.
+    var keepRecommendOnRefresh: Bool = true
+    /// 「显示上次看到位置提示」: a 「上次看到这里」 divider where the previous refresh started.
+    var showLastSeenHint: Bool = true
+    /// 「搜索建议」 while typing in the search field.
+    var searchSuggestion: Bool = true
+    /// 「检查未读动态」: check for new dynamics every 5 minutes and badge the 动态 tab.
+    var checkUnreadDynamics: Bool = true
 }

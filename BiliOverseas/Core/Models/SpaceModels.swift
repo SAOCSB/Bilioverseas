@@ -56,3 +56,49 @@ enum SpaceVideoOrder: String, CaseIterable, Identifiable {
 enum RelationAction: Int {
     case follow = 1, unfollow = 2, whisperFollow = 3, cancelWhisper = 4, block = 5, unblock = 6, removeFan = 7
 }
+
+/// The signed-in user's relation to another user (`/x/relation?fid=`), shown on follow buttons.
+enum UserRelationState: Hashable {
+    case notFollowing, whisper, followed, mutual, special, blocked
+
+    /// `attribute`: 0 未关注, 1 悄悄关注, 2 已关注, 4 / 6 互相关注, 128 已拉黑. `special == 1` (特别关注) wins
+    /// over the other follow states.
+    init(attribute: Int, special: Bool) {
+        switch attribute {
+        case 128: self = .blocked
+        case 1: self = special ? .special : .whisper
+        case 2: self = special ? .special : .followed
+        case 4, 6: self = special ? .special : .mutual
+        default: self = .notFollowing
+        }
+    }
+
+    /// `/x/relation` `data`.
+    init(json: JSON) {
+        self.init(attribute: json["attribute"].intValue, special: json["special"].intValue == 1)
+    }
+
+    var isFollowing: Bool {
+        switch self {
+        case .whisper, .followed, .mutual, .special: return true
+        case .notFollowing, .blocked: return false
+        }
+    }
+
+    /// Follow-button text (official wording).
+    var label: String {
+        switch self {
+        case .notFollowing: return "关注"
+        case .whisper: return "悄悄关注"
+        case .followed: return "已关注"
+        case .mutual: return "已互关"
+        case .special: return "特别关注"
+        case .blocked: return "已拉黑"
+        }
+    }
+
+    /// `/x/relation/modify` act that undoes this follow state (悄悄关注 has its own).
+    var unfollowAction: RelationAction {
+        self == .whisper ? .cancelWhisper : .unfollow
+    }
+}

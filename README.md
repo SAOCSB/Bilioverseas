@@ -23,11 +23,12 @@ Swift · SwiftUI · AVPlayer · iOS 16+ · 零第三方依赖
 - 自研 HTTP/1.1 客户端（Network.framework，ALPN 固定 http/1.1），确保 N 个线程就是 N 条真实 TCP 连接（URLSession 的 HTTP/2 多路复用会让多线程失效）
 - 本地 HLS 代理：把 B 站 DASH（分离的音视频 fMP4 + sidx）实时转成本地 HLS（EXT-X-MAP + EXT-X-BYTERANGE）供 AVPlayer 播放，分段缓存、预取、拖动不重复下载
 - 下载地址到期前 2 分钟自动换新；加速失败自动降级为单连接直连
-- 番剧/电影加速（可关），直播加速（实验性，默认关）
+- 番剧/电影加速（可关）；直播间不经加速，始终直连播放
 
 **官方客户端核心功能**
 - 首页：直播 / 推荐 / 热门（每周必看、入站必刷）/ 排行榜 / 番剧（追番、新番时间表、番剧排行）
 - 搜索：热搜、搜索建议、搜索历史；视频 / 番剧 / 用户 / 直播结果，排序与时长筛选
+- 链接直达：在搜索框输入或粘贴 BV / av 号、bilibili.com 或 b23.tv 链接（也可以是官方 App 的整段分享文案）直接打开对应视频、番剧、UP 主空间或直播间；其他 App 可通过 `bilioverseas://open?url=<链接>`（或 `bilioverseas://video/BV…`）调起本应用，例如在「快捷指令」里使用
 - 视频详情：简介、UP 主卡片与关注、点赞 / 投币 / 收藏 / 稍后再看 / 分享、长按一键三连、分 P、合集、相关推荐；番剧选集；评论区（热度/时间排序、楼中楼、发评论、点赞）
 - 播放器：画质 / 编码（HEVC/AVC/AV1）/ 倍速 / 字幕 / 章节、**长按倍速（默认 2×）**、双击暂停/快进、左右滑动进度、左侧亮度右侧音量、横屏与竖屏全屏、锁屏、画中画、后台播放、锁屏控制、记忆播放进度、自动连播、历史记录上报
 - **可调节弹幕**：开关、不透明度、字号、粗体、描边、显示区域、滚动速度、顶部/底部/滚动/彩色/高级屏蔽、合并重复、智能云屏蔽等级、同屏数量、海量弹幕、关键词/正则/用户屏蔽、发送弹幕
@@ -85,10 +86,18 @@ project.yml       XcodeGen 工程描述
 
 ```bash
 brew install xcodegen
-xcodegen generate
-open BiliOverseas.xcodeproj        # 选择你的开发者团队后直接运行
-swift test                          # 运行 Core 单元测试
+xcodegen generate                   # 生成 BiliOverseas.xcodeproj
+open BiliOverseas.xcodeproj
+swift test                          # 运行 Core 单元测试（无需签名）
 ```
+
+模拟器可以直接运行。装到自己的 iPhone 上需要签名：
+
+1. 在 Xcode 左侧选中 **BiliOverseas** 工程 → target **BiliOverseas** → **Signing & Capabilities**，保持勾选「Automatically manage signing」，**Team** 选你的 Apple ID（免费账号也可以，先在 Xcode → Settings → Accounts 里登录）；
+2. 把 **Bundle Identifier** 改成你独有的值，例如 `io.github.<你的用户名>.bilioverseas`（Bundle ID 在所有开发者之间必须唯一，沿用默认值通常会报 “Failed to register bundle identifier”）；
+3. 连接 iPhone 并在顶部选中它，点运行。第一次安装后需在 iPhone「设置 → 通用 → VPN 与设备管理」中信任你的开发者证书，iOS 16 起还要在「设置 → 隐私与安全性」中打开「开发者模式」。
+
+重新执行 `xcodegen generate` 会还原上面两项；想长期保留，可直接把 `project.yml` 里的 `DEVELOPMENT_TEAM` 和 `PRODUCT_BUNDLE_IDENTIFIER` 改成你的值。免费 Apple ID 签名的应用 7 天后需要重新运行安装。
 
 ## 建议设置
 
@@ -110,8 +119,12 @@ swift test                          # 运行 Core 单元测试
 
 ## 致谢与许可
 
-- [Bilibili-thread-ripper](https://github.com/MrTangLuyao/Bilibili-thread-ripper)（MIT）—— 加速算法来源
+- [Bilibili-thread-ripper](https://github.com/MrTangLuyao/Bilibili-thread-ripper)（MIT，© 2026 Bilibili-thread-ripper contributors）—— 加速算法来源
+- [Bilibili-thread-ripper-desktop](https://github.com/MrTangLuyao/Bilibili-thread-ripper-desktop)（MIT，© 2026 LouieTang）—— 单块请求轮换节点（inTurns）与小请求单连接规则移植自该项目
 - [BiliSmartSkip](https://github.com/wzy403/BiliSmartSkip)（GPL-2.0）—— 视频内广告识别算法，已移植为 Swift
 - [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus) 及其 BTR 移植分支、[ATV-Bilibili-demo](https://github.com/yichengchen/ATV-Bilibili-demo) —— 接口与行为参考
+- [canvas_danmaku](https://github.com/Predidit/canvas_danmaku)（MIT，© 2024 Predidit）—— 弹幕轨道布局与滚动参数参考
+
+各项目的许可声明与 MIT 许可全文见应用内「设置 → 关于 → 致谢与开源许可」。
 
 由于包含 BiliSmartSkip 的移植代码，本项目以 **GPL-2.0-or-later** 发布（见 [LICENSE](LICENSE)）。

@@ -4,6 +4,9 @@ import SwiftUI
 /// the rules themselves live in `Core/Filter/FeedFilter.swift`.
 struct FeedFilterSettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var auth = AuthService.shared
+    @State private var blacklistCount = AccountBlacklistStore.shared.count
+    @State private var isSyncingBlacklist = false
 
     private static let durationOptions = [0, 30, 60, 180, 300]
     private static let likeRatioOptions = [0, 1, 2, 3, 4]
@@ -32,17 +35,27 @@ struct FeedFilterSettingsView: View {
             FilterRuleListEditor(
                 title: "关键词屏蔽",
                 placeholder: "输入关键词",
-                footer: "标题包含任一关键词的视频将被隐藏，不区分大小写。用 /…/ 包裹表示正则表达式，例如 /抽奖|开箱/。",
+                footer: "标题包含任一关键词的视频将被隐藏，图文动态还会匹配正文；不区分大小写。用 /…/ 包裹表示正则表达式，例如 /抽奖|开箱/。",
                 rules: $settings.feedFilter.blockedKeywords,
-                warning: { FeedFilter.isValidKeywordRule($0) ? nil : "正则表达式无效，此条不会生效" }
+                warning: Self.ruleWarning
             )
 
             FilterRuleListEditor(
                 title: "UP 主屏蔽",
                 placeholder: "UP 主昵称或 UID",
-                footer: "填写完整昵称或 UID（纯数字），该 UP 主的视频将被隐藏；即使已关注也会屏蔽。",
+                footer: "填写完整昵称或 UID（纯数字），该 UP 主的视频和动态将被隐藏；即使已关注也会屏蔽。也可以在视频卡片的 ⋯ 菜单或长按菜单中选择「屏蔽UP主」。",
                 rules: $settings.feedFilter.blockedUploaders
             )
+
+            FilterRuleListEditor(
+                title: "分区屏蔽",
+                placeholder: "分区名，例如 鬼畜调教",
+                footer: "视频所属分区匹配任一规则时隐藏，格式同关键词。作用于首页推荐（app 端推荐）、热门和排行。",
+                rules: $settings.feedFilter.blockedZones,
+                warning: Self.ruleWarning
+            )
+
+            blacklistSection
 
             Section {
                 Picker("最短时长", selection: $settings.feedFilter.minDuration) {
@@ -79,11 +92,62 @@ struct FeedFilterSettingsView: View {
             } header: {
                 Text("其他")
             } footer: {
-                Text("开启“关注的 UP 不过滤”后，已关注 UP 主的视频不受关键词、恰饭、时长等规则影响。关闭“应用到…”后，这些规则仅作用于首页推荐。广告卡片屏蔽始终生效；观看历史和收藏中的内容不会被过滤。")
+                Text("开启“关注的 UP 不过滤”后，已关注 UP 主的视频不受关键词、恰饭、时长等规则影响（动态中均为已关注 UP，UP 主屏蔽、关键词和恰饭规则照常生效）。关闭“应用到…”后，这些规则仅作用于首页推荐和动态。广告卡片屏蔽始终生效；观看历史和收藏中的内容不会被过滤。")
+            }
+
+            Section {
+                Toggle("首页使用app端推荐", isOn: $settings.general.useAppFeed)
+                Toggle("保留首页推荐刷新", isOn: $settings.general.keepRecommendOnRefresh)
+                Toggle("显示上次看到位置提示", isOn: $settings.general.showLastSeenHint)
+                    .disabled(!settings.general.keepRecommendOnRefresh)
+            } header: {
+                Text("首页推荐")
+            } footer: {
+                Text("app 端推荐提供分区信息和“不感兴趣”选项（提交反馈需使用 TV 扫码登录），获取失败时自动改用网页端推荐。保留刷新：下拉刷新时新内容插入顶部，之前的内容保留在下方。")
             }
         }
         .navigationTitle("屏蔽设置")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { blacklistCount = AccountBlacklistStore.shared.count }
+    }
+
+    private static func ruleWarning(_ rule: String) -> String? {
+        FeedFilter.isValidKeywordRule(rule) ? nil : "正则表达式无效，此条不会生效"
+    }
+
+    /// The account blacklist (拉黑) is synced from B 站, not edited here.
+    private var blacklistSection: some View {
+        Section {
+            HStack {
+                Text("账号黑名单")
+                Spacer()
+                if isSyncingBlacklist {
+                    ProgressView()
+                } else {
+                    Text(verbatim: auth.isLoggedIn ? "\(blacklistCount) 人" : "未登录")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if auth.isLoggedIn {
+                Button("立即同步", action: syncBlacklist)
+                    .disabled(isSyncingBlacklist)
+            }
+        } footer: {
+            Text("登录后自动同步 B 站账号的黑名单（在 UP 主空间页拉黑），名单中用户的视频和动态在所有列表中隐藏，其空间页除外。")
+        }
+    }
+
+    private func syncBlacklist() {
+        isSyncingBlacklist = true
+        Task {
+            do {
+                blacklistCount = try await AccountBlacklistStore.shared.refreshFromAccount().count
+                ToastCenter.shared.show("黑名单已同步")
+            } catch {
+                if !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
+            }
+            isSyncingBlacklist = false
+        }
     }
 
     /// Preset values plus the stored value when it is a custom one (so the picker never shows blank).

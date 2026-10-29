@@ -17,15 +17,14 @@ final class PlayerFullscreenHostingController: UIHostingController<PlayerFullscr
     override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation { .fade }
 }
 
-/// Root of the fullscreen presentation: the same stage as inline (the surface moves over), plus its own toast layer
-/// (the app's `ToastOverlay` lives under this modal).
+/// Root of the fullscreen presentation: the same stage as inline (the surface moves over). Toasts show above it in
+/// `ToastWindowHost`'s window.
 struct PlayerFullscreenRootView: View {
     let controller: PlayerController
 
     var body: some View {
         PlayerStageView(controller: controller, overlay: controller.overlay, role: .fullscreen)
             .background(Color.black.ignoresSafeArea())
-            .overlay { ToastOverlay() }
             .statusBarHidden(true)
             .persistentSystemOverlays(.hidden)
             .defersSystemGestures(on: .all)

@@ -2,15 +2,17 @@ import SwiftUI
 import UIKit
 
 /// 个人空间: banner, avatar, name / level / VIP / 认证, sign, 粉丝 · 关注 · 获赞, 关注 button,
-/// and the 投稿 | 动态 tabs.
+/// and the 投稿 | 动态 tabs. The ⋯ menu also links to TA的收藏.
 struct UserSpaceView: View {
     let mid: Int64
     @StateObject private var model: UserSpaceModel
-    @State private var tab: UserSpaceTab = .videos
+    @State private var tab: UserSpaceTab
+    @EnvironmentObject private var router: TabRouter
 
-    init(mid: Int64) {
+    init(mid: Int64, initialTab: UserSpaceTab = .videos) {
         self.mid = mid
         _model = StateObject(wrappedValue: UserSpaceModel(mid: mid))
+        _tab = State(initialValue: initialTab)
     }
 
     var body: some View {
@@ -35,6 +37,11 @@ struct UserSpaceView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
+                    Button {
+                        router.push(.favorites(mid: mid))
+                    } label: {
+                        Label(model.isSelf ? "我的收藏" : "TA的收藏", systemImage: "star")
+                    }
                     Button {
                         UIPasteboard.general.string = String(mid)
                         ToastCenter.shared.show("已复制UID")
@@ -94,6 +101,8 @@ final class UserSpaceModel: ObservableObject {
     @Published private(set) var info: SpaceInfo?
     @Published private(set) var infoError: String?
     @Published private(set) var isFollowed = false
+    /// Detailed relation (`/x/relation`: 已互关 / 悄悄关注 / 特别关注 / 已拉黑); nil when logged out / not loaded.
+    @Published private(set) var relation: UserRelationState?
     @Published private(set) var isUpdatingFollow = false
     @Published private(set) var order: SpaceVideoOrder = .pubdate
     @Published private(set) var keyword = ""
@@ -120,6 +129,12 @@ final class UserSpaceModel: ObservableObject {
         AuthService.shared.isLoggedIn && AuthService.shared.mid == mid
     }
 
+    /// What the follow button shows: `relation` while it agrees with `isFollowed`, else 已关注 / 关注.
+    var followState: UserRelationState {
+        if let relation, relation.isFollowing == isFollowed { return relation }
+        return isFollowed ? .followed : .notFollowing
+    }
+
     func loadIfNeeded() async {
         guard !didLoadInfo else { return }
         didLoadInfo = true
@@ -128,10 +143,13 @@ final class UserSpaceModel: ObservableObject {
 
     func loadInfo() async {
         infoError = nil
+        async let detailedRelation = fetchRelation()
         do {
             let i = try await SpaceAPI.info(mid: mid)
             info = i
-            isFollowed = i.isFollowed
+            let r = await detailedRelation
+            relation = r
+            isFollowed = r?.isFollowing ?? i.isFollowed
         } catch {
             if ListMapping.isCancellation(error) {
                 didLoadInfo = false
@@ -141,6 +159,11 @@ final class UserSpaceModel: ObservableObject {
             // reaching here means both failed. Keep showing an older header if we have one.
             if info == nil { infoError = error.localizedDescription }
         }
+    }
+
+    private func fetchRelation() async -> UserRelationState? {
+        guard AuthService.shared.isLoggedIn, !isSelf else { return nil }
+        return try? await SpaceAPI.relation(fid: mid)
     }
 
     func refresh(tab: UserSpaceTab) async {
@@ -184,9 +207,10 @@ final class UserSpaceModel: ObservableObject {
             if target {
                 try await SpaceAPI.follow(mid: mid)
             } else {
-                try await SpaceAPI.unfollow(mid: mid)
+                try await SpaceAPI.modifyRelation(mid: mid, action: followState.unfollowAction)
             }
             isFollowed = target
+            relation = target ? .followed : .notFollowing
             if var i = info {
                 i.isFollowed = target
                 i.user.isFollowed = target
@@ -194,6 +218,39 @@ final class UserSpaceModel: ObservableObject {
                 info = i
             }
             ToastCenter.shared.show(target ? "关注成功" : "已取消关注")
+            if target {
+                // A follow-back makes it 已互关: ask again once the server has settled.
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard let self, let r = await self.fetchRelation(), self.isFollowed == r.isFollowing else { return }
+                    self.relation = r
+                }
+            }
+        } catch {
+            if !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
+        }
+        isUpdatingFollow = false
+    }
+
+    /// 拉黑 / 解除拉黑 (`/x/relation/modify` act 5 / 6). Blocking also ends a follow.
+    func setBlocked(_ blocked: Bool) async {
+        guard !isUpdatingFollow else { return }
+        guard AuthService.shared.isLoggedIn else {
+            ToastCenter.shared.show("请先登录")
+            return
+        }
+        isUpdatingFollow = true
+        do {
+            try await SpaceAPI.modifyRelation(mid: mid, action: blocked ? .block : .unblock)
+            if blocked && isFollowed, var i = info {
+                i.isFollowed = false
+                i.user.isFollowed = false
+                i.fans = max(0, i.fans - 1)
+                info = i
+            }
+            if blocked { isFollowed = false }
+            relation = blocked ? .blocked : .notFollowing
+            ToastCenter.shared.show(blocked ? "已拉黑" : "已解除拉黑")
         } catch {
             if !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
         }
@@ -207,6 +264,7 @@ struct UserSpaceHeader: View {
     @ObservedObject var model: UserSpaceModel
     @ObservedObject private var auth = AuthService.shared
     @State private var confirmUnfollow = false
+    @State private var confirmUnblock = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -233,6 +291,10 @@ struct UserSpaceHeader: View {
         .background(Color(.systemBackground))
         .confirmationDialog("确定不再关注TA吗？", isPresented: $confirmUnfollow, titleVisibility: .visible) {
             Button("不再关注", role: .destructive) { Task { await model.toggleFollow() } }
+            Button("取消", role: .cancel) {}
+        }
+        .confirmationDialog("已将TA拉黑，解除拉黑后才能关注", isPresented: $confirmUnblock, titleVisibility: .visible) {
+            Button("解除拉黑", role: .destructive) { Task { await model.setBlocked(false) } }
             Button("取消", role: .cancel) {}
         }
     }
@@ -386,35 +448,41 @@ struct UserSpaceHeader: View {
     private var followButton: some View {
         if auth.isLoggedIn {
             Button {
-                if model.isFollowed { confirmUnfollow = true } else { Task { await model.toggleFollow() } }
+                switch model.followState {
+                case .blocked: confirmUnblock = true
+                case .notFollowing: Task { await model.toggleFollow() }
+                default: confirmUnfollow = true
+                }
             } label: {
-                followLabel(followed: model.isFollowed)
+                followLabel(model.followState)
             }
             .buttonStyle(.plain)
             .disabled(model.isUpdatingFollow)
         } else {
             NavigationLink(value: Route.login) {
-                followLabel(followed: false)
+                followLabel(.notFollowing)
             }
             .buttonStyle(.plain)
         }
     }
 
-    private func followLabel(followed: Bool) -> some View {
-        HStack(spacing: 4) {
+    /// 「+ 关注」 / 已关注 / 悄悄关注 / 已互关 / 特别关注 / 已拉黑.
+    private func followLabel(_ state: UserRelationState) -> some View {
+        let plain = state == .notFollowing
+        return HStack(spacing: 4) {
             if model.isUpdatingFollow {
                 ProgressView()
                     .controlSize(.small)
-            } else if !followed {
+            } else if plain {
                 Image(systemName: "plus")
             }
-            Text(followed ? "已关注" : "关注")
+            Text(state.label)
         }
         .font(.subheadline.weight(.medium))
-        .foregroundColor(followed ? .secondary : .white)
+        .foregroundColor(plain ? .white : .secondary)
         .frame(maxWidth: .infinity)
         .frame(height: 32)
-        .background(followed ? Color(.secondarySystemFill) : Color.biliPink, in: RoundedRectangle(cornerRadius: 6))
+        .background(plain ? Color.biliPink : Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 6))
     }
 }
 

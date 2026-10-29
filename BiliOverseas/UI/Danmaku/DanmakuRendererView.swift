@@ -27,6 +27,32 @@ private final class DanmakuSprite {
     }
 }
 
+/// One mode-7 danmaku on screen: positioned and animated by its `DanmakuAdvancedSpec`, outside the track layout.
+private final class DanmakuSpecialSprite {
+    let item: DanmakuItem
+    let spec: DanmakuAdvancedSpec
+    let layer: CALayer
+
+    init(item: DanmakuItem, spec: DanmakuAdvancedSpec, layer: CALayer) {
+        self.item = item
+        self.spec = spec
+        self.layer = layer
+    }
+}
+
+/// A tapped danmaku (`DanmakuOverlayView.suspendDanmaku(at:)`): the item and its frame in the overlay.
+struct DanmakuOverlayHit {
+    let item: DanmakuItem
+    let frame: CGRect
+}
+
+/// 点赞 state of one danmaku as far as this session knows (the segment data has the count, not whether the user
+/// liked it).
+struct DanmakuLikeState: Equatable {
+    var liked: Bool
+    var count: Int64
+}
+
 /// Breaks the CADisplayLink → target retain cycle. The link runs on the main run loop.
 @MainActor
 private final class DanmakuDisplayLinkProxy: NSObject {
@@ -53,7 +79,10 @@ private final class DanmakuDisplayLinkProxy: NSObject {
 /// whose contents is a pre-rendered CGImage) as a pure function of video time. So pausing stops
 /// motion, seeking clears and re-flows the screen, and 2× playback moves danmaku 2× faster.
 /// Settings follow `AppSettings.shared.danmaku` automatically (`apply(_:)` can also be called).
-/// The view never receives touches; use `danmaku(at:)` for tap-on-danmaku hit testing.
+/// Mode-7 「高级弹幕」 are drawn as positioned, moving / fading bitmaps (`DanmakuAdvancedSpec`); code (8) and
+/// BAS (9) danmaku are never shown.
+/// The view never receives touches; the player hit-tests taps with `suspendDanmaku(at:)` (「点击弹幕」), which
+/// also freezes the hit item until `resume()`.
 final class DanmakuOverlayView: UIView {
     typealias TimeProvider = () -> (time: Double, rate: Float, isPlaying: Bool)
 
@@ -72,14 +101,23 @@ final class DanmakuOverlayView: UIView {
     private(set) var isClosedByUploader = false
 
     /// Danmaku currently on screen (for 「弹幕列表」).
-    var visibleItems: [DanmakuItem] { sprites.map(\.item) }
+    var visibleItems: [DanmakuItem] { sprites.map(\.item) + specials.map(\.item) }
 
-    var onScreenCount: Int { sprites.count }
+    var onScreenCount: Int { sprites.count + specials.count }
+
+    /// Called when the item frozen by `suspendDanmaku(at:)` leaves the screen anyway (seek, re-layout, new video,
+    /// filter change, danmaku hidden): the tap bubble must go with it.
+    var onSuspendedLost: (() -> Void)?
+
+    /// An item is frozen by `suspendDanmaku(at:)`.
+    var hasSuspendedDanmaku: Bool { suspended != nil }
 
     /// Space above the first track.
     static let topInset: CGFloat = 4
     /// Extra spacing kept between consecutive scroll danmaku of a track.
     static let scrollGap: Double = 6
+    /// Mode-7 danmaku older than this are not brought back by a re-flow (seek) even when still alive.
+    static let maxSpecialLifetime: Double = 30
 
     // MARK: Private state
 
@@ -101,6 +139,12 @@ final class DanmakuOverlayView: UIView {
     private var closedNotified = false
 
     private var sprites: [DanmakuSprite] = []
+    private var specials: [DanmakuSpecialSprite] = []
+    /// Parsed mode-7 content (nil = not a usable array), by content.
+    private var specCache: [String: DanmakuAdvancedSpec?] = [:]
+    /// Frozen by a tap (「点击弹幕」): not moved and not expired until `resume()`.
+    private var suspended: DanmakuSprite?
+    private var likeStates: [Int64: DanmakuLikeState] = [:]
     private var activeIDs: Set<Int64> = []
     private var layerPool: [CALayer] = []
     private let bitmapCache = NSCache<NSString, DanmakuTextBitmap>()
@@ -198,6 +242,7 @@ final class DanmakuOverlayView: UIView {
         requestedSegments.removeAll()
         retryAfter.removeAll()
         localItems.removeAll()
+        likeStates.removeAll()
         closedNotified = false
         isClosedByUploader = false
         selfMidHash = BiliHTTP.shared.mid.map { DanmakuHash.midHash(mid: $0) }
@@ -225,6 +270,7 @@ final class DanmakuOverlayView: UIView {
         requestedSegments.removeAll()
         retryAfter.removeAll()
         localItems.removeAll()
+        likeStates.removeAll()
         closedNotified = false
         isClosedByUploader = false
         lastRawTime = nil
@@ -260,6 +306,7 @@ final class DanmakuOverlayView: UIView {
             if newSettings.hideTop && !old.hideTop { engine.clear(kind: .top) }
             if newSettings.hideBottom && !old.hideBottom { engine.clear(kind: .bottom) }
             removeSprites { !self.filter.shouldShow($0.item) }
+            removeSpecials { !self.filter.shouldShow($0.item) }
         }
 
         let styleChanged = old.fontScale != newSettings.fontScale
@@ -303,12 +350,77 @@ final class DanmakuOverlayView: UIView {
         setLinkMode(.paused)
     }
 
-    /// Hit test for tap-on-danmaku, in this view's coordinates: static items first, then scroll
-    /// items newest first.
-    func danmaku(at point: CGPoint) -> DanmakuItem? {
-        for s in sprites.reversed() where s.placement.kind != .scroll && s.layer.frame.contains(point) { return s.item }
-        for s in sprites.reversed() where s.placement.kind == .scroll && s.layer.frame.contains(point) { return s.item }
-        return nil
+    /// Hit test for tap-on-danmaku, in this view's coordinates (features.md §8.6): the row is the track under the
+    /// point, then static items first and scroll items newest first by their x range (a few points of slack).
+    /// Mode-7 danmaku are decorations spread over the picture and are never hit.
+    func danmaku(at point: CGPoint) -> DanmakuItem? { sprite(at: point)?.item }
+
+    /// 「点击弹幕」 touch-down: freezes the danmaku under `point` (drawn on top, not moving, not expiring) and
+    /// returns it, or nil when there is none. Only one item is frozen at a time; `resume()` lets it go on.
+    func suspendDanmaku(at point: CGPoint) -> DanmakuOverlayHit? {
+        resume()
+        guard let hit = sprite(at: point) else { return nil }
+        suspended = hit
+        hit.layer.zPosition = 3
+        return DanmakuOverlayHit(item: hit.item, frame: hit.layer.frame)
+    }
+
+    /// Releases the frozen danmaku; from the next frame on it is where it would be by now (or gone if its time is
+    /// over).
+    func resume() {
+        guard let s = suspended else { return }
+        suspended = nil
+        s.layer.zPosition = baseZPosition(s.item, kind: s.placement.kind)
+    }
+
+    private func sprite(at point: CGPoint) -> DanmakuSprite? {
+        guard engine.trackCount > 0 else { return nil }
+        let trackH = CGFloat(engine.config.trackHeight)
+        func contains(_ s: DanmakuSprite) -> Bool {
+            let top = CGFloat(engine.config.trackY(s.placement.track))
+            let frame = s.layer.frame
+            return point.y >= top && point.y < top + trackH && point.x >= frame.minX - 6 && point.x <= frame.maxX + 6
+        }
+        if let s = sprites.last(where: { $0.placement.kind != .scroll && contains($0) }) { return s }
+        return sprites.last(where: { $0.placement.kind == .scroll && contains($0) })
+    }
+
+    // MARK: Interaction state (点赞 / 撤回)
+
+    func likeState(of item: DanmakuItem) -> DanmakuLikeState {
+        likeStates[item.id] ?? DanmakuLikeState(liked: false, count: max(0, item.likeCount))
+    }
+
+    func setLikeState(_ state: DanmakuLikeState, for id: Int64) {
+        guard id != 0 else { return }
+        likeStates[id] = state
+    }
+
+    /// Drops a danmaku everywhere (after 撤回): screen, loaded segments and own local items.
+    func removeDanmaku(id: Int64) {
+        guard id != 0 else { return }
+        for (index, list) in rawSegments where list.contains(where: { $0.id == id }) {
+            rawSegments[index] = list.filter { $0.id != id }
+        }
+        for (index, list) in segments where list.contains(where: { $0.id == id }) {
+            segments[index] = list.filter { $0.id != id }
+        }
+        localItems.removeAll { $0.id == id }
+        removeSprites { $0.item.id == id }
+        removeSpecials { $0.item.id == id }
+    }
+
+    /// 「弹幕列表」: what is on screen plus every danmaku (as filtered for display, own ones included) that
+    /// appeared in the `window` seconds before `time`, newest first. Code / BAS danmaku are left out.
+    func recentItems(before time: Double, window: Double) -> [DanmakuItem] {
+        let t = time.isFinite ? max(0, time) : renderTime
+        var out = collect(after: t - max(window, 0), upTo: t + 0.05).filter { $0.kind != .advanced || $0.mode == 7 }
+        var seen = Set(out.compactMap { $0.id != 0 ? $0.id : nil })
+        for item in visibleItems where item.id == 0 || !seen.contains(item.id) {
+            out.append(item)
+            if item.id != 0 { seen.insert(item.id) }
+        }
+        return out.sorted { $0.time > $1.time }
     }
 
     /// Wakes the renderer immediately after play/pause (otherwise noticed within ~0.2 s).
@@ -475,7 +587,12 @@ final class DanmakuOverlayView: UIView {
         engine.reset()
         lastEmitTime = t
         guard isRenderingActive, engine.trackCount > 0 else { return }
-        let candidates = collect(after: t - maxLifetime, upTo: t)
+        var candidates = collect(after: t - maxLifetime, upTo: t)
+        // Mode-7 danmaku may live longer than any track item.
+        if maxLifetime < DanmakuOverlayView.maxSpecialLifetime {
+            let older = collect(after: t - DanmakuOverlayView.maxSpecialLifetime, upTo: t - maxLifetime)
+            candidates.insert(contentsOf: older.lazy.filter { $0.kind == .advanced }, at: 0)
+        }
         guard !candidates.isEmpty else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -525,7 +642,8 @@ final class DanmakuOverlayView: UIView {
     /// Lays out one danmaku (evaluated at its own time) and shows it if it is still alive at `now`.
     @discardableResult
     private func spawn(_ item: DanmakuItem, now: Double) -> Bool {
-        guard item.kind != .advanced, item.id == 0 || !activeIDs.contains(item.id) else { return false }
+        guard item.id == 0 || !activeIDs.contains(item.id) else { return false }
+        if item.kind == .advanced { return spawnSpecial(item, now: now) }
         if settings.maxOnScreen > 0, sprites.count >= settings.maxOnScreen, !item.isSelf { return false }
         let kind: DanmakuTrackKind
         switch item.kind {
@@ -544,7 +662,7 @@ final class DanmakuOverlayView: UIView {
         l.contents = bitmap.image
         l.contentsScale = CGFloat(bitmap.image.width) / max(bitmap.size.width, 1)
         l.bounds = CGRect(origin: .zero, size: bitmap.size)
-        l.zPosition = item.isSelf ? 2 : (placement.kind == .scroll ? 0 : 1)
+        l.zPosition = baseZPosition(item, kind: placement.kind)
         let sprite = DanmakuSprite(item: item, placement: placement, layer: l, size: bitmap.size)
         position(sprite, at: now)
         sprites.append(sprite)
@@ -552,18 +670,75 @@ final class DanmakuOverlayView: UIView {
         return true
     }
 
+    private func baseZPosition(_ item: DanmakuItem, kind: DanmakuTrackKind) -> CGFloat {
+        item.isSelf ? 2 : (kind == .scroll ? 0 : 1)
+    }
+
+    /// Mode 7 (「高级弹幕」): a positioned bitmap animated by its spec. Modes 8 / 9 are never shown.
+    private func spawnSpecial(_ item: DanmakuItem, now: Double) -> Bool {
+        guard item.mode == 7, let spec = advancedSpec(for: item), bounds.width > 0, bounds.height > 0 else { return false }
+        let elapsed = now - item.time
+        guard elapsed > -0.5, elapsed < spec.duration, let bitmap = specialBitmap(for: item, spec: spec) else { return false }
+        let l = dequeueLayer()
+        l.contents = bitmap.image
+        l.contentsScale = CGFloat(bitmap.image.width) / max(bitmap.size.width, 1)
+        // (x, y) is the text's top-left corner, also the rotation origin.
+        l.anchorPoint = .zero
+        l.bounds = CGRect(origin: .zero, size: bitmap.size)
+        l.zPosition = 0.5
+        l.transform = DanmakuOverlayView.specialTransform(spec)
+        let sprite = DanmakuSpecialSprite(item: item, spec: spec, layer: l)
+        positionSpecial(sprite, at: now)
+        specials.append(sprite)
+        if item.id != 0 { activeIDs.insert(item.id) }
+        return true
+    }
+
+    private func advancedSpec(for item: DanmakuItem) -> DanmakuAdvancedSpec? {
+        if let cached = specCache[item.content] { return cached }
+        let spec = DanmakuAdvancedSpec.parse(item.content)
+        if specCache.count > 2000 { specCache.removeAll() }
+        specCache[item.content] = .some(spec)
+        return spec
+    }
+
+    private static func specialTransform(_ spec: DanmakuAdvancedSpec) -> CATransform3D {
+        var t = CATransform3DIdentity
+        if spec.rotateY != 0 {
+            t.m34 = -1 / 600
+            t = CATransform3DRotate(t, CGFloat(spec.rotateY * .pi / 180), 0, 1, 0)
+        }
+        if spec.rotateZ != 0 { t = CATransform3DRotate(t, CGFloat(spec.rotateZ * .pi / 180), 0, 0, 1) }
+        return t
+    }
+
     private func updateSprites(at t: Double) {
-        guard !sprites.isEmpty else { return }
-        var expired = false
-        for s in sprites {
-            if s.placement.isExpired(at: t) || t < s.placement.startTime - 0.5 {
-                expired = true
-            } else {
-                position(s, at: t)
+        if !sprites.isEmpty {
+            var expired = false
+            for s in sprites where s !== suspended {
+                if s.placement.isExpired(at: t) || t < s.placement.startTime - 0.5 {
+                    expired = true
+                } else {
+                    position(s, at: t)
+                }
+            }
+            if expired {
+                removeSprites { $0 !== self.suspended && ($0.placement.isExpired(at: t) || t < $0.placement.startTime - 0.5) }
             }
         }
-        if expired {
-            removeSprites { $0.placement.isExpired(at: t) || t < $0.placement.startTime - 0.5 }
+        if !specials.isEmpty {
+            var expired = false
+            for s in specials {
+                let elapsed = t - s.item.time
+                if elapsed >= s.spec.duration || elapsed < -0.5 {
+                    expired = true
+                } else {
+                    positionSpecial(s, at: t)
+                }
+            }
+            if expired {
+                removeSpecials { t - $0.item.time >= $0.spec.duration || t - $0.item.time < -0.5 }
+            }
         }
     }
 
@@ -578,6 +753,16 @@ final class DanmakuOverlayView: UIView {
         s.layer.position = CGPoint(x: px, y: py)
     }
 
+    private func positionSpecial(_ s: DanmakuSpecialSprite, at t: Double) {
+        let elapsed = max(0, t - s.item.time)
+        let p = s.spec.position(at: elapsed)
+        let scale = pixelScale
+        let x = (CGFloat(p.x) * bounds.width * scale).rounded() / scale
+        let y = (CGFloat(p.y) * bounds.height * scale).rounded() / scale
+        s.layer.position = CGPoint(x: x, y: y)
+        s.layer.opacity = Float(s.spec.alpha(at: elapsed))
+    }
+
     // MARK: Sprites & layers
 
     private func removeSprites(where shouldRemove: (DanmakuSprite) -> Bool) {
@@ -586,7 +771,30 @@ final class DanmakuOverlayView: UIView {
         CATransaction.setDisableActions(true)
         var kept: [DanmakuSprite] = []
         kept.reserveCapacity(sprites.count)
+        var lostSuspended = false
         for s in sprites {
+            if shouldRemove(s) {
+                recycle(s.layer)
+                activeIDs.remove(s.item.id)
+                if s === suspended {
+                    suspended = nil
+                    lostSuspended = true
+                }
+            } else {
+                kept.append(s)
+            }
+        }
+        sprites = kept
+        CATransaction.commit()
+        if lostSuspended { onSuspendedLost?() }
+    }
+
+    private func removeSpecials(where shouldRemove: (DanmakuSpecialSprite) -> Bool) {
+        guard !specials.isEmpty else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        var kept: [DanmakuSpecialSprite] = []
+        for s in specials {
             if shouldRemove(s) {
                 recycle(s.layer)
                 activeIDs.remove(s.item.id)
@@ -594,24 +802,30 @@ final class DanmakuOverlayView: UIView {
                 kept.append(s)
             }
         }
-        sprites = kept
+        specials = kept
         CATransaction.commit()
     }
 
     private func removeAllSprites() {
         removeSprites { _ in true }
+        removeSpecials { _ in true }
         activeIDs.removeAll()
     }
 
     private func dequeueLayer() -> CALayer {
         if let l = layerPool.popLast() {
             l.isHidden = false
+            // A mode-7 sprite may have used it.
+            l.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            l.transform = CATransform3DIdentity
+            l.opacity = 1
             return l
         }
         let l = CALayer()
         l.actions = [
             "position": NSNull(), "bounds": NSNull(), "contents": NSNull(), "hidden": NSNull(),
             "opacity": NSNull(), "zPosition": NSNull(), "onOrderIn": NSNull(), "onOrderOut": NSNull(),
+            "anchorPoint": NSNull(), "transform": NSNull(),
         ]
         l.contentsGravity = .resize
         l.isOpaque = false
@@ -815,6 +1029,50 @@ final class DanmakuOverlayView: UIView {
                 cg.setLineWidth(1)
                 cg.stroke(CGRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5))
             }
+        }
+        guard let cgImage = image.cgImage else { return nil }
+        let bitmap = DanmakuTextBitmap(image: cgImage, size: size)
+        bitmapCache.setObject(bitmap, forKey: key, cost: cgImage.width * cgImage.height * 4)
+        return bitmap
+    }
+
+    /// Mode-7 bitmap: multi-line text, the item's size scaled from the 682 × 438 reference player to this view, an
+    /// outline only when the spec asks for one. The user's font settings do not apply (the layout is the author's).
+    private func specialBitmap(for item: DanmakuItem, spec: DanmakuAdvancedSpec) -> DanmakuTextBitmap? {
+        let scale = min(bounds.width / CGFloat(DanmakuAdvancedSpec.referenceWidth),
+                        bounds.height / CGFloat(DanmakuAdvancedSpec.referenceHeight))
+        let pointSize = min(max(CGFloat(min(max(item.fontSize, 12), 64)) * scale, 6), 96)
+        let stroke: CGFloat = spec.hasStroke ? max(1, strokeWidth) : 0
+        let key = "adv|\(Int((pointSize * 2).rounded()))|\(stroke)|\(item.color)|\(spec.text)" as NSString
+        if let cached = bitmapCache.object(forKey: key) { return cached }
+
+        let font = UIFont.systemFont(ofSize: pointSize, weight: .medium)
+        let fill = DanmakuOverlayView.color(item.color)
+        let strokeColor: UIColor = DanmakuOverlayView.isDark(item.color)
+            ? UIColor(white: 1, alpha: 0.85) : UIColor(white: 0, alpha: 0.9)
+        let fillText = NSAttributedString(string: spec.text, attributes: [.font: font, .foregroundColor: fill])
+        let options: NSStringDrawingOptions = [.usesLineFragmentOrigin]
+        let textRect = fillText.boundingRect(with: CGSize(width: DanmakuOverlayView.maxBitmapWidth, height: 2000),
+                                             options: options, context: nil)
+        let size = CGSize(width: ceil(textRect.width + stroke), height: ceil(textRect.height + stroke))
+        guard size.width >= 1, size.height >= 1, size.width < DanmakuOverlayView.maxBitmapWidth, size.height < 2000
+        else { return nil }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = max(traitCollection.displayScale, 1)
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let image = renderer.image { ctx in
+            let rect = CGRect(x: stroke / 2, y: stroke / 2, width: textRect.width, height: textRect.height)
+            if stroke > 0 {
+                ctx.cgContext.setLineJoin(.round)
+                let strokeText = NSAttributedString(string: spec.text, attributes: [
+                    .font: font, .foregroundColor: strokeColor, .strokeColor: strokeColor,
+                    .strokeWidth: NSNumber(value: Double(stroke / max(font.pointSize, 1) * 100)),
+                ])
+                strokeText.draw(with: rect, options: options, context: nil)
+            }
+            fillText.draw(with: rect, options: options, context: nil)
         }
         guard let cgImage = image.cgImage else { return nil }
         let bitmap = DanmakuTextBitmap(image: cgImage, size: size)

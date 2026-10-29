@@ -36,7 +36,8 @@ struct AccelerationSettings: SettingsGroup {
     var manualConcurrency: Int = 16
     /// Accelerate bangumi / movies / documentaries too.
     var accelerateBangumi: Bool = true
-    /// Accelerate live streams (experimental, off by default like BTR).
+    /// Reserved: BTR's live-stream switch. Live acceleration is not implemented (live rooms play straight from the
+    /// CDN) and nothing reads this; it stays so stored settings keep decoding. The settings row shows 「暂未支持」.
     var accelerateLive: Bool = false
     /// Seconds of media AVPlayer should try to keep buffered ahead.
     var forwardBufferSeconds: Double = 60
@@ -49,6 +50,30 @@ enum SmartSkipMode: String, Codable, CaseIterable, Identifiable {
     var title: String { self == .auto ? "自动跳过" : "手动（显示跳过按钮）" }
 }
 
+/// 「空降助手」 per-category skip type (features.md §11.3, PiliPlus `SkipType`).
+enum SponsorBlockSkipType: String, Codable, CaseIterable, Identifiable {
+    /// Skipped every time playback reaches it.
+    case alwaysSkip
+    /// Skipped once per video; re-entering it offers the button.
+    case skipOnce
+    /// Only the 「跳过: {短标题}」 button.
+    case skipManually
+    /// Only the coloured strip on the progress bar.
+    case showOnly
+    /// Neither skipped nor drawn.
+    case disable
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .alwaysSkip: return "总是跳过"
+        case .skipOnce: return "跳过一次"
+        case .skipManually: return "手动跳过"
+        case .showOnly: return "仅显示"
+        case .disable: return "禁用"
+        }
+    }
+}
+
 struct SmartSkipSettings: SettingsGroup {
     var enabled: Bool = true
     /// `.auto` skips only trusted segments by itself; everything else shows the 「跳过广告」 prompt.
@@ -57,9 +82,23 @@ struct SmartSkipSettings: SettingsGroup {
     var countdownSeconds: Int = 5
     /// Show the 「已跳过广告」 toast (with 「撤销」) after an automatic skip.
     var showToast: Bool = true
+    /// 「本地识别」: the on-device BiliSmartSkip detectors (chapters, description, danmaku, subtitles).
+    var localDetection: Bool = true
+    /// 「空降助手」: community segments from BilibiliSponsorBlock, merged with the local result
+    /// (features.md §11.1 / §13 `enableSponsorBlock`, OURS default on). Both sources sit under `enabled`.
+    var sponsorBlockEnabled: Bool = true
+    /// 「服务器地址」 (§13 `blockServer`).
+    var sponsorBlockServer: String = SmartSkipSettings.defaultSponsorBlockServer
+    /// Category raw value (`sponsor`, `intro` …) → skip type. A missing category means 跳过一次 (§11.3).
+    var sponsorBlockSkipTypes: [String: SponsorBlockSkipType] = [:]
+    /// 「最短片段时长」 seconds (§13 `blockLimit`): shorter segments are only shown, never skipped.
+    var sponsorBlockMinDuration: Double = 0
 
     /// Valid range for `countdownSeconds` in the settings screen.
     static let countdownRange = 3...15
+    static let defaultSponsorBlockServer = "https://www.bsbsb.top"
+    /// Valid range for `sponsorBlockMinDuration` in the settings screen.
+    static let sponsorBlockMinDurationRange: ClosedRange<Double> = 0...30
 }
 
 /// Feed filtering incl. "block ad videos" (owned by Core/Filter).
@@ -90,6 +129,9 @@ struct FeedFilterSettings: SettingsGroup {
     /// Also apply the user rules (keywords, UPs, 恰饭, duration, likes, plays) to popular, ranking,
     /// search and related lists. Off = home recommend only. Ad-card blocking ignores this switch.
     var applyToAllLists: Bool = true
+    /// 「分区屏蔽」: zone names (`tname`, e.g. 鬼畜调教) in the `blockedKeywords` format. Only lists whose
+    /// cards carry a zone use it: home recommend (app feed), 热门 and 排行.
+    var blockedZones: [String] = []
 }
 
 /// Danmaku display (owned by Core/Danmaku). Values mirror the official client's ranges.
@@ -137,8 +179,9 @@ struct DanmakuSettings: SettingsGroup {
     var hideBottom: Bool = false
     /// 「彩色」 block: hides every non-white danmaku (incl. VIP gradient ones).
     var hideColorful: Bool = false
-    /// 「高级」 block: modes 7 (positioned), 8 (code) and 9 (BAS). They are not rendered yet.
-    var hideAdvanced: Bool = true
+    /// 「高级」 block: mode 7 (positioned, moving text; see `DanmakuAdvancedSpec`). Modes 8 (code) and 9 (BAS)
+    /// count as advanced too but are never rendered.
+    var hideAdvanced: Bool = false
     /// 「合并重复弹幕」 identical (normalised) content within `mergeWindow` seconds shows once with a count.
     var mergeDuplicates: Bool = false
     /// Merge window in seconds, measured from the first occurrence.
@@ -161,4 +204,11 @@ struct DanmakuSettings: SettingsGroup {
     var scrollFixedVelocity: Bool = false
     /// 「显示会员彩色弹幕」: VIP gradient danmaku get a gradient outline.
     var showVipColorful: Bool = true
+    /// 「启用点击弹幕」: tapping a danmaku freezes it and shows 点赞 / 复制 / 举报 / 屏蔽 (features.md §8.6).
+    var tapToInteract: Bool = true
+    /// Account rule id (`x/dm/filter/user`) of each keyword / `/regex/` rule that is also stored on the server, so
+    /// deleting it here deletes it there.
+    var cloudRuleIds: [String: Int64] = [:]
+    /// Account rule id of each blocked midHash that is also stored on the server.
+    var cloudUserRuleIds: [String: Int64] = [:]
 }

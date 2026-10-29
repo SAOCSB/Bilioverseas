@@ -55,12 +55,16 @@ struct DanmakuSettingsView: View {
                 Text("时长越短速度越快；倍速播放时弹幕随视频同步加速。")
             }
 
-            Section("按类型屏蔽") {
+            Section {
                 Toggle("滚动弹幕", isOn: $settings.danmaku.hideScroll)
                 Toggle("顶部弹幕", isOn: $settings.danmaku.hideTop)
                 Toggle("底部弹幕", isOn: $settings.danmaku.hideBottom)
                 Toggle("彩色弹幕", isOn: $settings.danmaku.hideColorful)
                 Toggle("高级弹幕", isOn: $settings.danmaku.hideAdvanced)
+            } header: {
+                Text("按类型屏蔽")
+            } footer: {
+                Text("打开即屏蔽该类弹幕。高级弹幕是 UP 主或观众放在画面指定位置、可移动和渐隐的特殊弹幕；代码弹幕和 BAS 弹幕暂不支持显示。")
             }
 
             Section {
@@ -80,6 +84,7 @@ struct DanmakuSettingsView: View {
             }
 
             Section {
+                Toggle("启用点击弹幕", isOn: $settings.danmaku.tapToInteract)
                 Toggle("合并重复弹幕", isOn: $settings.danmaku.mergeDuplicates)
                 Toggle("海量弹幕", isOn: $settings.danmaku.allowOverlap)
                 Toggle("固定转滚动", isOn: $settings.danmaku.static2Scroll)
@@ -92,7 +97,7 @@ struct DanmakuSettingsView: View {
             } header: {
                 Text("其他")
             } footer: {
-                Text("海量弹幕：轨道已满时叠加显示，而不是丢弃。固定转滚动：放不下的顶部/底部弹幕改为滚动显示。")
+                Text("点击弹幕：点击画面中的弹幕可点赞、复制、举报或屏蔽。海量弹幕：轨道已满时叠加显示，而不是丢弃。固定转滚动：放不下的顶部/底部弹幕改为滚动显示。")
             }
 
             Section {
@@ -154,13 +159,12 @@ struct DanmakuQuickPanel: View {
                 }
             }
         }
-        // Own toast layer: the app's lies under this sheet (e.g. 「导入账号云端屏蔽列表」 feedback).
-        .overlay { ToastOverlay() }
         .presentationDetents([.medium, .large])
     }
 }
 
-/// 「弹幕屏蔽」: keyword / regex / user rules stored in `DanmakuSettings`.
+/// 「弹幕屏蔽」: keyword / regex / user rules stored in `DanmakuSettings` and, while logged in, on the account
+/// (`DanmakuBlockSync`, features.md §9).
 struct DanmakuBlockListView: View {
     enum Kind: Int, CaseIterable, Identifiable {
         case keyword, regex, user
@@ -206,7 +210,13 @@ struct DanmakuBlockListView: View {
                     Text("暂无屏蔽规则").foregroundStyle(.secondary)
                 } else {
                     ForEach(rows, id: \.self) { rule in
-                        Text(displayText(rule)).lineLimit(2)
+                        HStack {
+                            Text(displayText(rule)).lineLimit(2)
+                            if isSynced(rule) {
+                                Spacer(minLength: 8)
+                                Text("已同步").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     .onDelete(perform: delete)
                 }
@@ -220,7 +230,7 @@ struct DanmakuBlockListView: View {
                         sync()
                     } label: {
                         HStack {
-                            Text("导入账号云端屏蔽列表")
+                            Text("同步账号屏蔽列表")
                             if syncing {
                                 Spacer()
                                 ProgressView()
@@ -228,6 +238,8 @@ struct DanmakuBlockListView: View {
                         }
                     }
                     .disabled(syncing)
+                } footer: {
+                    Text("登录后添加和删除的规则会同步到账号。同步会导入账号中的规则，并上传仅保存在本机的规则。")
                 }
             }
         }
@@ -273,26 +285,26 @@ struct DanmakuBlockListView: View {
         }
     }
 
+    private func isSynced(_ rule: String) -> Bool {
+        kind == .user ? settings.danmaku.cloudUserRuleIds[rule] != nil : settings.danmaku.cloudRuleIds[rule] != nil
+    }
+
     private func add() {
         let t = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
         message = nil
         switch kind {
         case .keyword:
-            guard !settings.danmaku.blockedKeywords.contains(t) else { message = "已存在"; return }
-            settings.danmaku.blockedKeywords.append(t)
+            guard DanmakuBlockSync.addKeyword(t) else { message = "已存在"; return }
         case .regex:
             var pattern = t
             if let inner = DanmakuFilter.regexPattern(from: t) { pattern = inner }
             guard !pattern.isEmpty, DanmakuFilter.isValidRegex(pattern) else { message = "正则表达式无效"; return }
-            let rule = "/\(pattern)/"
-            guard !settings.danmaku.blockedKeywords.contains(rule) else { message = "已存在"; return }
-            settings.danmaku.blockedKeywords.append(rule)
+            guard DanmakuBlockSync.addKeyword("/\(pattern)/") else { message = "已存在"; return }
         case .user:
             guard let hash = DanmakuHash.normalizeUserRule(t) else { message = "请输入正确的用户UID"; return }
-            guard !settings.danmaku.blockedUsers.contains(hash) else { message = "已存在"; return }
-            settings.danmaku.blockedUsers.append(hash)
-            if t.allSatisfy({ $0.isASCII && $0.isNumber }) { settings.danmaku.blockedUserLabels[hash] = t }
+            let label = t.allSatisfy({ $0.isASCII && $0.isNumber }) ? t : nil
+            guard DanmakuBlockSync.addUser(hash: hash, label: label) else { message = "已存在"; return }
         }
         input = ""
     }
@@ -300,11 +312,8 @@ struct DanmakuBlockListView: View {
     private func delete(_ offsets: IndexSet) {
         let doomed = Set(offsets.compactMap { rows.indices.contains($0) ? rows[$0] : nil })
         switch kind {
-        case .keyword, .regex:
-            settings.danmaku.blockedKeywords.removeAll { doomed.contains($0) }
-        case .user:
-            settings.danmaku.blockedUsers.removeAll { doomed.contains($0) }
-            for h in doomed { settings.danmaku.blockedUserLabels[h] = nil }
+        case .keyword, .regex: DanmakuBlockSync.remove(keywords: doomed)
+        case .user: DanmakuBlockSync.remove(users: doomed)
         }
     }
 
@@ -313,11 +322,14 @@ struct DanmakuBlockListView: View {
         message = nil
         Task { @MainActor in
             do {
-                let rules = try await DanmakuService.fetchCloudRules()
-                var s = settings.danmaku
-                let added = DanmakuCloudRule.merge(rules, into: &s)
-                settings.danmaku = s
-                ToastCenter.shared.show(added > 0 ? "已导入 \(added) 条屏蔽规则" : "屏蔽列表已是最新")
+                let result = try await DanmakuBlockSync.sync()
+                var parts: [String] = []
+                if result.imported > 0 { parts.append("导入 \(result.imported) 条") }
+                if result.uploaded > 0 { parts.append("上传 \(result.uploaded) 条") }
+                if let error = result.uploadError {
+                    message = "部分规则上传失败：\(error.localizedDescription)"
+                }
+                ToastCenter.shared.show(parts.isEmpty ? "屏蔽列表已是最新" : "已同步：" + parts.joined(separator: "，"))
             } catch {
                 message = error.localizedDescription
             }

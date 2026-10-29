@@ -6,7 +6,8 @@ import FoundationNetworking
 import FoundationXML
 #endif
 
-/// Danmaku network API: segment download (protobuf, with XML fallback), sending, cloud block rules.
+/// Danmaku network API: segment download (protobuf, with XML fallback), sending, 点赞 / 举报 / 撤回, cloud block
+/// rules.
 enum DanmakuService {
     static let wbiSegmentURL = BiliHost.api + "/x/v2/dm/wbi/web/seg.so"
     static let webSegmentURL = BiliHost.api + "/x/v2/dm/web/seg.so"
@@ -14,6 +15,16 @@ enum DanmakuService {
     static let postURL = BiliHost.api + "/x/v2/dm/post"
     static let filterURL = BiliHost.api + "/x/dm/filter/user"
     static let filterAddURL = BiliHost.api + "/x/dm/filter/user/add"
+    static let filterDelURL = BiliHost.api + "/x/dm/filter/user/del"
+    static let thumbUpURL = BiliHost.api + "/x/v2/dm/thumbup/add"
+    static let reportURL = BiliHost.api + "/x/dm/report/add"
+    static let recallURL = BiliHost.api + "/x/dm/recall"
+
+    /// 「举报」 reasons of the web player. 11 「其它」 needs a description and is not offered.
+    static let reportReasons: [DanmakuReportReason] = [
+        (1, "违法违禁"), (2, "色情低俗"), (3, "赌博诈骗"), (4, "人身攻击"), (5, "侵犯隐私"), (6, "垃圾广告"),
+        (7, "引战"), (8, "剧透"), (9, "恶意刷屏"), (10, "视频无关"), (12, "青少年不良信息"), (13, "违法信息外链"),
+    ].map { DanmakuReportReason(id: $0.0, title: $0.1) }
 
     /// Downloads one 6-minute segment (`segmentIndex` is 1-based). Tries the WBI-signed web
     /// endpoint, then the unsigned one; the whole chain is retried once. A 304 or an empty body
@@ -117,6 +128,54 @@ enum DanmakuService {
         return DanmakuCloudRule(id: data["id"].int64Value, type: data["type"].int ?? type,
                                 filter: data["filter"].string ?? filter)
     }
+
+    /// Deletes server-side block rules (`x/dm/filter/user/del`, `ids` comma-joined).
+    static func deleteCloudRules(ids: [Int64]) async throws {
+        let valid = ids.filter { $0 > 0 }
+        guard !valid.isEmpty else { return }
+        _ = try await BiliHTTP.shared.post(filterDelURL, form: ["ids": valid.map { String($0) }.joined(separator: ",")])
+    }
+
+    // MARK: Interaction (点击弹幕 / 弹幕列表)
+
+    /// 点赞 (`like`) or 取消点赞 (`x/v2/dm/thumbup/add`, op 1 / 2). Returns the resulting liked state and whether
+    /// this call changed it: the "already liked" (65006) and "not liked" (65004) answers report that state
+    /// (unchanged) instead of failing.
+    static func setLike(cid: Int64, dmid: Int64, like: Bool) async throws -> (liked: Bool, changed: Bool) {
+        guard BiliHTTP.shared.isLoggedIn else { throw BiliError.notLoggedIn }
+        do {
+            _ = try await BiliHTTP.shared.post(thumbUpURL, form: [
+                "oid": cid, "dmid": dmid, "op": like ? 1 : 2, "platform": "web_player",
+            ])
+            return (like, true)
+        } catch let e as BiliError where e.apiCode == 65006 {
+            return (true, false)
+        } catch let e as BiliError where e.apiCode == 65004 {
+            return (false, false)
+        }
+    }
+
+    /// 举报 (`x/dm/report/add`); `reason` is one of `reportReasons`.
+    static func report(cid: Int64, dmid: Int64, reason: Int) async throws {
+        guard BiliHTTP.shared.isLoggedIn else { throw BiliError.notLoggedIn }
+        _ = try await BiliHTTP.shared.post(reportURL, form: ["cid": cid, "dmid": dmid, "reason": reason, "originCid": cid])
+    }
+
+    /// 撤回 an own danmaku (`x/dm/recall`). Returns the server message (e.g. how many recalls are left today).
+    static func recall(cid: Int64, dmid: Int64) async throws -> String {
+        // Not `post(...)`: the answer worth showing is the envelope's `message`, not `data`.
+        guard BiliHTTP.shared.isLoggedIn, let csrf = BiliHTTP.shared.csrf else { throw BiliError.notLoggedIn }
+        let root = try await BiliHTTP.shared.json(recallURL, method: "POST",
+                                                  form: ["cid": cid, "dmid": dmid, "type": 1, "csrf": csrf])
+        _ = try BiliHTTP.unwrap(root)
+        return root["message"].string ?? ""
+    }
+}
+
+/// One 「举报」 reason: `id` is the `reason` code of `x/dm/report/add`.
+struct DanmakuReportReason: Identifiable, Equatable, Sendable {
+    let id: Int
+    let title: String
 }
 
 /// One account block rule from `x/dm/filter/user`.
@@ -135,19 +194,65 @@ struct DanmakuCloudRule: Equatable, Sendable {
         }
     }
 
-    /// Merges rules into the local lists, skipping duplicates.
+    /// Merges rules into the local lists, skipping duplicates, and remembers each rule's server id (also for local
+    /// rules that were already there) so deleting the rule locally deletes it on the server. Returns the number of
+    /// rules added.
     static func merge(_ rules: [DanmakuCloudRule], into settings: inout DanmakuSettings) -> Int {
         var added = 0
         for rule in rules {
             if rule.type == 2 {
                 let hash = rule.filter.lowercased()
                 if !settings.blockedUsers.contains(hash) { settings.blockedUsers.append(hash); added += 1 }
-            } else if let kw = rule.localKeyword, !settings.blockedKeywords.contains(kw) {
-                settings.blockedKeywords.append(kw)
-                added += 1
+                if rule.id > 0 { settings.cloudUserRuleIds[hash] = rule.id }
+            } else if let kw = rule.localKeyword {
+                if !settings.blockedKeywords.contains(kw) {
+                    settings.blockedKeywords.append(kw)
+                    added += 1
+                }
+                if rule.id > 0 { settings.cloudRuleIds[kw] = rule.id }
             }
         }
         return added
+    }
+
+    /// Server form of a local keyword rule: plain keywords are type 0, `/regex/` type 1 without the slashes.
+    static func cloudForm(keyword rule: String) -> (type: Int, filter: String) {
+        if let pattern = DanmakuFilter.regexPattern(from: rule) { return (1, pattern) }
+        return (0, rule)
+    }
+
+    /// Local rules not stored on the account yet (added while logged out, or before ids were kept), as
+    /// `(type, filter, local rule)`; users come last.
+    static func pendingUploads(_ settings: DanmakuSettings) -> [(type: Int, filter: String, rule: String)] {
+        var out: [(type: Int, filter: String, rule: String)] = []
+        for kw in settings.blockedKeywords where settings.cloudRuleIds[kw] == nil {
+            let form = cloudForm(keyword: kw)
+            out.append((form.type, form.filter, kw))
+        }
+        for hash in settings.blockedUsers where settings.cloudUserRuleIds[hash] == nil {
+            out.append((2, hash, hash))
+        }
+        return out
+    }
+}
+
+extension DanmakuSettings {
+    /// Removes keyword / `/regex/` rules and user hashes from the block lists. Returns the account rule ids to
+    /// delete on the server (`DanmakuService.deleteCloudRules`).
+    mutating func removeBlockRules(keywords: Set<String> = [], users: Set<String> = []) -> [Int64] {
+        var ids: [Int64] = []
+        if !keywords.isEmpty {
+            blockedKeywords.removeAll { keywords.contains($0) }
+            for kw in keywords { if let id = cloudRuleIds.removeValue(forKey: kw) { ids.append(id) } }
+        }
+        if !users.isEmpty {
+            blockedUsers.removeAll { users.contains($0) }
+            for hash in users {
+                blockedUserLabels[hash] = nil
+                if let id = cloudUserRuleIds.removeValue(forKey: hash) { ids.append(id) }
+            }
+        }
+        return ids
     }
 }
 

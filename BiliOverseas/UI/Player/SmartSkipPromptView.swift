@@ -5,7 +5,7 @@
 
 import SwiftUI
 
-/// The 「跳过广告」 capsule with a countdown ring and a dismiss ✕. Overlay it on the player:
+/// The 「跳过广告」 capsule with a countdown ring (suspicious segments only) and a dismiss ✕. Overlay it on the player:
 ///
 /// ```swift
 /// .overlay(alignment: .bottomTrailing) {
@@ -31,20 +31,31 @@ struct SmartSkipPromptView: View {
     /// Pointer hover on iPad (pause the countdown: `tracker.setInteracting(_:now:)`).
     var onInteractionChanged: ((Bool) -> Void)? = nil
 
+    /// `remaining` is infinite for a trusted segment (manual mode, or one skipped before): no countdown.
+    private var counting: Bool { remaining.isFinite }
     private var seconds: Int { remaining.isFinite ? max(0, Int(remaining.rounded(.up))) : 0 }
     private var progress: Double { total > 0 && remaining.isFinite ? min(1, max(0, remaining / total)) : 0 }
-    private var title: String { segment.requiresConfirmation ? "跳过疑似广告" : "跳过广告" }
+    /// 「跳过广告」 / 「跳过疑似广告」, or 「跳过: 赞助」 for a 空降助手 segment.
+    private var title: String { segment.promptTitle }
 
     var body: some View {
         HStack(spacing: 0) {
             Button(action: onSkip) {
                 HStack(spacing: 8) {
-                    countdownRing
+                    if counting {
+                        countdownRing
+                    } else {
+                        // A trusted segment's button lasts until the interval is left (no countdown).
+                        Image(systemName: "forward.end.fill")
+                            .font(.system(size: 11, weight: .bold))
+                    }
                     Text(title)
                         .font(.system(size: 14, weight: .bold))
-                    Text("\(seconds)s")
-                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.white.opacity(0.75))
+                    if counting {
+                        Text("\(seconds)s")
+                            .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(Color.white.opacity(0.75))
+                    }
                 }
                 .padding(.leading, 12)
                 .padding(.trailing, 10)
@@ -52,7 +63,7 @@ struct SmartSkipPromptView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(Text("\(title)，\(seconds) 秒后隐藏"))
+            .accessibilityLabel(Text(counting ? "\(title)，\(seconds) 秒后隐藏" : title))
 
             Rectangle()
                 .fill(Color.white.opacity(0.3))

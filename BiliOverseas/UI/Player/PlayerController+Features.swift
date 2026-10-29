@@ -14,11 +14,13 @@ extension PlayerController {
         extra = fetched
         chapters = target.chapters ?? fetched?.chapters ?? []
         subtitleTracks = fetched?.subtitles ?? []
+        subtitlesNeedLogin = fetched?.needLoginSubtitle == true && subtitleTracks.isEmpty && !BiliHTTP.shared.isLoggedIn
         if let toast = fetched?.previewToast, playInfo?.isTrial != true {
             ToastCenter.shared.show(toast, duration: 3)
         }
         autoSelectSubtitle()
         startSmartSkip(target, extra: fetched, generation: gen)
+        sideDataLoaded = true
         fetchOnlineCount(target, generation: gen)
     }
 
@@ -33,6 +35,8 @@ extension PlayerController {
         onlineTask = nil
         resumeChipTask?.cancel()
         resumeChipTask = nil
+        resumePartTask?.cancel()
+        resumePartTask = nil
         for task in subtitleFetches.values { task.cancel() }
         subtitleFetches = [:]
     }
@@ -41,6 +45,8 @@ extension PlayerController {
     func resetFeatureState() {
         chapters = []
         subtitleTracks = []
+        subtitlesNeedLogin = false
+        sideDataLoaded = false
         selectedSubtitleId = nil
         subtitleText = nil
         subtitleLines = []
@@ -51,7 +57,10 @@ extension PlayerController {
         pgcClips = []
         clipPrompt = nil
         dismissedClips = []
+        autoSkippedClips = []
+        clipStartChecked = false
         resumeChipTime = nil
+        resumePartPrompt = nil
         onlineCount = nil
         lastOnlineFetch = nil
         stats = nil
@@ -126,7 +135,9 @@ extension PlayerController {
 
     // MARK: SmartSkip (UGC only)
 
-    private func startSmartSkip(_ target: PlaybackItem, extra info: PlayerExtraInfo?, generation gen: Int) {
+    /// From the side data, or from `smartSkipTick` when 广告跳过 is turned on while the video plays. `smartSkipTask`
+    /// stays set until the next video, so it also means "already analysed".
+    func startSmartSkip(_ target: PlaybackItem, extra info: PlayerExtraInfo?, generation gen: Int) {
         guard target.epId == 0, AppSettings.shared.smartSkip.enabled else { return }
         smartSkipTask?.cancel()
         smartSkipTask = Task { [weak self] in
@@ -135,7 +146,9 @@ extension PlayerController {
             var lines: [SubtitleLine]?
             if let tracks {
                 if let chosen = SmartSkipDataLoader.chooseSubtitleTrack(tracks) {
-                    lines = await self?.subtitleLines(for: chosen)
+                    // Empty may be a failed fetch: nil lets the loader retry the body itself.
+                    let fetched = await self?.subtitleLines(for: chosen)
+                    lines = fetched?.isEmpty == false ? fetched : nil
                 } else {
                     lines = []
                 }
@@ -144,7 +157,7 @@ extension PlayerController {
             let total = target.duration > 0 ? target.duration : (self.playInfo?.duration ?? 0)
             let context = SmartSkipVideoContext(aid: target.aid, bvid: target.bvid, cid: target.cid, page: 1,
                                                 duration: total, title: target.title, desc: target.desc,
-                                                chapters: target.chapters ?? info?.chapters,
+                                                chapters: target.chapters ?? info?.viewPoints,
                                                 subtitleTracks: tracks, subtitleLines: lines, danmaku: nil)
             let segments = await SmartSkipAnalyzer.shared.analyze(context)
             guard gen == self.loadGeneration, !Task.isCancelled else { return }
@@ -157,8 +170,14 @@ extension PlayerController {
     }
 
     func smartSkipTick(time: Double, playing: Bool) {
-        guard let tracker else { return }
         let s = AppSettings.shared.smartSkip
+        guard let tracker else {
+            // Turned on while this video plays (settings apply on the next tick, like upstream storage.onChanged).
+            if s.enabled, smartSkipTask == nil, sideDataLoaded, startupDone, let target = item, target.epId == 0 {
+                startSmartSkip(target, extra: extra, generation: loadGeneration)
+            }
+            return
+        }
         guard s.enabled else {
             if skipPrompt != nil { skipPrompt = nil }
             return
@@ -174,7 +193,7 @@ extension PlayerController {
             performSeek(to: segment.seekTarget, origin: .smartSkip)
             if s.showToast {
                 let gen = loadGeneration
-                ToastCenter.shared.show("已跳过广告", duration: 4, actionTitle: "撤销") { [weak self] in
+                ToastCenter.shared.show(segment.skippedToast, duration: 4, actionTitle: "撤销") { [weak self] in
                     // Not into another video loaded since (segment ids are just "start:end").
                     guard let self, gen == self.loadGeneration else { return }
                     self.undoSmartSkip(segment)
@@ -206,6 +225,16 @@ extension PlayerController {
         if let target = tracker?.undo(segment) { performSeek(to: target, origin: .smartSkip) }
     }
 
+    /// A row of the in-player 「广告跳过」 list: past that segment (it joins the skip history, so auto mode does
+    /// not skip it again when the user comes back).
+    func smartSkipJump(to segment: AdSegment) {
+        let before = displayTime() < segment.end
+        tracker?.markSkipped(id: segment.id)
+        skipPrompt = nil
+        performSeek(to: segment.seekTarget, origin: .smartSkip)
+        ToastCenter.shared.show(before ? segment.skippedToast : "已跳至 \(PlayerFormat.time(segment.seekTarget))")
+    }
+
     // MARK: PGC 片头 / 片尾
 
     static func clipKey(_ clip: PGCClipInfo) -> String { "\(clip.rawType):\(clip.start)-\(clip.end)" }
@@ -218,12 +247,27 @@ extension PlayerController {
         }
     }
 
+    /// 「番剧片头/片尾跳过类型」: 总是跳过 / 跳过一次 skip a clip entered at its start (or a start inside it, §11.4),
+    /// 手动跳过 shows the button (also for a clip entered mid-way), 仅显示 and 禁用 show none.
     func clipTick(time t: Double) {
-        guard !pgcClips.isEmpty, startupDone else {
-            if clipPrompt != nil, pgcClips.isEmpty { clipPrompt = nil }
+        let type = AppSettings.shared.player.pgcSkipType
+        guard !pgcClips.isEmpty, startupDone, type != .showOnly, type != .disabled else {
+            if clipPrompt != nil { clipPrompt = nil }
             return
         }
+        let atStart = !clipStartChecked
+        clipStartChecked = true
         let active = pgcClips.first { t >= $0.start && t < $0.end - 1 && !dismissedClips.contains(Self.clipKey($0)) }
+        if let clip = active, !isSeeking, type == .always || type == .skipOnce, atStart || t - clip.start < 1.5 {
+            let key = Self.clipKey(clip)
+            if type == .always || !autoSkippedClips.contains(key) {
+                autoSkippedClips.insert(key)
+                clipPrompt = nil
+                performSeek(to: clip.end, origin: .smartSkip)
+                ToastCenter.shared.show(clip.kind == .ending ? "已跳过片尾" : "已跳过片头")
+                return
+            }
+        }
         if active != clipPrompt { clipPrompt = active }
     }
 
@@ -257,6 +301,37 @@ extension PlayerController {
     func dismissResumeChip() {
         resumeChipTask?.cancel()
         resumeChipTime = nil
+    }
+
+    // MARK: 分P resume chip 「上次看到第N P，点击跳转」 (features.md §6.1)
+
+    /// playurl's history is on part `cid` of this archive: offer it for 4 s, once per page and video.
+    func offerResumePart(aid: Int64, cid: Int64, time: Double) {
+        let id = PlayerEpisodeEntry.partID(cid: cid)
+        guard !resumePartOfferedAids.contains(aid),
+              let index = episodeEntries.firstIndex(where: { $0.id == id }) else { return }
+        resumePartOfferedAids.insert(aid)
+        resumePartTask?.cancel()
+        resumePartPrompt = PlayerResumePartPrompt(entryID: id, page: index + 1, time: max(0, time))
+        let gen = loadGeneration
+        resumePartTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard let self, !Task.isCancelled, gen == self.loadGeneration else { return }
+            self.resumePartPrompt = nil
+        }
+    }
+
+    func acceptResumePart() {
+        guard let prompt = resumePartPrompt else { return }
+        dismissResumePart()
+        ToastCenter.shared.show("已跳至第\(prompt.page)P")
+        // Explicit time: this part's heartbeat may already have replaced the account's history.
+        selectEpisode(prompt.entryID, startTime: prompt.time > 0 ? prompt.time : nil)
+    }
+
+    func dismissResumePart() {
+        resumePartTask?.cancel()
+        resumePartPrompt = nil
     }
 
     /// 「从头播放」.

@@ -73,8 +73,16 @@ struct PlayerSheetHost: View {
             }
         case .playerSettings:
             PlayerSettingsSheet()
+        case .accelerationSettings:
+            PlayerAccelerationSettingsSheet()
+        case .danmakuList:
+            DanmakuListView(player: controller)
         case .menu(let panel):
             PlayerMenuSheet(controller: controller, root: panel)
+        case .page(let id):
+            if let page = controller.pageSheet, page.id == id {
+                page.content
+            }
         }
     }
 }
@@ -125,30 +133,34 @@ struct PlayerChromeView: View {
 
     @ViewBuilder
     private var coverLayer: some View {
-        if !controller.hasFirstFrame, let cover = controller.item?.cover, !cover.isEmpty {
+        let listening = controller.audioOnlyStream != nil
+        if !controller.hasFirstFrame || listening, let cover = controller.item?.cover, !cover.isEmpty {
             RemoteImage(url: cover, width: 640, contentMode: .fill)
                 .frame(width: size.width, height: size.height)
                 .clipped()
-                .overlay(Color.black.opacity(0.25))
+                .overlay(Color.black.opacity(listening ? 0.45 : 0.25))
                 .allowsHitTesting(false)
                 .transition(.opacity)
+        }
+        // 听视频: the cover stands in for the picture (the spinner takes the centre while loading).
+        if listening, controller.status == .playing || controller.status == .paused {
+            VStack(spacing: 6) {
+                Image(systemName: "headphones")
+                    .font(.system(size: fullscreen ? 30 : 24, weight: .medium))
+                Text("听视频中")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundColor(.white.opacity(0.85))
+            .allowsHitTesting(false)
         }
     }
 
     @ViewBuilder
     private var subtitleLayer: some View {
         if let text = controller.subtitleText {
-            Text(text)
-                .font(.system(size: fullscreen ? 20 : 14, weight: .semibold))
-                .foregroundColor(.white)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Color.black.opacity(0.67), in: RoundedRectangle(cornerRadius: 4))
-                .padding(.horizontal, 24)
-                .padding(.bottom, overlay.controlsVisible ? bottomBarHeight + 6 : (fullscreen ? 24 : 10))
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                .allowsHitTesting(false)
+            // 「字幕设置」 style (PlayerSurfaceView.swift).
+            PlayerSubtitleView(text: text, style: settings.player, fullscreen: fullscreen,
+                               minBottom: overlay.controlsVisible ? bottomBarHeight + 6 : 0)
         }
     }
 
@@ -228,6 +240,16 @@ struct PlayerChromeView: View {
             if let shot = controller.videoShot, !preview.cancelled {
                 PlayerSeekThumbnail(shot: shot, time: preview.target, height: thumbnailHeight)
             }
+            // The chapter the target falls into (分段信息).
+            if let chapter = controller.chapters.last(where: { $0.from <= preview.target }), !chapter.title.isEmpty,
+               !preview.cancelled {
+                Text(chapter.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .shadow(color: .black.opacity(0.6), radius: 2)
+                    .frame(maxWidth: min(size.width - 48, 360))
+            }
             PlayerPill {
                 Text("\(PlayerFormat.time(preview.target))/\(PlayerFormat.time(preview.duration))")
                     .monospacedDigit()
@@ -266,14 +288,23 @@ struct PlayerChromeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
         }
-        if !overlay.isLocked, let time = controller.resumeChipTime {
-            PlayerResumeChip(time: time,
-                             onRestart: { controller.restartFromBeginning() },
-                             onDismiss: { controller.dismissResumeChip() })
-                .padding(.leading, fullscreen ? 24 : 10)
-                .padding(.bottom, bottom)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                .transition(.opacity)
+        if !overlay.isLocked, controller.resumeChipTime != nil || controller.resumePartPrompt != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                if let prompt = controller.resumePartPrompt {
+                    PlayerResumePartChip(page: prompt.page,
+                                         onJump: { controller.acceptResumePart() },
+                                         onDismiss: { controller.dismissResumePart() })
+                }
+                if let time = controller.resumeChipTime {
+                    PlayerResumeChip(time: time,
+                                     onRestart: { controller.restartFromBeginning() },
+                                     onDismiss: { controller.dismissResumeChip() })
+                }
+            }
+            .padding(.leading, fullscreen ? 24 : 10)
+            .padding(.bottom, bottom)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            .transition(.opacity)
         }
     }
 
@@ -282,6 +313,12 @@ struct PlayerChromeView: View {
         if overlay.controlsVisible, !overlay.isLocked {
             VStack(spacing: 0) {
                 topBar
+                if fullscreen, let actions = controller.fullscreenActions {
+                    PlayerFullscreenActionRow(actions: actions, onInteraction: { overlay.poke() })
+                        .shadow(color: .black.opacity(0.5), radius: 2)
+                        .padding(.trailing, compact ? 8 : 16)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
                 Spacer(minLength: 0)
                 bottomBar
             }
@@ -294,10 +331,16 @@ struct PlayerChromeView: View {
                 .transition(.opacity)
         }
         if !overlay.controlsVisible || overlay.isLocked {
-            PlayerThinProgress(timeline: controller.timeline)
+            PlayerThinProgress(timeline: controller.timeline, segments: visibleSegments, clips: visibleClips)
                 .frame(maxHeight: .infinity, alignment: .bottom)
         }
     }
+
+    /// SmartSkip strips only while 广告跳过 is on (the analysis is kept for when it is turned on again).
+    private var visibleSegments: [AdSegment] { settings.smartSkip.enabled ? controller.adSegments : [] }
+
+    /// 片头/片尾 strips unless 「番剧片头/片尾」 is 禁用.
+    private var visibleClips: [PGCClipInfo] { settings.player.pgcSkipType == .disabled ? [] : controller.pgcClips }
 
     @ViewBuilder
     private var statsLayer: some View {
@@ -420,6 +463,12 @@ struct PlayerChromeView: View {
             }
             HStack(spacing: compact ? 4 : 12) {
                 playButton
+                // The vertical-video bar has no room: 上一集 / 分段 / 选集 are in ⋮ there.
+                if controller.hasPrevious, !compact {
+                    PlayerIconButton(systemName: "backward.end.fill", size: 18, label: "上一集") {
+                        act { controller.onPrevious?() }
+                    }
+                }
                 if controller.hasNext {
                     PlayerIconButton(systemName: "forward.end.fill", size: 18, label: "下一集") {
                         act { controller.onNext?() }
@@ -428,6 +477,12 @@ struct PlayerChromeView: View {
                 danmakuToggle
                 danmakuInput
                 Spacer(minLength: 4)
+                if !controller.chapters.isEmpty, !compact {
+                    PlayerTextButton(title: "分段") { open(.chapters) }
+                }
+                if controller.episodeEntries.count > 1, !compact {
+                    PlayerTextButton(title: "选集") { open(.episodes) }
+                }
                 if !controller.subtitleTracks.isEmpty {
                     PlayerTextButton(title: "字幕", highlighted: controller.selectedSubtitleId != nil) { open(.subtitle) }
                 }
@@ -468,7 +523,7 @@ struct PlayerChromeView: View {
 
     private var progressBar: some View {
         PlayerProgressBar(timeline: controller.timeline, chapters: controller.chapters,
-                          segments: controller.adSegments, clips: controller.pgcClips,
+                          segments: visibleSegments, clips: visibleClips,
                           onScrubBegan: {
                               overlay.beginHold()
                               controller.ensureVideoShot()

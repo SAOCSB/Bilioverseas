@@ -102,7 +102,7 @@ struct VideoCoinSheet: View {
 
 // MARK: - 收藏
 
-/// Folder picker with membership checkmarks; saves the difference with `VideoAPI.updateFav`.
+/// Folder picker with membership checkmarks and 新建收藏夹; saves the difference with `VideoAPI.updateFav`.
 struct VideoFavFolderSheet: View {
     let rid: Int64
     /// 2 = UGC archive (`aid`), 24 = PGC episode (`ep_id`).
@@ -116,6 +116,9 @@ struct VideoFavFolderSheet: View {
     @State private var loading = true
     @State private var errorText: String?
     @State private var saving = false
+    @State private var creating = false
+    /// The default folder preselected by `load` (nothing was favourited) and not touched since.
+    @State private var autoSelected: Int64?
 
     var body: some View {
         NavigationStack {
@@ -126,15 +129,25 @@ struct VideoFavFolderSheet: View {
                     StateMessageView(systemImage: "exclamationmark.triangle", message: errorText) {
                         Task { await load() }
                     }
-                } else if folders.isEmpty {
-                    StateMessageView(systemImage: "star", message: "还没有收藏夹")
                 } else {
                     List {
+                        createRow
                         ForEach(folders) { folder in
                             row(folder)
                         }
+                        if folders.isEmpty {
+                            Text("还没有收藏夹")
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                                .listRowSeparator(.hidden)
+                        }
                     }
                     .listStyle(.plain)
+                }
+            }
+            .sheet(isPresented: $creating) {
+                MineFavFolderEditSheet(folder: nil) { title, intro, isPrivate in
+                    await createFolder(title: title, intro: intro, isPrivate: isPrivate)
                 }
             }
             .navigationTitle("添加到收藏夹")
@@ -158,9 +171,25 @@ struct VideoFavFolderSheet: View {
         .task { await load() }
     }
 
+    private var createRow: some View {
+        Button {
+            creating = true
+        } label: {
+            Label("新建收藏夹", systemImage: "plus")
+                .font(.system(size: 15))
+                .foregroundColor(.biliPink)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(saving)
+    }
+
     private func row(_ folder: FavFolderState) -> some View {
         let isOn = selected.contains(folder.id)
         return Button {
+            autoSelected = nil
             if isOn { selected.remove(folder.id) } else { selected.insert(folder.id) }
         } label: {
             HStack(spacing: 10) {
@@ -200,14 +229,37 @@ struct VideoFavFolderSheet: View {
             let current = Set(list.filter(\.isFavorited).map(\.id))
             original = current
             selected = current
+            autoSelected = nil
             if current.isEmpty, let fallback = list.first(where: \.isDefault) ?? list.first {
                 // Like the official picker: preselect the default folder when nothing is selected yet.
                 selected = [fallback.id]
+                autoSelected = fallback.id
             }
         } catch {
             errorText = error.localizedDescription
         }
         loading = false
+    }
+
+    /// 新建收藏夹 from the picker: listed after the default folder and selected (instead of the default folder
+    /// when that was only preselected). `true` closes the editor.
+    private func createFolder(title: String, intro: String, isPrivate: Bool) async -> Bool {
+        do {
+            let folder = try await FavAPI.createFolder(title: title, intro: intro, isPrivate: isPrivate)
+            guard folder.id > 0 else { throw BiliError.other("创建收藏夹失败") }
+            let state = FavFolderState(id: folder.id, title: folder.title, count: 0, isFavorited: false,
+                                       isDefault: false, isPrivate: folder.isPrivate)
+            let index = folders.first?.isDefault == true ? 1 : 0
+            folders.insert(state, at: min(index, folders.count))
+            if let auto = autoSelected, selected == [auto] { selected = [] }
+            autoSelected = nil
+            selected.insert(folder.id)
+            ToastCenter.shared.show("已创建收藏夹")
+            return true
+        } catch {
+            ToastCenter.shared.show(error: error)
+            return false
+        }
     }
 
     private func save() async {

@@ -4,36 +4,57 @@ import SwiftUI
 /// recommend-reason tags. Filtered with `FeedFilter` scope `.popular`.
 struct PopularView: View {
     @ObservedObject var model: PagedListModel<VideoCard>
+    /// Re-taps of the 首页 tab bar item (scroll to top / refresh).
+    let reselect: FeedReselectSignal
     /// 排行榜 entry: switches the home pager to 排行 (hidden when nil).
     let onOpenRanking: (() -> Void)?
+    @State private var topTracker = FeedTopTracker()
+    @State private var isReselectRefreshing = false
 
-    init(model: PagedListModel<VideoCard>, onOpenRanking: (() -> Void)? = nil) {
+    init(model: PagedListModel<VideoCard>, reselect: FeedReselectSignal = FeedReselectSignal(),
+         onOpenRanking: (() -> Void)? = nil) {
         _model = ObservedObject(wrappedValue: model)
+        self.reselect = reselect
         self.onOpenRanking = onOpenRanking
     }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                PopularEntryRow(onOpenRanking: onOpenRanking)
-                    .padding(.top, 12)
-                    .padding(.bottom, 8)
-                ForEach(model.items) { card in
-                    HomeRouteLink(card.route) {
-                        HomeVideoRow(card: card)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    FeedTopAnchor(tracker: topTracker)
+                    LazyVStack(spacing: 0) {
+                        if isReselectRefreshing { FeedRefreshingRow() }
+                        PopularEntryRow(onOpenRanking: onOpenRanking)
+                            .padding(.top, 12)
+                            .padding(.bottom, 8)
+                        ForEach(model.items) { card in
+                            HomeRouteLink(card.route) {
+                                HomeVideoRow(card: card)
+                            }
+                            .videoCardMenu(card, remove: removeCards)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .onAppear { model.onItemAppear(card) }
+                        }
+                        ListFooter(isLoading: model.isLoading, hasMore: model.hasMore, isEmpty: model.isEmpty,
+                                   error: model.errorMessage, emptyText: "暂无热门视频") {
+                            Task { await model.loadMore() }
+                        }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .onAppear { model.onItemAppear(card) }
-                }
-                ListFooter(isLoading: model.isLoading, hasMore: model.hasMore, isEmpty: model.isEmpty,
-                           error: model.errorMessage, emptyText: "暂无热门视频") {
-                    Task { await model.loadMore() }
                 }
             }
+            .refreshable { await model.refresh() }
+            .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
+                await model.refresh()
+            }
         }
-        .refreshable { await model.refresh() }
         .task { await model.loadIfNeeded() }
+    }
+
+    private var removeCards: VideoCardActions.Remove {
+        let model = model
+        return { predicate in model.remove(where: predicate) }
     }
 }
 
@@ -157,6 +178,10 @@ final class PopularWeeklyModel: ObservableObject {
             await reload()
         }
     }
+
+    func remove(where predicate: (VideoCard) -> Bool) {
+        cards.removeAll(where: predicate)
+    }
 }
 
 /// 每周必看: one issue at a time, issue picker in the navigation bar.
@@ -183,6 +208,7 @@ struct PopularWeeklyView: View {
                     HomeRouteLink(card.route) {
                         HomeVideoRow(card: card)
                     }
+                    .videoCardMenu(card) { predicate in model.remove(where: predicate) }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                 }
@@ -248,6 +274,7 @@ struct PopularPreciousView: View {
                     HomeRouteLink(card.route) {
                         HomeVideoRow(card: card)
                     }
+                    .videoCardMenu(card) { predicate in model.remove(where: predicate) }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .onAppear { model.onItemAppear(card) }

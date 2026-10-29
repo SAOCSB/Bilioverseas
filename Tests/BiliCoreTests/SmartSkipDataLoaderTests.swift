@@ -251,16 +251,28 @@ final class SmartSkipDataLoaderTests: XCTestCase {
 
     // MARK: pipeline data + analyzer
 
+    /// `danmakuOK: false` → seg.so answers 412 and the XML is unreachable (a degraded load).
     private func pipelineTransport(chapters: [[String: Any]], desc: String = "",
-                                   subtitles: [[String: Any]] = [], subtitleBody: [[String: Any]] = []) -> SSFakeTransport {
+                                   subtitles: [[String: Any]] = [], subtitleBody: [[String: Any]] = [],
+                                   danmakuOK: Bool = false) -> SSFakeTransport {
         SSFakeTransport { request in
             if request.url.contains("/x/web-interface/view") { return self.envelope(self.sample(desc: desc)) }
             if request.url.contains("/x/player/") { return self.envelope(["view_points": chapters, "subtitle": ["subtitles": subtitles]]) }
-            if request.url.contains("/x/v2/dm/") { throw BiliError.http(status: 412) }
+            if request.url.contains("/x/v2/dm/") {
+                if danmakuOK { return SSFakeTransport.protobuf([(1, "前排")]) }
+                throw BiliError.http(status: 412)
+            }
             if request.url.hasSuffix(".json") { return SSFakeTransport.json(["body": subtitleBody]) }
-            throw NetworkFailure()   // XML unavailable
+            throw NetworkFailure()   // XML (and anything else) unavailable
         }
     }
+
+    /// Local detection only (no 空降助手 request), independent of the stored settings.
+    static let localOnly: SmartSkipSettings = {
+        var s = SmartSkipSettings()
+        s.sponsorBlockEnabled = false
+        return s
+    }()
 
     func testChaptersAndDescriptionStillDetectWhenBothDanmakuSourcesFail() async {
         for source in ["chapters", "description"] {
@@ -314,24 +326,89 @@ final class SmartSkipDataLoaderTests: XCTestCase {
     }
 
     func testAnalyzerEndToEndAndCache() async {
-        let transport = pipelineTransport(chapters: [["from": 90, "to": 120, "content": "广告"]])
-        let analyzer = SmartSkipAnalyzer(loader: SmartSkipDataLoader(transport: transport))
+        let transport = pipelineTransport(chapters: [["from": 90, "to": 120, "content": "广告"]], danmakuOK: true)
+        let analyzer = SmartSkipAnalyzer(loader: SmartSkipDataLoader(transport: transport), accountID: { 0 })
         let context = SmartSkipVideoContext(bvid: bvid, cid: 101, duration: 240, title: "Video", desc: "")
-        let segments = await analyzer.analyze(context)
+        let segments = await analyzer.analyze(context, settings: Self.localOnly)
         XCTAssertEqual(segments, [AdSegment(id: "90:120", start: 90, end: 120, requiresConfirmation: false, source: "chapters",
                                             reason: "explicit-ad-label", matchedKeywords: ["广告"])])
         let count = transport.requests.count
-        let again = await analyzer.analyze(context)
+        let again = await analyzer.analyze(context, settings: Self.localOnly)
         XCTAssertEqual(again, segments)
         XCTAssertEqual(transport.requests.count, count, "cached per video")
+    }
+
+    func testResultsComputedFromFailedRequestsAreNotCached() async {
+        // seg.so answers 412 and the XML is unreachable: the chapters still detect, but the next
+        // open must run again (upstream re-runs on every page load).
+        let transport = pipelineTransport(chapters: [["from": 90, "to": 120, "content": "广告"]])
+        let analyzer = SmartSkipAnalyzer(loader: SmartSkipDataLoader(transport: transport), accountID: { 0 })
+        let context = SmartSkipVideoContext(bvid: bvid, cid: 101, duration: 240, title: "Video", desc: "")
+        let first = await analyzer.analyze(context, settings: Self.localOnly)
+        XCTAssertEqual(first.map(\.id), ["90:120"])
+        let count = transport.requests.count
+        let again = await analyzer.analyze(context, settings: Self.localOnly)
+        XCTAssertEqual(again, first)
+        XCTAssertGreaterThan(transport.requests.count, count, "a degraded result is recomputed")
+    }
+
+    func testCacheIsPerAccount() async {
+        let account = SSAccountBox()
+        let transport = pipelineTransport(chapters: [], danmakuOK: true)
+        let analyzer = SmartSkipAnalyzer(loader: SmartSkipDataLoader(transport: transport), accountID: { account.mid })
+        let context = SmartSkipVideoContext(bvid: bvid, cid: 101, duration: 240, title: "Video", desc: "")
+        _ = await analyzer.analyze(context, settings: Self.localOnly)
+        let count = transport.requests.count
+        _ = await analyzer.analyze(context, settings: Self.localOnly)
+        XCTAssertEqual(transport.requests.count, count)
+        account.mid = 42   // logged in: AI subtitles may be available now
+        _ = await analyzer.analyze(context, settings: Self.localOnly)
+        XCTAssertGreaterThan(transport.requests.count, count)
+    }
+
+    func testLoadReportsFailedInputs() async {
+        let context = SmartSkipVideoContext(bvid: bvid, cid: 101, duration: 600, title: "", desc: "")
+        let zh: [[String: Any]] = [["lan": "zh-CN", "subtitle_url": "//x/zh.json"]]
+        let complete = await SmartSkipDataLoader(transport: pipelineTransport(chapters: [], subtitles: zh, danmakuOK: true)).load(context)
+        XCTAssertEqual(complete?.degraded, false)
+        XCTAssertEqual(complete?.context.danmaku?.count, 2)
+
+        let noDanmaku = await SmartSkipDataLoader(transport: pipelineTransport(chapters: [], subtitles: zh)).load(context)
+        XCTAssertEqual(noDanmaku?.degraded, true, "seg.so 412 + XML failure")
+        XCTAssertEqual(noDanmaku?.context.danmaku, [])
+
+        let playerDown = SSFakeTransport { request in
+            if request.url.contains("/x/player/") { throw BiliError.http(status: 412) }
+            return SSFakeTransport.protobuf([(1, "前排")])
+        }
+        let noPlayer = await SmartSkipDataLoader(transport: playerDown).load(context)
+        XCTAssertEqual(noPlayer?.degraded, true)
+        XCTAssertEqual(noPlayer?.context.chapters, [])
+
+        let bodyDown = SSFakeTransport { request in
+            if request.url.hasSuffix(".json") { throw NetworkFailure() }
+            return SSFakeTransport.protobuf([(1, "前排")])
+        }
+        let noBody = await SmartSkipDataLoader(transport: bodyDown)
+            .load(SmartSkipVideoContext(bvid: bvid, cid: 101, duration: 600, title: "", desc: "", chapters: [],
+                                        subtitleTracks: [SubtitleTrack(id: 1, lan: "zh-CN", lanDoc: "中文", url: "//x/zh.json", isAI: false)]))
+        XCTAssertEqual(noBody?.degraded, true)
+        XCTAssertEqual(noBody?.context.subtitleLines, [])
+
+        // The logged-out AI track has no URL: nothing to retry.
+        let aiOnly: [[String: Any]] = [["lan": "ai-zh", "subtitle_url": ""]]
+        let transport = pipelineTransport(chapters: [], subtitles: aiOnly, danmakuOK: true)
+        let loggedOut = await SmartSkipDataLoader(transport: transport).load(context)
+        XCTAssertEqual(loggedOut?.degraded, false)
+        XCTAssertFalse(transport.requests.contains { $0.url.hasSuffix(".json") })
     }
 
     func testAnalyzerReturnsNothingWhenTheCidCannotBeResolved() async {
         let transport = SSFakeTransport { _ in throw BiliError.http(status: 412) }
         let segments = await SmartSkipAnalyzer(loader: SmartSkipDataLoader(transport: transport))
-            .analyze(SmartSkipVideoContext(bvid: bvid, cid: 0, duration: 0, title: "", desc: ""))
+            .analyze(SmartSkipVideoContext(bvid: bvid, cid: 0, duration: 0, title: "", desc: ""), settings: SmartSkipSettings())
         XCTAssertEqual(segments, [])
-        XCTAssertEqual(transport.requests.count, 1, "only the view request")
+        XCTAssertEqual(transport.requests.count, 1, "only the view request (neither source runs without a cid)")
     }
 
     func testDetectIsThePurePipeline() {

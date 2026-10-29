@@ -266,6 +266,8 @@ enum SpaceAPI {
         case 2, 4, 5: FollowedUpsStore.shared.remove(mid)
         default: break
         }
+        // 拉黑 / 取消拉黑 also update FeedFilter's account blacklist.
+        if act == 5 { AccountBlacklistStore.shared.insert(mid) } else if act == 6 { AccountBlacklistStore.shared.remove(mid) }
     }
 
     /// Fills `FollowedUpsStore` with the logged-in user's followings (call after login / on launch).
@@ -283,6 +285,14 @@ enum SpaceAPI {
 
     static func follow(mid: Int64) async throws { try await modifyRelation(mid: mid, act: 1) }
     static func unfollow(mid: Int64) async throws { try await modifyRelation(mid: mid, act: 2) }
+
+    /// The signed-in user's relation to `fid` (`/x/relation`: 悄悄关注 / 已关注 / 已互关 / 特别关注 / 已拉黑).
+    /// `.notFollowing` when logged out.
+    static func relation(fid: Int64) async throws -> UserRelationState {
+        guard BiliHTTP.shared.isLoggedIn, fid > 0 else { return .notFollowing }
+        let data = try await BiliHTTP.shared.api(BiliHost.api + "/x/relation", query: ["fid": fid])
+        return UserRelationState(json: data)
+    }
 
     /// 关注列表. Other users' lists may be private (error 22115) or capped by the server.
     static func followings(mid: Int64, page: Int = 1, pageSize: Int = 20) async throws -> Page<UserBrief> {

@@ -5,6 +5,7 @@ import UIKit
 /// Side panel / sheet content of the player menus.
 enum PlayerPanel: String, Identifiable {
     case speed, quality, audio, codec, subtitle, aspect, sleepTimer, more
+    case playMode, chapters, episodes, smartSkip
     var id: String { rawValue }
 
     var title: String {
@@ -17,6 +18,10 @@ enum PlayerPanel: String, Identifiable {
         case .aspect: return "画面比例"
         case .sleepTimer: return "定时关闭"
         case .more: return "更多设置"
+        case .playMode: return "播放顺序"
+        case .chapters: return "分段信息"
+        case .episodes: return "选集"
+        case .smartSkip: return "广告跳过"
         }
     }
 }
@@ -25,14 +30,23 @@ enum PlayerSheet: Identifiable, Equatable {
     case danmakuSettings
     case danmakuSend
     case playerSettings
+    /// 「CDN 设置」: the 海外加速 settings inside the player.
+    case accelerationSettings
+    /// 「弹幕列表」.
+    case danmakuList
     case menu(PlayerPanel)
+    /// A sheet the page supplies (投币 / 收藏 from the fullscreen action row): `PlayerController.pageSheet`.
+    case page(String)
 
     var id: String {
         switch self {
         case .danmakuSettings: return "danmakuSettings"
         case .danmakuSend: return "danmakuSend"
         case .playerSettings: return "playerSettings"
+        case .accelerationSettings: return "accelerationSettings"
+        case .danmakuList: return "danmakuList"
         case .menu(let p): return "menu." + p.rawValue
+        case .page(let id): return "page." + id
         }
     }
 }

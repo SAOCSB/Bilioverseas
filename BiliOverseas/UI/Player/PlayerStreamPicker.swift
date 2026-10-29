@@ -196,4 +196,18 @@ enum PlayerStreamPicker {
             return (video: video, audio: audio)
         }
     }
+
+    /// `refreshURLs` of a 听视频 session, whose only track (passed as `video`) is the audio representation `audio`.
+    static func makeAudioOnlyRefresher(aid: Int64, bvid: String, cid: Int64, epId: Int64, seasonId: Int64,
+                                       audio: DashStream) -> () async throws -> (video: DashStream, audio: DashStream?) {
+        let audioId = audio.id
+        return {
+            let info = try await PlayerStreamPicker.fetchPlayInfo(aid: aid, bvid: bvid, cid: cid, epId: epId,
+                                                                  seasonId: seasonId, quality: 80)
+            guard let fresh = PlayerStreamPicker.allAudios(info).first(where: { $0.id == audioId }) else {
+                throw AccelerationEngineError.noAllowedURL
+            }
+            return (video: fresh, audio: nil)
+        }
+    }
 }

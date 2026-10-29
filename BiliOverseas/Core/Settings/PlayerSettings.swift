@@ -65,6 +65,55 @@ enum DoubleTapAction: String, Codable, CaseIterable, Identifiable {
     var title: String { self == .playPause ? "播放/暂停" : "左右快退/快进" }
 }
 
+/// 「播放顺序」: what happens when a video plays to its end.
+enum PlayRepeat: String, Codable, CaseIterable, Identifiable {
+    /// 播完暂停.
+    case pause
+    /// 顺序播放: next part / 合集 / episode; stop at the end of the list.
+    case listOrder
+    /// 单个循环.
+    case singleCycle
+    /// 列表循环: like `listOrder`, then back to the first item (a single video replays itself).
+    case listCycle
+    /// 自动连播: like `listOrder`, then the first related video.
+    case autoPlayRelated
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .pause: return "播完暂停"
+        case .listOrder: return "顺序播放"
+        case .singleCycle: return "单个循环"
+        case .listCycle: return "列表循环"
+        case .autoPlayRelated: return "自动连播"
+        }
+    }
+    /// One line for the settings footer / the in-player menu.
+    var explanation: String {
+        switch self {
+        case .pause: return "播完后暂停。"
+        case .listOrder: return "依次播放分P、合集或剧集，播完列表后停止。"
+        case .singleCycle: return "循环播放当前视频。"
+        case .listCycle: return "依次播放分P、合集或剧集，播完后从第一个重新开始。"
+        case .autoPlayRelated: return "依次播放分P、合集或剧集，之后自动播放相关推荐。"
+        }
+    }
+}
+
+/// 「番剧片头/片尾跳过类型」 for the PGC `clip_info_list` (SponsorBlock-style skip types).
+enum PGCClipSkipType: String, Codable, CaseIterable, Identifiable {
+    case always, skipOnce, manual, showOnly, disabled
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .always: return "总是跳过"
+        case .skipOnce: return "跳过一次"
+        case .manual: return "手动跳过"
+        case .showOnly: return "仅显示"
+        case .disabled: return "禁用"
+        }
+    }
+}
+
 struct PlayerSettings: SettingsGroup {
     /// Preferred `qn`; the highest available quality not above this is chosen.
     var preferredQuality: Int = VideoQuality.q1080.rawValue
@@ -81,8 +130,11 @@ struct PlayerSettings: SettingsGroup {
     /// Seconds for double-tap seek / arrow buttons.
     var seekStep: Double = 10
     var autoPlay: Bool = true
-    /// Play the next part / episode / related video automatically.
+    /// Play the next part / episode / related video automatically (the older 「自动连播」 switch; `playRepeat`
+    /// keeps it in sync, so it reads as "advance at the end").
     var autoNext: Bool = true
+    /// Stored 「播放顺序」. nil until the user picks one: saves from before it existed follow `autoNext`.
+    var playRepeatChoice: PlayRepeat? = nil
     var backgroundPlay: Bool = true
     var autoPiP: Bool = false
     /// Resume from the server-side history progress.
@@ -94,4 +146,37 @@ struct PlayerSettings: SettingsGroup {
     var speedOptions: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0]
     /// Show the BTR acceleration statistics overlay in the player.
     var showAccelerationStats: Bool = false
+    /// 「快速收藏」: tapping 收藏 on the video page favourites into the default folder; long press opens the picker.
+    var quickFavorite: Bool = false
+    /// 「番剧片头/片尾跳过类型」 (default 跳过一次, features.md §11.1).
+    var pgcSkipType: PGCClipSkipType = .skipOnce
+    /// 「左右侧滑动调节亮度/音量」 (features.md §1.6).
+    var slideVolumeBrightness: Bool = true
+    /// 「中间滑动进入/退出全屏」 (features.md §1.6).
+    var slideFullscreen: Bool = true
+    /// 「滑动快进/快退时长」: seconds a full-width horizontal swipe seeks (features.md §1.5).
+    var slideSeekSeconds: Double = 90
+    /// 「画面比例」 as a `PlayerAspectMode` raw value, kept across videos (features.md §3.6).
+    var aspectMode: String = "fit"
+    /// 「字幕设置」 (features.md §3.7): 字体大小 / 全屏字体大小 multipliers of the 16 pt base, 0.5 … 2.5.
+    var subtitleFontScale: Double = 1.0
+    var subtitleFontScaleFullscreen: Double = 1.5
+    /// 字体粗细 index 0 … 8 = w100 … w900 (UI shows index + 1).
+    var subtitleFontWeight: Int = 5
+    /// 描边粗细 0 … 5, drawn only when the background is fully transparent.
+    var subtitleStrokeWidth: Double = 2.0
+    /// 左右边距 0 … 100 and 底部边距 0 … 200 points (the bottom one is raised above visible controls).
+    var subtitlePaddingH: Double = 24
+    var subtitleBottomPadding: Double = 24
+    /// 背景不透明度 of the black box, 0 … 1.
+    var subtitleBgOpacity: Double = 0.67
+
+    /// 「播放顺序」 (`autoNext` on → 自动连播, off → 播完暂停 until a mode is chosen).
+    var playRepeat: PlayRepeat {
+        get { playRepeatChoice ?? (autoNext ? .autoPlayRelated : .pause) }
+        set {
+            playRepeatChoice = newValue
+            autoNext = newValue != .pause
+        }
+    }
 }

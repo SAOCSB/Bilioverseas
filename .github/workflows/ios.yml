@@ -11,6 +11,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+# Read-only by default; jobs that publish (Release asset, ci-smoke branch) ask for write themselves.
+permissions:
+  contents: read
+
 jobs:
   core-tests:
     name: Core unit tests (swift test)
@@ -38,6 +42,8 @@ jobs:
     name: Build unsigned IPA
     runs-on: macos-15
     timeout-minutes: 45
+    permissions:
+      contents: write # softprops/action-gh-release attaches the IPA to the Release on v* tags
     steps:
       - uses: actions/checkout@v4
       - name: Install XcodeGen

@@ -30,6 +30,7 @@ struct VideoIntroView: View {
     @State private var sheet: VideoIntroSheet?
     @State private var expanded = false
     @State private var unfollowMid: Int64?
+    @State private var confirmUnblock = false
 
     var body: some View {
         ScrollView {
@@ -61,6 +62,12 @@ struct VideoIntroView: View {
                             presenting: unfollowMid) { mid in
             Button("不再关注", role: .destructive) {
                 Task { await model.toggleFollow(mid: mid) }
+            }
+            Button("取消", role: .cancel) {}
+        }
+        .confirmationDialog("已将TA拉黑，解除拉黑后才能关注", isPresented: $confirmUnblock, titleVisibility: .visible) {
+            Button("解除拉黑", role: .destructive) {
+                Task { await model.unblockOwner() }
             }
             Button("取消", role: .cancel) {}
         }
@@ -143,16 +150,18 @@ struct VideoIntroView: View {
         return parts.isEmpty ? " " : parts.joined(separator: "    ")
     }
 
+    /// 「+ 关注」 / 已关注 / 悄悄关注 / 已互关 / 特别关注 / 已拉黑.
     private func followButton(mid: Int64) -> some View {
-        let following = model.isFollowing(mid)
+        let state = model.relationState(for: mid)
+        let plain = state == .notFollowing
         return Button {
             followTapped(mid)
         } label: {
-            Text(following ? "已关注" : "+ 关注")
+            Text(plain ? "+ 关注" : state.label)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundColor(following ? .secondary : .white)
+                .foregroundColor(plain ? .white : .secondary)
                 .frame(width: 72, height: 28)
-                .background(following ? Color(.secondarySystemFill) : Color.biliPink, in: RoundedRectangle(cornerRadius: 4))
+                .background(plain ? Color.biliPink : Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
         .disabled(model.busy.contains(.follow))
@@ -160,7 +169,9 @@ struct VideoIntroView: View {
 
     private func followTapped(_ mid: Int64) {
         guard requireLogin() else { return }
-        if model.isFollowing(mid) {
+        if model.relationState(for: mid) == .blocked {
+            confirmUnblock = true
+        } else if model.isFollowing(mid) {
             unfollowMid = mid
         } else {
             Task { await model.toggleFollow(mid: mid) }
@@ -833,12 +844,15 @@ struct VideoIntroView: View {
 
 // MARK: - Action row
 
-/// 点赞 (tap; hold ≈1.4 s for 一键三连 with a ring on 点赞/投币/收藏) · 投币 · 收藏 · 稍后再看 · 分享.
+/// 点赞 (tap; hold ≈1.4 s for 一键三连 with a ring on 点赞/投币/收藏) · 不喜欢 · 投币 · 收藏 · 稍后再看 · 分享.
 struct VideoIntroActionRow: View {
     @ObservedObject var model: VideoDetailModel
     let requireLogin: () -> Bool
     let onCoin: () -> Void
     let onFavorite: () -> Void
+
+    @ObservedObject private var settings = AppSettings.shared
+    @EnvironmentObject private var router: TabRouter
 
     @State private var ring: CGFloat = 0
     @State private var pressing = false
@@ -849,6 +863,7 @@ struct VideoIntroActionRow: View {
     var body: some View {
         HStack(spacing: 0) {
             likeItem
+            dislikeItem
             Button(action: onCoin) {
                 itemLabel(text: model.counts.coin > 0 ? Fmt.count(model.counts.coin) : "投币",
                           active: model.relation.coinCount > 0, ringed: true) {
@@ -856,17 +871,10 @@ struct VideoIntroActionRow: View {
                 }
             }
             .buttonStyle(.plain)
-            Button(action: onFavorite) {
-                itemLabel(text: model.counts.favorite > 0 ? Fmt.count(model.counts.favorite) : "收藏",
-                          active: model.relation.favored, ringed: true) {
-                    Image(systemName: model.relation.favored ? "star.fill" : "star")
-                        .font(.system(size: 21))
-                }
-            }
-            .buttonStyle(.plain)
+            favoriteItem
             Button {
                 guard requireLogin() else { return }
-                Task { await model.addToWatchLater() }
+                Task { await model.toggleWatchLater() }
             } label: {
                 itemLabel(text: "稍后再看", active: model.addedToWatchLater, ringed: false) {
                     Image(systemName: model.addedToWatchLater ? "clock.fill" : "clock")
@@ -895,6 +903,41 @@ struct VideoIntroActionRow: View {
         })
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("长按一键三连")
+    }
+
+    /// 点踩: an app endpoint that needs the TV QR login's access_key (web logins are offered 去登录).
+    private var dislikeItem: some View {
+        Button {
+            tapDislike()
+        } label: {
+            itemLabel(text: "不喜欢", active: model.relation.disliked, ringed: false) {
+                Image(systemName: model.relation.disliked ? "hand.thumbsdown.fill" : "hand.thumbsdown")
+                    .font(.system(size: 21))
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(model.busy.contains(.dislike))
+    }
+
+    /// 收藏 opens the folder picker. With 「快速收藏」 a tap favourites into the default folder (or removes the
+    /// favourite) and a long press opens the picker.
+    @ViewBuilder
+    private var favoriteItem: some View {
+        let label = itemLabel(text: model.counts.favorite > 0 ? Fmt.count(model.counts.favorite) : "收藏",
+                              active: model.relation.favored, ringed: true) {
+            Image(systemName: model.relation.favored ? "star.fill" : "star")
+                .font(.system(size: 21))
+        }
+        if settings.player.quickFavorite {
+            label
+                .onTapGesture { tapQuickFavorite() }
+                .onLongPressGesture(minimumDuration: 0.5) { onFavorite() }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("长按选择收藏夹")
+        } else {
+            Button(action: onFavorite) { label }
+                .buttonStyle(.plain)
+        }
     }
 
     @ViewBuilder
@@ -946,6 +989,23 @@ struct VideoIntroActionRow: View {
     private func tapLike() {
         guard requireLogin() else { return }
         Task { await model.toggleLike() }
+    }
+
+    private func tapDislike() {
+        guard requireLogin() else { return }
+        guard AuthService.shared.appAuth != nil else {
+            let router = self.router
+            ToastCenter.shared.show(VideoAPI.dislikeNeedsTVLoginMessage, duration: 3, actionTitle: "去登录") {
+                router.push(.login)
+            }
+            return
+        }
+        Task { await model.toggleDislike() }
+    }
+
+    private func tapQuickFavorite() {
+        guard requireLogin(), !model.busy.contains(.favorite) else { return }
+        Task { await model.quickFavorite() }
     }
 
     /// Hold 200 ms → haptic and a 1.2 s ring; releasing early reverses it over 400 ms.

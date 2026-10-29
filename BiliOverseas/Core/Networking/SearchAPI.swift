@@ -1,6 +1,6 @@
 import Foundation
 
-/// Search: hot words, suggestions, and typed search (video / user / bangumi / live).
+/// Search: hot words, suggestions, and typed search (video / user / bangumi / live / article).
 enum SearchAPI {
     static let riskMessage = "搜索被风控拦截，请稍后再试"
 
@@ -105,6 +105,12 @@ enum SearchAPI {
     static func searchLive(keyword: String, page: Int = 1) async throws -> Page<VideoCard> {
         let data = try await search(type: "live_room", keyword: keyword, page: page)
         return parseLive(data, page: page)
+    }
+
+    /// 专栏 (`search_type=article`): `.article` cards that open `https://www.bilibili.com/read/cv<id>`.
+    static func searchArticles(keyword: String, page: Int = 1) async throws -> Page<VideoCard> {
+        let data = try await search(type: "article", keyword: keyword, page: page)
+        return parseArticles(data, page: page)
     }
 
     /// `/x/web-interface/wbi/search/type` → `data`. Maps -412 / `v_voucher` captchas to `riskMessage`.
@@ -257,6 +263,30 @@ enum SearchAPI {
             let areas = j["areas"].stringValue
             let styles = j["styles"].stringValue
             c.ownerName = [areas, styles].filter { !$0.isEmpty }.joined(separator: " · ")
+            return c
+        }
+        let (hasMore, next) = pagination(data, page: page, itemCount: cards.count)
+        return Page(items: cards, hasMore: hasMore, next: next)
+    }
+
+    /// Article hits (`id` = cvid, `image_urls[]`, `view`, `like`, `reply`, `mid`, `pub_time`,
+    /// `category_name`). `reason` = category, `danmakuCount` = comments (`reply`).
+    static func parseArticles(_ data: JSON, page: Int) -> Page<VideoCard> {
+        let cards: [VideoCard] = resultList(data, type: "article").compactMap { j in
+            let cv = j["id"].int64Value
+            guard cv > 0 else { return nil }
+            var c = VideoCard(id: "cv\(cv)")
+            c.kind = .article
+            c.title = ListMapping.plainText(j["title"].stringValue)
+            c.cover = ListMapping.image(j["image_urls"].arrayValue.first ?? .null)
+            c.desc = ListMapping.plainText(j["desc"].stringValue)
+            c.ownerMid = j["mid"].int64Value
+            c.viewCount = ListMapping.count(j["view"])
+            c.likeCount = ListMapping.count(j["like"])
+            c.danmakuCount = ListMapping.count(j["reply"])
+            c.pubdate = j["pub_time"].int64Value
+            c.reason = j["category_name"].stringValue
+            c.uri = "https://www.bilibili.com/read/cv\(cv)"
             return c
         }
         let (hasMore, next) = pagination(data, page: page, itemCount: cards.count)

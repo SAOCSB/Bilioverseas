@@ -1,7 +1,9 @@
 import SwiftUI
 import SafariServices
 
-/// Global lightweight toast ("已投币", "已跳过广告" …). Shown by `RootTabView`.
+/// Global lightweight toast ("已投币", "已跳过广告" …). `ToastWindowHost` (App/ToastWindow.swift) shows it above
+/// everything the app presents (sheets, full-screen covers, the fullscreen player), so calling `show` from anywhere
+/// is enough.
 @MainActor
 final class ToastCenter: ObservableObject {
     static let shared = ToastCenter()
@@ -14,8 +16,19 @@ final class ToastCenter: ObservableObject {
         static func == (a: Toast, b: Toast) -> Bool { a.id == b.id }
     }
 
-    @Published var current: Toast?
+    @Published var current: Toast? {
+        didSet { windowLayer?(current != nil) }
+    }
+    /// True once a window layer is attached; the in-view `ToastOverlay` copies then draw nothing.
+    @Published private(set) var isHostedInWindow = false
+    private var windowLayer: ((_ visible: Bool) -> Void)?
     private var hideTask: Task<Void, Never>?
+
+    /// `ToastWindowHost`: told whenever a toast appears or goes away, so it can show / hide its window.
+    func attachWindowLayer(_ visibilityChanged: @escaping (_ visible: Bool) -> Void) {
+        windowLayer = visibilityChanged
+        isHostedInWindow = true
+    }
 
     func show(_ text: String, duration: TimeInterval = 2.0, actionTitle: String? = nil, action: (() -> Void)? = nil) {
         current = Toast(text: text, actionTitle: actionTitle, action: action)
@@ -31,10 +44,23 @@ final class ToastCenter: ObservableObject {
     }
 }
 
+/// The toast capsule, 90 pt above the bottom safe area. `ToastWindowHost` hosts it in its pass-through window;
+/// an in-view copy (`.overlay { ToastOverlay() }`) is only a fallback for the moment before that window exists.
 struct ToastOverlay: View {
     @ObservedObject var center = ToastCenter.shared
+    /// Set by the toast window: receives the frame (window coordinates) of a toast that has an action button, the
+    /// only place the window takes touches; nil when there is none.
+    var onInteractiveFrame: ((CGRect?) -> Void)? = nil
 
     var body: some View {
+        if onInteractiveFrame == nil && center.isHostedInWindow {
+            EmptyView()
+        } else {
+            layer
+        }
+    }
+
+    private var layer: some View {
         VStack {
             Spacer()
             if let toast = center.current {
@@ -48,6 +74,10 @@ struct ToastOverlay: View {
                 }
                 .padding(.horizontal, 16).padding(.vertical, 10)
                 .background(.black.opacity(0.78), in: Capsule())
+                .background(GeometryReader { proxy in
+                    Color.clear.preference(key: ToastInteractiveFrameKey.self,
+                                           value: toast.action == nil ? nil : proxy.frame(in: .global))
+                })
                 .padding(.bottom, 90)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .id(toast.id)
@@ -55,6 +85,14 @@ struct ToastOverlay: View {
         }
         .animation(.easeInOut(duration: 0.2), value: center.current)
         .allowsHitTesting(center.current?.action != nil)
+        .onPreferenceChange(ToastInteractiveFrameKey.self) { frame in onInteractiveFrame?(frame) }
+    }
+}
+
+private struct ToastInteractiveFrameKey: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
     }
 }
 

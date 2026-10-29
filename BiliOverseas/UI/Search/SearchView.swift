@@ -372,6 +372,16 @@ struct SearchView: View {
             keyword = fallback
         }
         guard !keyword.isEmpty else { return }
+        // A BV / av id or a bilibili.com / b23.tv link (also inside pasted share text) opens that page instead.
+        if BiliLinkParser.parse(text: keyword) != nil {
+            fieldFocused = false
+            let text = keyword
+            Task {
+                let target = await BiliLinkResolver.resolve(text: text)
+                router.push(target?.route ?? .search(keyword: text))
+            }
+            return
+        }
         history.add(keyword)
         fieldFocused = false
         router.push(.search(keyword: keyword))

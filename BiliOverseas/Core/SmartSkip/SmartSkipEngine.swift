@@ -11,8 +11,9 @@
 //   2. Periodic time observer (≤ 0.25 s) and on play/pause changes:
 //      `tracker.update(time:isPlaying:now:)` → apply the returned `SmartSkipAction`.
 //      `.autoSkip(seg)`: seek to `seg.seekTarget` with zero tolerance, then `tracker.didSeek(to:)`;
-//      toast "已跳过广告" with "撤销" → `tracker.undo(seg)` returns the time to seek back to.
-//      `.showPrompt(seg, remaining)`: show `SmartSkipPromptView`; `.hidePrompt`: hide it.
+//      toast `seg.skippedToast` ("已跳过广告") with "撤销" → `tracker.undo(seg)` returns the time to seek back to.
+//      `.showPrompt(seg, remaining)`: show `SmartSkipPromptView` (`seg.promptTitle`); `.hidePrompt`: hide it.
+//      Segments with `displayOnly` (空降助手 仅显示) are only drawn; the tracker drops them.
 //   3. Prompt tap → `if let t = tracker.userSkipped(seg) { seek(t) }`; ✕ → `tracker.userDismissed(seg)`.
 //   4. User scrubs → `tracker.didSeek(to:)`. Player item replaced (same video) → `replaceSegments`.
 
@@ -153,21 +154,33 @@ enum SmartSkipPipeline {
 
 /// One interval to skip, as handed to the player.
 struct AdSegment: Identifiable, Hashable {
-    /// Stable per detection: the upstream skip-history key `"start:end"` (segments never overlap).
+    /// Stable per detection: the upstream skip-history key `"start:end"` (local detections never
+    /// overlap); `sponsorblock:<UUID>` for community segments.
     let id: String
     let start: Double
     let end: Double
     /// `true` → only a manual 「跳过广告」 prompt (never auto-skipped); `false` → may auto-skip.
     let requiresConfirmation: Bool
-    /// `chapters`, `description`, `danmaku-time`, `subtitles`, `danmaku-keywords`, `segment-detector`.
+    /// `chapters`, `description`, `danmaku-time`, `subtitles`, `danmaku-keywords`, `segment-detector`;
+    /// `sponsorblock` (「空降助手」).
     let source: String
     /// Machine-readable reason, e.g. `explicit-ad-label`, `explicit-danmaku-skip`,
-    /// `complete-sponsor-break`, `cross-source-boundary-conflict`.
+    /// `complete-sponsor-break`, `cross-source-boundary-conflict`; the category (`sponsor`, `intro` …)
+    /// for `sponsorblock`.
     let reason: String
     let matchedKeywords: [String]
+    /// 空降助手 总是跳过: auto-skipped on every entry, not only the first (auto mode only).
+    let alwaysSkip: Bool
+    /// 空降助手 仅显示: drawn on the progress bar only; `SmartSkipTracker` ignores it.
+    let displayOnly: Bool
+    /// 空降助手 短标题 (「赞助」「开场动画」…) for the button and toast; `nil` = a local ad detection.
+    let label: String?
+    /// Strip colour `0xRRGGBB` (空降助手 category colour); `nil` = the default ad colours.
+    let color: UInt32?
 
     init(id: String? = nil, start: Double, end: Double, requiresConfirmation: Bool, source: String,
-         reason: String = "", matchedKeywords: [String] = []) {
+         reason: String = "", matchedKeywords: [String] = [], alwaysSkip: Bool = false, displayOnly: Bool = false,
+         label: String? = nil, color: UInt32? = nil) {
         self.id = id ?? "\(SmartSkipJS.numberString(start)):\(SmartSkipJS.numberString(end))"
         self.start = start
         self.end = end
@@ -175,6 +188,10 @@ struct AdSegment: Identifiable, Hashable {
         self.source = source
         self.reason = reason
         self.matchedKeywords = matchedKeywords
+        self.alwaysSkip = alwaysSkip
+        self.displayOnly = displayOnly
+        self.label = label
+        self.color = color
     }
 
     init(_ segment: SmartSkipSegment) {
@@ -187,38 +204,89 @@ struct AdSegment: Identifiable, Hashable {
     /// upstream's `end + 0.05`, so CMTime rounding cannot land back inside the ad.
     var seekTarget: Double { end + 0.05 }
     var duration: Double { end - start }
+
+    /// Title of the manual skip button: 「跳过广告」 / 「跳过疑似广告」, 「跳过: 赞助」 for 空降助手.
+    var promptTitle: String {
+        if let label { return "跳过: \(label)" }
+        return requiresConfirmation ? "跳过疑似广告" : "跳过广告"
+    }
+
+    /// Toast after a skip: 「已跳过广告」, 「已跳过赞助片段」 for 空降助手 (features.md §11.4).
+    var skippedToast: String { label.map { "已跳过\($0)片段" } ?? "已跳过广告" }
 }
 
 // MARK: - Analyzer
 
 /// Public detection entry. Fills missing data (view / player / danmaku / subtitle requests as
-/// upstream `api.js`), runs the master pipeline off the main actor and caches per video.
+/// upstream `api.js`), runs the master pipeline off the main actor and caches per video. With
+/// 「空降助手」 on, the BilibiliSponsorBlock segments are fetched alongside and merged in
+/// (`SponsorBlockSource.merge`).
 actor SmartSkipAnalyzer {
     static let shared = SmartSkipAnalyzer()
 
     private let loader: SmartSkipDataLoader
+    private let sponsorBlock: SponsorBlockClient
+    private let accountID: @Sendable () -> Int64
+    /// Local detections per account + video part. Only results from complete inputs are kept:
+    /// upstream re-runs on every page load, so one failed request must not stick for the session.
     private var cache: [String: [AdSegment]] = [:]
     private var cacheOrder: [String] = []
+    /// Raw community rows per server + video part (successful lookups only, 404 included).
+    private var sponsorCache: [String: [SponsorBlockSegment]] = [:]
+    private var sponsorCacheOrder: [String] = []
     private let cacheLimit = 16
 
-    init(loader: SmartSkipDataLoader = SmartSkipDataLoader()) {
+    /// `sponsorBlock` defaults to the loader's transport; `accountID` (the logged-in mid, `0` when
+    /// logged out) is part of the cache key: logging in can unlock AI subtitles.
+    init(loader: SmartSkipDataLoader = SmartSkipDataLoader(), sponsorBlock: SponsorBlockClient? = nil,
+         accountID: @escaping @Sendable () -> Int64 = { BiliHTTP.shared.mid ?? 0 }) {
         self.loader = loader
+        self.sponsorBlock = sponsorBlock ?? SponsorBlockClient(transport: loader.transport)
+        self.accountID = accountID
     }
 
     /// Returns the segments to skip, sorted by start (empty when nothing is found, the cid
-    /// cannot be resolved, or the task was cancelled).
-    func analyze(_ context: SmartSkipVideoContext) async -> [AdSegment] {
-        let key = "\(context.bvid.isEmpty ? "av\(context.aid)" : context.bvid):\(context.cid):\(context.page)"
-        if context.cid > 0, let hit = cache[key] { return hit }
-        guard let complete = await loader.complete(context), !Task.isCancelled else { return [] }
-        let segments = SmartSkipPipeline.getSkipSegments(complete.inputs).map(AdSegment.init)
+    /// cannot be resolved, or the task was cancelled). `settings` picks the sources and the
+    /// 空降助手 per-category rules; it is read on the caller's actor.
+    func analyze(_ context: SmartSkipVideoContext, settings: SmartSkipSettings = AppSettings.shared.smartSkip) async -> [AdSegment] {
+        guard settings.localDetection || settings.sponsorBlockEnabled else { return [] }
+        guard let resolved = await loader.resolve(context), !Task.isCancelled else { return [] }
+        async let local: [AdSegment] = settings.localDetection ? detectLocally(resolved) : []
+        async let community: [SponsorBlockSegment] = settings.sponsorBlockEnabled
+            ? communitySegments(resolved, server: settings.sponsorBlockServer) : []
+        let (localSegments, rows) = await (local, community)
         guard !Task.isCancelled else { return [] }
-        let storeKey = "\(complete.bvid.isEmpty ? "av\(complete.aid)" : complete.bvid):\(complete.cid):\(complete.page)"
-        cache[storeKey] = segments
-        cacheOrder.removeAll { $0 == storeKey }
-        cacheOrder.append(storeKey)
-        if cacheOrder.count > cacheLimit { cache[cacheOrder.removeFirst()] = nil }
+        return SponsorBlockSource.merge(local: localSegments,
+                                        sponsor: SponsorBlockSource.adSegments(rows, settings: settings))
+    }
+
+    /// The BiliSmartSkip pipeline on the completed inputs (cached when nothing failed).
+    private func detectLocally(_ context: SmartSkipVideoContext) async -> [AdSegment] {
+        let key = "\(accountID()):\(context.bvid.isEmpty ? "av\(context.aid)" : context.bvid):\(context.cid):\(context.page)"
+        if let hit = cache[key] { return hit }
+        guard let loaded = await loader.load(context), !Task.isCancelled else { return [] }
+        let segments = SmartSkipPipeline.getSkipSegments(loaded.context.inputs).map(AdSegment.init)
+        guard !Task.isCancelled else { return [] }
+        if !loaded.degraded { Self.store(segments, key, in: &cache, order: &cacheOrder, limit: cacheLimit) }
         return segments
+    }
+
+    /// 空降助手 rows of the part; a failed lookup is `[]` and not cached (the next open retries).
+    private func communitySegments(_ context: SmartSkipVideoContext, server: String) async -> [SponsorBlockSegment] {
+        let bvid = context.bvid.isEmpty && context.aid > 0 ? BVConverter.av2bv(context.aid) : context.bvid
+        let key = "\(server)|\(bvid):\(context.cid)"
+        if let hit = sponsorCache[key] { return hit }
+        guard let rows = await sponsorBlock.skipSegments(bvid: bvid, cid: context.cid, server: server),
+              !Task.isCancelled else { return [] }
+        Self.store(rows, key, in: &sponsorCache, order: &sponsorCacheOrder, limit: cacheLimit)
+        return rows
+    }
+
+    private static func store<T>(_ value: T, _ key: String, in cache: inout [String: T], order: inout [String], limit: Int) {
+        cache[key] = value
+        order.removeAll { $0 == key }
+        order.append(key)
+        if order.count > limit { cache[order.removeFirst()] = nil }
     }
 
     /// Pure, synchronous detection on complete data (no network).
@@ -229,6 +297,8 @@ actor SmartSkipAnalyzer {
     func clearCache() {
         cache = [:]
         cacheOrder = []
+        sponsorCache = [:]
+        sponsorCacheOrder = []
     }
 }
 
@@ -255,7 +325,10 @@ enum SmartSkipAction: Equatable {
 ///   playing and not interacting, keeps partial seconds, never seeks on expiry, and is not shown
 ///   again during the same visit after expiry / ✕. Leaving the interval or seeking ends a visit.
 /// * Mode changes apply on the next update. Skip history survives `replaceSegments`.
+/// * 空降助手 (native addition): `displayOnly` segments are left out; an `alwaysSkip` segment is
+///   auto-skipped on every entry in auto mode, except while the user watches it after 「撤销」.
 final class SmartSkipTracker {
+    /// The actionable segments (`displayOnly` ones removed), sorted by start.
     private(set) var segments: [AdSegment]
     var mode: SmartSkipMode
     /// Prompt countdown length in seconds.
@@ -289,7 +362,7 @@ final class SmartSkipTracker {
     private var interacting = false
 
     init(segments: [AdSegment], mode: SmartSkipMode, countdownSeconds: Double = Double(SmartSkipConstants.countdown)) {
-        self.segments = SmartSkipJS.stableSorted(segments) { $0.start - $1.start }
+        self.segments = SmartSkipJS.stableSorted(segments.filter { !$0.displayOnly }) { $0.start - $1.start }
         self.mode = mode
         self.countdownSeconds = countdownSeconds
     }
@@ -323,7 +396,8 @@ final class SmartSkipTracker {
         }
 
         let skipped = skippedSegmentIDs.contains(segment.id)
-        if mode == .auto && !skipped && !segment.requiresConfirmation {
+        let skipAgain = segment.alwaysSkip && undone?.segmentID != segment.id
+        if mode == .auto && (!skipped || skipAgain) && !segment.requiresConfirmation {
             markSkipped(segment, origin: time, now: now)
             isPromptVisible = false
             return .autoSkip(segment)
@@ -332,8 +406,11 @@ final class SmartSkipTracker {
         if undone?.segmentID == segment.id { return finish(nil) }   // user chose to watch it
         switch visit?.prompt ?? .finished {
         case .notShown:
-            visit?.prompt = .visible(remaining: countdownSeconds)
-            return finish((segment, countdownSeconds))
+            // skipper.js §10.2: only a suspicious segment counts down; a trusted one (manual mode, or a
+            // skipped one entered again) keeps its 「跳过广告」 button until the interval is left (∞ never expires).
+            let initial = segment.requiresConfirmation ? countdownSeconds : .infinity
+            visit?.prompt = .visible(remaining: initial)
+            return finish((segment, initial))
         case .visible(let remaining):
             if remaining <= 0 {
                 visit?.prompt = .finished
@@ -361,6 +438,13 @@ final class SmartSkipTracker {
     func userDismissed(_ segment: AdSegment) {
         if visit?.segmentID == segment.id { visit?.prompt = .finished }
         isPromptVisible = false
+    }
+
+    /// Skipped from outside the prompt (the player's segment list): joins the skip history, so auto mode
+    /// does not skip it again. The caller seeks; no seek is awaited here.
+    func markSkipped(id: String) {
+        guard segments.contains(where: { $0.id == id }) else { return }
+        skippedSegmentIDs.insert(id)
     }
 
     /// Any seek (our own skip completing, or the user scrubbing) ends the current visit; the
@@ -395,7 +479,7 @@ final class SmartSkipTracker {
 
     /// Same video, new segment list or a replaced player item: keeps the skip history.
     func replaceSegments(_ newSegments: [AdSegment]) {
-        segments = SmartSkipJS.stableSorted(newSegments) { $0.start - $1.start }
+        segments = SmartSkipJS.stableSorted(newSegments.filter { !$0.displayOnly }) { $0.start - $1.start }
         visit = nil
         pendingSeek = nil
     }

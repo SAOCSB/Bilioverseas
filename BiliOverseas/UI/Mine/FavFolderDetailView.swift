@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Contents of one 收藏夹 (or, for a negative `folderId`, of the subscribed UGC 合集 `-folderId`;
-/// see `FavoritesView`). Header, search, 排序, paged rows, swipe to 取消收藏 in own folders,
-/// optional 已失效 items (greyed) and 清除失效内容.
+/// see `FavoritesView`). Header, 播放全部, search, 排序, paged rows, swipe to 取消收藏 in own folders,
+/// optional 已失效 items (greyed) and 清除失效内容. Opening an item plays on through the folder.
 struct FavFolderDetailView: View {
     let folderId: Int64
     let title: String
@@ -19,7 +19,7 @@ struct FavFolderDetailView: View {
     }
 
     var body: some View {
-        MineFavDetailList(model: model, list: model.list, fallbackTitle: title) { openCard($0) }
+        MineFavDetailList(model: model, list: model.list, fallbackTitle: title, onPlayAll: { playAll() }) { openCard($0) }
             .id(model.generation)
             .modifier(MineFavSearchModifier(enabled: !model.isSeason, text: $searchText) {
                 model.setKeyword(searchText)
@@ -75,7 +75,19 @@ struct FavFolderDetailView: View {
 
     private func openCard(_ card: VideoCard) {
         guard !MineFavDetailModel.isInvalid(card), let route = card.route else { return }
-        router.push(route)
+        if case .video(var ref) = route {
+            ref.playlist = model.makePlaylist(title: model.displayTitle(fallback: title))
+            router.push(.video(ref))
+        } else {
+            router.push(route)
+        }
+    }
+
+    private func playAll() {
+        let playlist = model.makePlaylist(title: model.displayTitle(fallback: title))
+        guard var first = playlist.items.first else { return }
+        first.playlist = playlist
+        router.push(.video(first))
     }
 }
 
@@ -162,6 +174,27 @@ final class MineFavDetailModel: ObservableObject {
         }
     }
 
+    /// 播放全部 list: the loaded rows (valid videos only), then the folder's further pages in the same order /
+    /// search. Pages hold at most 20 rows, so `rows / 20 + 1` never skips one (`VideoPlaylist` drops overlap).
+    func makePlaylist(title: String) -> VideoPlaylist {
+        let refs = list.items.filter { !MineFavDetailModel.isInvalid($0) }.compactMap(MineListFormat.playlistRef)
+        let id = mediaId
+        let season = isSeason
+        let order = self.order
+        let keyword = self.keyword
+        return VideoPlaylist(title: title, items: refs, nextPage: list.items.count / 20 + 1,
+                             hasMore: list.hasMore) { @MainActor page in
+            let p: Page<VideoCard>
+            if season {
+                p = try await FavAPI.seasonContents(seasonId: id, page: page)
+            } else {
+                p = try await FavAPI.folderContents(mediaId: id, page: page, keyword: keyword, order: order)
+            }
+            let items = p.items.filter { !MineFavDetailModel.isInvalid($0) }.compactMap(MineListFormat.playlistRef)
+            return Page(items: items, hasMore: p.hasMore, next: p.next)
+        }
+    }
+
     func cleanInvalid() async {
         do {
             try await FavAPI.cleanInvalid(mediaId: mediaId)
@@ -211,6 +244,7 @@ struct MineFavDetailList: View {
     @ObservedObject var model: MineFavDetailModel
     @ObservedObject var list: PagedListModel<VideoCard>
     let fallbackTitle: String
+    let onPlayAll: () -> Void
     let onOpen: (VideoCard) -> Void
 
     var body: some View {
@@ -219,6 +253,17 @@ struct MineFavDetailList: View {
                                 isSeason: model.isSeason, keyword: model.keyword)
                 .listRowInsets(EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12))
                 .listRowSeparator(.hidden)
+
+            if list.items.contains(where: { !MineFavDetailModel.isInvalid($0) }) {
+                Button(action: onPlayAll) {
+                    Label("播放全部", systemImage: "play.circle.fill")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundColor(.biliPink)
+                }
+                .buttonStyle(.borderless)
+                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 6, trailing: 12))
+                .listRowSeparator(.hidden)
+            }
 
             ForEach(list.items) { card in
                 let invalid = MineFavDetailModel.isInvalid(card)

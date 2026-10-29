@@ -169,8 +169,15 @@ enum AboutLicenseTexts {
               author: "Bilibili-thread-ripper contributors",
               license: "MIT",
               usage: "海外加速的多线程下载、多 CDN 选择、自动线程数与调度算法移植自该项目。",
-              text: btrMIT,
+              text: mitText(copyright: "Copyright (c) 2026 Bilibili-thread-ripper contributors"),
               url: URL(string: "https://github.com/MrTangLuyao/Bilibili-thread-ripper")),
+        Entry(id: "btr-desktop",
+              name: "Bilibili-thread-ripper-desktop（线程撕裂者桌面版）",
+              author: "LouieTang",
+              license: "MIT",
+              usage: "单块请求轮换节点（inTurns）与小请求单连接规则移植自该项目。",
+              text: mitText(copyright: "Copyright (c) 2026 LouieTang"),
+              url: URL(string: "https://github.com/MrTangLuyao/Bilibili-thread-ripper-desktop")),
         Entry(id: "smartskip",
               name: "BiliSmartSkip（Bilibili 广告跳过助手）",
               author: "wzy403",
@@ -189,9 +196,16 @@ enum AboutLicenseTexts {
               name: "PiliPlus",
               author: "bggRGjQaUbCoE 及贡献者",
               license: "GPL-3.0",
-              usage: "参考了其播放器手势、弹幕、推荐过滤与设置项的交互行为和接口协议。",
+              usage: "参考了其播放器手势、弹幕、推荐过滤与设置项的交互行为和接口协议，以及其 BTR 移植分支的代理行为（仅参考，未包含其代码）。",
               text: gpl3Notice,
               url: URL(string: "https://github.com/bggRGjQaUbCoE/PiliPlus")),
+        Entry(id: "canvas-danmaku",
+              name: "canvas_danmaku",
+              author: "Predidit",
+              license: "MIT",
+              usage: "弹幕的轨道布局与滚动参数参考了该弹幕渲染库（未包含其代码）。",
+              text: mitText(copyright: "Copyright (c) 2024 Predidit"),
+              url: URL(string: "https://github.com/Predidit/canvas_danmaku")),
         Entry(id: "app",
               name: "B站海外加速版（本应用）",
               author: "bilbil_ios contributors",
@@ -201,11 +215,12 @@ enum AboutLicenseTexts {
               url: repositoryURL),
     ]
 
-    static let btrMIT = """
-    MIT License
+    /// The MIT license text with the project's own copyright line.
+    static func mitText(copyright: String) -> String {
+        "MIT License\n\n\(copyright)\n\n" + mitBody
+    }
 
-    Copyright (c) 2026 Bilibili-thread-ripper contributors
-
+    static let mitBody = """
     Permission is hereby granted, free of charge, to any person obtaining a copy \
     of this software and associated documentation files (the "Software"), to deal \
     in the Software without restriction, including without limitation the rights \

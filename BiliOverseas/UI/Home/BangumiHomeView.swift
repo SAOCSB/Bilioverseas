@@ -7,6 +7,8 @@ final class BangumiHomeModel: ObservableObject {
     @Published private(set) var days: [BangumiDay] = []
     @Published var selectedDayID: String?
     @Published private(set) var rank: [VideoCard] = []
+    /// 番剧排行 before `FeedFilter`, so edited rules re-filter it without a reload.
+    private var rawRank: [VideoCard] = []
     @Published private(set) var isLoading = false
     @Published private(set) var timelineError: String?
     @Published private(set) var rankError: String?
@@ -40,9 +42,9 @@ final class BangumiHomeModel: ObservableObject {
         }
         switch ranked {
         case .success(let list):
-            let allows = FeedFilter.liveFilter(scope: .ranking)
             var seen = Set<String>()
-            rank = list.filter { seen.insert($0.id).inserted && allows($0) }
+            rawRank = list.filter { seen.insert($0.id).inserted }
+            reapplyFilter()
             rankError = nil
         case .failure(let error):
             if ListMapping.isCancellation(error) { cancelled = true } else { rankError = error.localizedDescription }
@@ -53,6 +55,12 @@ final class BangumiHomeModel: ObservableObject {
         // missing) until a manual refresh, because loadIfNeeded() would never run again.
         if !cancelled, !days.isEmpty || !rank.isEmpty { hasLoaded = true }
         isLoading = false
+    }
+
+    /// The 屏蔽 rules changed: filter 番剧排行 again.
+    func reapplyFilter() {
+        let allows = FeedFilter.liveFilter(scope: .ranking)
+        rank = rawRank.filter { allows($0) }
     }
 
     /// 我的追番 (first page). Cleared when logged out.
@@ -72,24 +80,38 @@ final class BangumiHomeModel: ObservableObject {
 struct BangumiHomeView: View {
     @ObservedObject var model: BangumiHomeModel
     @ObservedObject private var auth = AuthService.shared
+    /// Re-taps of the 首页 tab bar item (scroll to top / refresh).
+    let reselect: FeedReselectSignal
     @State private var showAllRank = false
+    @State private var topTracker = FeedTopTracker()
+    @State private var isReselectRefreshing = false
 
-    init(model: BangumiHomeModel) {
+    init(model: BangumiHomeModel, reselect: FeedReselectSignal = FeedReselectSignal()) {
         _model = ObservedObject(wrappedValue: model)
+        self.reselect = reselect
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                if auth.isLoggedIn && !model.follows.isEmpty {
-                    followsSection
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    FeedTopAnchor(tracker: topTracker)
+                    if isReselectRefreshing { FeedRefreshingRow() }
+                    VStack(alignment: .leading, spacing: 22) {
+                        if auth.isLoggedIn && !model.follows.isEmpty {
+                            followsSection
+                        }
+                        timelineSection
+                        rankSection
+                    }
+                    .padding(.vertical, 12)
                 }
-                timelineSection
-                rankSection
             }
-            .padding(.vertical, 12)
+            .refreshable { await model.reload() }
+            .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
+                await model.reload()
+            }
         }
-        .refreshable { await model.reload() }
         .task { await model.loadIfNeeded() }
         .onChange(of: auth.isLoggedIn) { _ in
             Task { await model.loadFollows() }
@@ -129,7 +151,18 @@ struct BangumiHomeView: View {
 
     private var timelineSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HomeSectionHeader("新番时间表")
+            HomeSectionHeader("新番时间表") {
+                NavigationLink(value: Route.bangumiIndex(seasonType: 1)) {
+                    HStack(spacing: 2) {
+                        Text("番剧索引")
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
             if model.days.isEmpty {
                 if let error = model.timelineError {
                     BangumiInlineError(message: error) { Task { await model.reload() } }

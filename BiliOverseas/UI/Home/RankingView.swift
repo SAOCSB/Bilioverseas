@@ -54,6 +54,8 @@ struct RankingEntry: Identifiable, Hashable {
 final class RankingBoardModel: ObservableObject {
     @Published var zone: RankingZone
     @Published private(set) var entries: [RankingZone: [RankingEntry]] = [:]
+    /// Every loaded entry per zone before `FeedFilter`, so edited rules re-filter without a reload.
+    private var rawEntries: [RankingZone: [RankingEntry]] = [:]
     @Published private(set) var loadingZones: Set<RankingZone> = []
     @Published private(set) var errors: [RankingZone: String] = [:]
     /// Latest request per zone; an older (e.g. cancelled) request never overwrites a newer one.
@@ -86,14 +88,13 @@ final class RankingBoardModel: ObservableObject {
                 cards = try await BangumiAPI.rank(seasonType: seasonType)
             }
             guard tokens[z] == token else { return }
-            let allows = FeedFilter.liveFilter(scope: .ranking)
             var seen = Set<String>()
             var list: [RankingEntry] = []
-            for (index, card) in cards.enumerated() {
-                guard seen.insert(card.id).inserted, allows(card) else { continue }
+            for (index, card) in cards.enumerated() where seen.insert(card.id).inserted {
                 list.append(RankingEntry(rank: index + 1, card: card))
             }
-            entries[z] = list
+            rawEntries[z] = list
+            entries[z] = RankingBoardModel.filtered(list)
         } catch {
             guard tokens[z] == token else { return }
             if !ListMapping.isCancellation(error) {
@@ -106,14 +107,35 @@ final class RankingBoardModel: ObservableObject {
         }
         loadingZones.remove(z)
     }
+
+    /// The 屏蔽 rules changed: filter every loaded zone again (ranks keep their server positions).
+    func reapplyFilter() {
+        for (z, list) in rawEntries { entries[z] = RankingBoardModel.filtered(list) }
+    }
+
+    /// Hides matching entries in every zone (card menu: 屏蔽UP主).
+    func remove(where predicate: (VideoCard) -> Bool) {
+        for (z, list) in rawEntries { rawEntries[z] = list.filter { !predicate($0.card) } }
+        for (z, list) in entries { entries[z] = list.filter { !predicate($0.card) } }
+    }
+
+    private static func filtered(_ list: [RankingEntry]) -> [RankingEntry] {
+        let allows = FeedFilter.liveFilter(scope: .ranking)
+        return list.filter { allows($0.card) }
+    }
 }
 
 /// 排行: zone chip bar + numbered single-column list (1 / 2 / 3 highlighted).
 struct RankingView: View {
     @ObservedObject var model: RankingBoardModel
+    /// Re-taps of the 首页 tab bar item (scroll to top / refresh).
+    let reselect: FeedReselectSignal
+    @State private var topTracker = FeedTopTracker()
+    @State private var isReselectRefreshing = false
 
-    init(model: RankingBoardModel) {
+    init(model: RankingBoardModel, reselect: FeedReselectSignal = FeedReselectSignal()) {
         _model = ObservedObject(wrappedValue: model)
+        self.reselect = reselect
     }
 
     var body: some View {
@@ -129,26 +151,36 @@ struct RankingView: View {
     @ViewBuilder private var content: some View {
         let zone = model.zone
         if let list = model.entries[zone] {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(list) { entry in
-                        HomeRouteLink(entry.card.route) {
-                            if zone.isPGC {
-                                HomePGCRowCell(card: entry.card, rank: entry.rank, extra: entry.card.desc)
-                            } else {
-                                HomeVideoRow(card: entry.card, rank: entry.rank, showReason: false)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        FeedTopAnchor(tracker: topTracker)
+                        if isReselectRefreshing { FeedRefreshingRow() }
+                        LazyVStack(spacing: 0) {
+                            ForEach(list) { entry in
+                                HomeRouteLink(entry.card.route) {
+                                    if zone.isPGC {
+                                        HomePGCRowCell(card: entry.card, rank: entry.rank, extra: entry.card.desc)
+                                    } else {
+                                        HomeVideoRow(card: entry.card, rank: entry.rank, showReason: false)
+                                    }
+                                }
+                                .videoCardMenu(entry.card) { predicate in model.remove(where: predicate) }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
                             }
+                            ListFooter(isLoading: false, hasMore: false, isEmpty: list.isEmpty, error: nil,
+                                       emptyText: "暂无排行数据")
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
+                        .padding(.top, 4)
                     }
-                    ListFooter(isLoading: false, hasMore: false, isEmpty: list.isEmpty, error: nil,
-                               emptyText: "暂无排行数据")
                 }
-                .padding(.top, 4)
+                .refreshable { await model.reload() }
+                .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
+                    await model.reload()
+                }
             }
             .id(zone)
-            .refreshable { await model.reload() }
         } else if let error = model.errors[zone] {
             StateMessageView(systemImage: "exclamationmark.triangle", message: error) {
                 Task { await model.reload() }

@@ -17,6 +17,11 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
     private let fetch: (String?) async throws -> Page<Item>
     /// Optional post-filter (e.g. FeedFilter) applied to every page.
     var filter: ((Item) -> Bool)?
+    /// 「保留首页推荐刷新」: a refresh puts the new first page above the rows already shown (keeping at
+    /// most 50 of them once there are more than 200) instead of replacing them.
+    var keepOnRefresh = false
+    /// After such a refresh: the first row that was shown before it (「上次看到这里」), else nil.
+    @Published private(set) var lastSeenID: Item.ID?
 
     init(filter: ((Item) -> Bool)? = nil, fetch: @escaping (String?) async throws -> Page<Item>) {
         self.fetch = fetch
@@ -62,6 +67,7 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
         generation += 1
         items = newItems
         seen = Set(newItems.map(\.id))
+        lastSeenID = nil
         next = nil
         hasMore = true
         didLoad = !newItems.isEmpty
@@ -75,12 +81,22 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
         var emptyStreak = 0
         do {
             var cursor = reset ? nil : next
+            /// `keepOnRefresh`: where this refresh's rows go (above the kept ones).
+            var insertAt: Int?
             while true {
                 let page = try await fetch(cursor)
                 guard gen == generation else { return }
                 if reset && cursor == nil {
-                    items = []
-                    seen = []
+                    if keepOnRefresh && !items.isEmpty {
+                        if items.count > 200 { items = Array(items.prefix(50)) }
+                        seen = Set(items.map(\.id))
+                        lastSeenID = items.first?.id
+                        insertAt = 0
+                    } else {
+                        items = []
+                        seen = []
+                        lastSeenID = nil
+                    }
                 }
                 var fresh: [Item] = []
                 for item in page.items where !seen.contains(item.id) {
@@ -88,7 +104,12 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
                     seen.insert(item.id)
                     fresh.append(item)
                 }
-                items.append(contentsOf: fresh)
+                if let at = insertAt {
+                    items.insert(contentsOf: fresh, at: at)
+                    insertAt = at + fresh.count
+                } else {
+                    items.append(contentsOf: fresh)
+                }
                 next = page.next
                 hasMore = page.hasMore
                 didLoad = true

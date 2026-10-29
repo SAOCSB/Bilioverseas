@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Top tabs of 首页, in display order: 直播 first like the official app, 推荐 selected by default.
 enum HomeTopTab: Int, CaseIterable, Identifiable, Hashable {
@@ -31,7 +32,8 @@ extension Notification.Name {
     static let homeAvatarTapped = Notification.Name("BiliOverseas.homeAvatarTapped")
 }
 
-/// Keeps every home tab's list state alive while the user swipes between tabs.
+/// Keeps every home tab's list state alive while the user swipes between tabs. Edited filter rules
+/// apply to the rows already shown; logging in / out (or switching accounts) reloads 推荐.
 @MainActor
 final class HomeTabModels: ObservableObject {
     let recommend: PagedListModel<VideoCard>
@@ -39,10 +41,16 @@ final class HomeTabModels: ObservableObject {
     let ranking: RankingBoardModel
     let bangumi: BangumiHomeModel
     let live: LiveHomeModel
+    /// Re-taps of the 首页 tab bar item, per top tab (only the page shown reacts).
+    @Published private(set) var reselects: [HomeTopTab: FeedReselectSignal] = [:]
+
+    private var cancellables: Set<AnyCancellable> = []
+    /// Account 推荐 was loaded for (0 = logged out).
+    private var accountMid: Int64
 
     init() {
         recommend = PagedListModel<VideoCard>(filter: FeedFilter.liveFilter(scope: .recommend)) { cursor in
-            try await FeedAPI.recommend(cursor: cursor)
+            try await HomeTabModels.fetchRecommend(cursor: cursor, useAppFeed: AppSettings.shared.general.useAppFeed)
         }
         popular = PagedListModel<VideoCard>(filter: FeedFilter.liveFilter(scope: .popular)) { cursor in
             try await FeedAPI.popular(page: ListCursor.page(cursor))
@@ -50,6 +58,79 @@ final class HomeTabModels: ObservableObject {
         ranking = RankingBoardModel()
         bangumi = BangumiHomeModel()
         live = LiveHomeModel()
+        accountMid = BiliHTTP.shared.mid ?? 0
+        observe()
+    }
+
+    /// 推荐: the app feed (「首页使用app端推荐」), falling back to the web feed when it fails or comes
+    /// back empty; otherwise the web feed. Both count pages from 0, so the cursor works for either.
+    static func fetchRecommend(cursor: String?, useAppFeed: Bool) async throws -> Page<VideoCard> {
+        guard useAppFeed else { return try await FeedAPI.recommend(cursor: cursor) }
+        do {
+            let page = try await FeedAPI.appRecommend(cursor: cursor)
+            if !page.items.isEmpty { return page }
+        } catch {
+            if ListMapping.isCancellation(error) { throw error }
+        }
+        return try await FeedAPI.recommend(cursor: cursor)
+    }
+
+    func reselect(for tab: HomeTopTab) -> FeedReselectSignal {
+        reselects[tab] ?? FeedReselectSignal()
+    }
+
+    func fireReselect(_ tab: HomeTopTab, forceRefresh: Bool) {
+        reselects[tab, default: FeedReselectSignal()].fire(forceRefresh: forceRefresh)
+    }
+
+    private func observe() {
+        let settings = AppSettings.shared
+        // `@Published` emits before the value is stored; `receive(on:)` reads it once it is.
+        settings.$feedFilter
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.reapplyFilters() }
+            .store(in: &cancellables)
+        settings.$general
+            .map(\.keepRecommendOnRefresh)
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] keep in self?.recommend.keepOnRefresh = keep }
+            .store(in: &cancellables)
+        settings.$general
+            .map(\.useAppFeed)
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.reloadRecommend() }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: AuthService.loginStateDidChange)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.accountMayHaveChanged() }
+            .store(in: &cancellables)
+    }
+
+    /// The user edited the 屏蔽 rules: hide matching rows that are already on screen.
+    func reapplyFilters() {
+        recommend.reapplyFilter()
+        popular.reapplyFilter()
+        live.rooms.reapplyFilter()
+        ranking.reapplyFilter()
+        bangumi.reapplyFilter()
+    }
+
+    private func accountMayHaveChanged() {
+        let mid = BiliHTTP.shared.mid ?? 0
+        guard mid != accountMid else { return }
+        accountMid = mid
+        reloadRecommend()
+    }
+
+    /// Starts 推荐 over without keeping the old rows (another account's or another source's feed).
+    private func reloadRecommend() {
+        recommend.replace([])
+        Task { await recommend.refresh() }
     }
 }
 
@@ -71,17 +152,17 @@ struct HomeView: View {
             HomeTabStrip(tabs: HomeTopTab.allCases, selection: $selection) { $0.title }
             Divider()
             TabView(selection: $selection) {
-                LiveHomeView(model: models.live)
+                LiveHomeView(model: models.live, reselect: models.reselect(for: .live))
                     .tag(HomeTopTab.live)
-                RecommendFeedView(model: models.recommend)
+                RecommendFeedView(model: models.recommend, reselect: models.reselect(for: .recommend))
                     .tag(HomeTopTab.recommend)
-                PopularView(model: models.popular, onOpenRanking: {
+                PopularView(model: models.popular, reselect: models.reselect(for: .popular), onOpenRanking: {
                     withAnimation(.easeInOut(duration: 0.25)) { selection = .ranking }
                 })
                 .tag(HomeTopTab.popular)
-                RankingView(model: models.ranking)
+                RankingView(model: models.ranking, reselect: models.reselect(for: .ranking))
                     .tag(HomeTopTab.ranking)
-                BangumiHomeView(model: models.bangumi)
+                BangumiHomeView(model: models.bangumi, reselect: models.reselect(for: .bangumi))
                     .tag(HomeTopTab.bangumi)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
@@ -90,6 +171,11 @@ struct HomeView: View {
         .navigationTitle("首页")
         .toolbar(.hidden, for: .navigationBar)
         .task { await rotatePlaceholder() }
+        .onReceive(NotificationCenter.default.publisher(for: .mainTabReselected)) { note in
+            // Re-tapping 首页 at its root: the visible top tab scrolls up or refreshes.
+            guard note.object as? MainTab == .home else { return }
+            models.fireReselect(selection, forceRefresh: note.userInfo?[MainTab.forceRefreshKey] as? Bool ?? false)
+        }
     }
 
     // MARK: - Top bar
@@ -109,6 +195,8 @@ struct HomeView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("搜索")
+
+            HomeMessageBell()
         }
         .padding(.horizontal, 14)
         .padding(.top, 4)

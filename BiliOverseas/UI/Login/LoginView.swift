@@ -28,9 +28,11 @@ struct LoginView: View {
                 .padding(.horizontal, 32)
 
                 if model.mode == .tv {
-                    Text("TV 扫码登录（可获得 access_key）")
+                    Text("TV 扫码登录可获得 access_key，用于点踩等仅 App 端提供的功能")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
                 }
 
                 qrCard

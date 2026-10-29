@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// 设置 → 海外加速 (route `.settingsAcceleration`). Port of the Bilibili-thread-ripper (BTR) settings
-/// panel: master switch, CDN mode, custom servers, thread count, PGC/live switches and buffer target.
-/// Everything binds to `AppSettings.shared.acceleration`; the engine reads it on every request, so
-/// changes apply to the next media pieces without restarting playback.
+/// panel: master switch, CDN mode, custom servers, thread count, PGC switch and buffer target (live
+/// acceleration is not implemented, so its row only says 「暂未支持」).
+/// Everything binds to `AppSettings.shared.acceleration`; the engine picks up every change at once
+/// (`AppSettings.accelerationDidChange`), so it applies to the next media pieces without restarting playback.
 struct AccelerationSettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
     @State private var showResetConfirm = false
@@ -31,9 +32,11 @@ struct AccelerationSettingsView: View {
                 }
                 threadSection
                 contentSection
-                bufferSection
             }
             .disabled(!settings.acceleration.enabled)
+
+            // The forward buffer applies to every playback, accelerated or not.
+            bufferSection
 
             Section {
                 SettingsToggleRow(title: "显示加速统计浮层", subtitle: "在播放器上显示实时速度、线程数和所用节点",
@@ -101,8 +104,9 @@ struct AccelerationSettingsView: View {
         Section {
             SettingsToggleRow(title: "剧集加速", subtitle: "加速番剧、电影、纪录片等剧集",
                               isOn: $settings.acceleration.accelerateBangumi)
-            SettingsToggleRow(title: "直播加速（实验性）", subtitle: "加速直播流，可能导致部分直播间无法播放",
-                              isOn: $settings.acceleration.accelerateLive)
+            // Not implemented: live rooms always play straight from the CDN (`accelerateLive` is never read).
+            SettingsToggleRow(title: "直播加速", subtitle: "暂未支持，直播始终直连播放", isOn: .constant(false))
+                .disabled(true)
         } header: {
             Text("加速范围")
         }
@@ -115,7 +119,7 @@ struct AccelerationSettingsView: View {
         } header: {
             Text("缓冲")
         } footer: {
-            Text("播放器尽量提前缓冲的时长。越长越不容易卡顿，但占用更多内存和流量。")
+            Text("播放器尽量提前缓冲的时长，关闭加速时同样生效。越长越不容易卡顿，但占用更多内存和流量。")
         }
     }
 

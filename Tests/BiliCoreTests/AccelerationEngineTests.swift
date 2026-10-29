@@ -14,7 +14,9 @@ final class AccelerationEngineTests: XCTestCase {
     }
 
     private func makeHarness(files: [MediaKind: Data], settings: AccelerationSettings = AccelerationSettings(),
-                             wall: WallClock = WallClock(), maxSessions: Int = 4) -> Harness {
+                             wall: WallClock = WallClock(), maxSessions: Int = 4,
+                             settingsProvider: (() -> AccelerationSettings)? = nil,
+                             settingsDidChange: Notification.Name? = nil) -> Harness {
         let downloader = EngineFakeDownloader(files: files)
         let auto = EngineFakeAuto()
         let server = EngineFakeServer()
@@ -24,7 +26,8 @@ final class AccelerationEngineTests: XCTestCase {
             makeFallbackClient: { EngineFakeMediaClient(name: "urlsession") },
             makeDownloader: { _, _ in downloader },
             auto: auto,
-            settings: { settings })
+            settings: settingsProvider ?? { settings },
+            settingsDidChange: settingsDidChange)
         deps.clock = EngineTestClock()
         deps.wallClock = { wall.now }
         deps.cacheBudgetBytes = 64 << 20
@@ -341,6 +344,72 @@ final class AccelerationEngineTests: XCTestCase {
         wall.now = Double(later) - 100
         await session.refreshIfDue()
         XCTAssertEqual(counter.calls, 1, "45 s gap since the last attempt (monotonic clock unchanged)")
+        session.close()
+    }
+
+    func testProgressiveSessionRefreshesSignedURLsOfTheSameFile() async throws {
+        let wall = WallClock()
+        let file = EngineSyntheticMP4.pattern(count: 3_000_000, seed: 11)
+        let h = makeHarness(files: [.video: file], wall: wall)
+        let soon = Int(wall.now) + 60
+        let later = Int(wall.now) + 7200
+        let path = "/upgcxcode/00/00/1/1-1-16.mp4"
+        let segment = ProgressiveSegment(order: 1, url: "https://upos-sz-mirrorali.bilivideo.com\(path)?deadline=\(soon)",
+                                         backupURLs: [], lengthMs: 60_000, size: Int64(file.count))
+        final class Counter: @unchecked Sendable { var calls = 0 }
+        let counter = Counter()
+        let refresh = AccelerationEngine.progressiveRefresher(for: segment) {
+            counter.calls += 1
+            return [ProgressiveSegment(order: 1, url: "https://upos-sz-mirrorcos.bilivideo.com/other/2-1-16.mp4?deadline=\(later)"),
+                    ProgressiveSegment(order: 1, url: "https://upos-sz-mirrorhw.bilivideo.com\(path)?deadline=\(later)",
+                                       backupURLs: ["https://upos-sz-mirrorcos.bilivideo.com\(path)?deadline=\(later)"])]
+        }
+        let session = try await h.engine.prepareProgressive(routeKey: "av1:p1", segment: segment, accelerate: true,
+                                                            refreshURLs: refresh)
+        XCTAssertEqual(session.urlDeadline, Double(soon))
+        await session.refreshIfDue()
+        XCTAssertEqual(counter.calls, 1)
+        let track = try XCTUnwrap(h.downloader.madeTracks.first { $0.kind == .video })
+        XCTAssertEqual(track.updateCount, 1)
+        XCTAssertEqual(track.urls.first, "https://upos-sz-mirrorhw.bilivideo.com\(path)?deadline=\(later)")
+        XCTAssertEqual(session.urlDeadline, Double(later))
+        session.close()
+    }
+
+    func testProgressiveRefresherMatchesByPath() async throws {
+        let segment = ProgressiveSegment(order: 1, url: "https://a.bilivideo.com/x/1-1-80.mp4?deadline=1")
+        let backupHit = AccelerationEngine.matchingSegment(path: "/x/1-1-80.mp4", in: [
+            ProgressiveSegment(order: 1, url: "https://b.bilivideo.com/y/1-1-80.mp4?deadline=2",
+                               backupURLs: ["https://c.bilivideo.com/x/1-1-80.mp4?deadline=2"]),
+        ])
+        XCTAssertEqual(backupHit?.url, "https://c.bilivideo.com/x/1-1-80.mp4?deadline=2")
+        XCTAssertEqual(backupHit?.backupURLs, ["https://b.bilivideo.com/y/1-1-80.mp4?deadline=2"])
+        let refresh = AccelerationEngine.progressiveRefresher(for: segment) {
+            [ProgressiveSegment(order: 1, url: "https://a.bilivideo.com/x/1-1-64.mp4?deadline=2")]
+        }
+        do {
+            _ = try await refresh()
+            XCTFail("another quality's file must not replace the current one")
+        } catch {
+            XCTAssertEqual(error as? AccelerationEngineError, .noAllowedURL)
+        }
+    }
+
+    func testSettingsChangeReachesEngineWithoutASession() async throws {
+        final class Box: @unchecked Sendable { var value = AccelerationSettings() }
+        let box = Box()
+        let name = Notification.Name("AccelerationEngineTests.settings.\(UUID().uuidString)")
+        let h = makeHarness(files: [.video: videoFile.data], settingsProvider: { box.value }, settingsDidChange: name)
+        XCTAssertEqual(h.engine.currentSettings.cdnMode, .mainland)
+        box.value.cdnMode = .overseas
+        box.value.enabled = false
+        XCTAssertEqual(h.engine.currentSettings.cdnMode, .mainland, "snapshot until told")
+        NotificationCenter.default.post(name: name, object: nil)
+        XCTAssertEqual(h.engine.currentSettings.cdnMode, .overseas)
+        XCTAssertFalse(h.engine.currentSettings.enabled)
+        // The next session reads the fresh snapshot: acceleration switched off → its media goes the plain path.
+        let session = try await h.engine.prepare(request(audio: .some(nil)))
+        XCTAssertFalse(session.store.isAccelerating)
         session.close()
     }
 

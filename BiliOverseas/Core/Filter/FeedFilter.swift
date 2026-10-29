@@ -7,14 +7,18 @@ import Foundation
 // | rule                                   | recommend | popular / ranking / related | search | dynamics | space | history / favorites |
 // |----------------------------------------|-----------|-----------------------------|--------|----------|-------|---------------------|
 // | ad cards (`kind == .ad`, hard signals) | ✓         | ✓                           | ✓      | ✓        | ✓     | –                   |
+// | account blacklist (拉黑, `blackMids`)   | ✓         | ✓                           | ✓      | ✓        | –     | –                   |
 // | live / PGC cards                       | ✓         | –                           | –      | –        | –     | –                   |
-// | blocked UPs (not follow-exempt)        | ✓         | A                           | A      | –        | –     | –                   |
+// | blocked UPs (not follow-exempt)        | ✓         | A                           | A      | ✓ (*)    | –     | –                   |
 // | 疑似恰饭 heuristic                      | ✓         | A                           | A      | ✓ (*)    | –     | –                   |
-// | title keywords                         | ✓         | A                           | A      | –        | –     | –                   |
+// | keywords (title; dynamics: + text)     | ✓         | A                           | A      | ✓ (*)    | –     | –                   |
+// | zone (分区, `tname`)                    | ✓         | A (popular / ranking)       | –      | –        | –     | –                   |
 // | duration / like ratio / play count     | ✓         | A                           | –      | –        | –     | –                   |
 //
 // `exemptFollowed` skips every user rule below "blocked UPs" for followed UPs. (*) Dynamics only
-// contain followed UPs, so there the 恰饭/带货 rule runs without the exemption (PiliPlus `antiGoodsDyn`).
+// contain followed UPs, so there the UP / 恰饭 (PiliPlus `antiGoodsDyn`) / keyword rules run without
+// the exemption; keywords also match the text of image / text posts (PiliPlus ban words over opus text).
+// The account blacklist is never shown on the blocked UP's own space page.
 // History and favorites are lists the user built — nothing is ever removed from them.
 
 /// Which list a card is shown in; decides which `FeedFilter` rules apply.
@@ -33,6 +37,10 @@ enum FeedFilterReason: Equatable, CustomStringConvertible {
     case promoted(evidence: String)
     case keyword(rule: String)
     case uploader(rule: String)
+    /// The zone name (`VideoCard.zone`) matched a 分区屏蔽 rule.
+    case zone(rule: String)
+    /// The UP is on the account blacklist (拉黑).
+    case blacklisted
     case tooShort(duration: Int, minimum: Int)
     case lowLikeRatio(likes: Int64, views: Int64, minimumPercent: Int)
     case lowPlayCount(views: Int64, minimum: Int)
@@ -45,6 +53,8 @@ enum FeedFilterReason: Equatable, CustomStringConvertible {
         case .promoted(let evidence): return "疑似恰饭：\(evidence)"
         case .keyword(let rule): return "命中关键词 \(rule)"
         case .uploader(let rule): return "已屏蔽的 UP 主 \(rule)"
+        case .zone(let rule): return "命中分区 \(rule)"
+        case .blacklisted: return "已拉黑的用户"
         case .tooShort(let d, let m): return "时长 \(d) 秒，短于 \(m) 秒"
         case .lowLikeRatio(let l, let v, let m):
             let pct = v > 0 ? Double(l) * 100 / Double(v) : 0
@@ -59,17 +69,25 @@ enum FeedFilterReason: Equatable, CustomStringConvertible {
 struct FeedFilter {
     let settings: FeedFilterSettings
     private let isFollowedMid: (Int64) -> Bool
+    private let isBlacklistedMid: (Int64) -> Bool
     private let keywordRules: [FeedKeywordRule]
+    /// 分区屏蔽: same format as the keywords, matched against `VideoCard.zone`.
+    private let zoneRules: [FeedKeywordRule]
     /// mid → the rule text the user entered.
     private let blockedMids: [Int64: String]
     /// lower-cased name → the rule text the user entered.
     private let blockedNames: [String: String]
 
-    /// - Parameter isFollowed: whether the current user follows a mid (in addition to `VideoCard.isFollowed`).
-    init(settings: FeedFilterSettings, isFollowed: @escaping (Int64) -> Bool = { _ in false }) {
+    /// - Parameters:
+    ///   - isFollowed: whether the current user follows a mid (in addition to `VideoCard.isFollowed`).
+    ///   - isBlacklisted: whether a mid is on the account blacklist (`AccountBlacklistStore`).
+    init(settings: FeedFilterSettings, isFollowed: @escaping (Int64) -> Bool = { _ in false },
+         isBlacklisted: @escaping (Int64) -> Bool = { _ in false }) {
         self.settings = settings
         self.isFollowedMid = isFollowed
+        self.isBlacklistedMid = isBlacklisted
         self.keywordRules = settings.blockedKeywords.compactMap(FeedKeywordRule.init)
+        self.zoneRules = settings.blockedZones.compactMap(FeedKeywordRule.init)
         var mids: [Int64: String] = [:]
         var names: [String: String] = [:]
         for raw in settings.blockedUploaders {
@@ -83,8 +101,9 @@ struct FeedFilter {
         self.blockedNames = names
     }
 
-    init(settings: FeedFilterSettings, followedMids: Set<Int64>) {
-        self.init(settings: settings, isFollowed: { followedMids.contains($0) })
+    init(settings: FeedFilterSettings, followedMids: Set<Int64>, blacklistedMids: Set<Int64> = []) {
+        self.init(settings: settings, isFollowed: { followedMids.contains($0) },
+                  isBlacklisted: { blacklistedMids.contains($0) })
     }
 
     // MARK: Queries
@@ -116,6 +135,8 @@ struct FeedFilter {
         if settings.blockAdCards, let signal = FeedFilter.hardAdSignal(of: card) {
             return .ad(signal: signal)
         }
+        // 拉黑 is the user's own account-level block (PiliPlus `blackMids`): no switch, no exemption.
+        if scope != .space, card.ownerMid != 0, isBlacklistedMid(card.ownerMid) { return .blacklisted }
         if scope == .recommend {
             if settings.blockLiveCards && card.kind == .live { return .liveCard }
             if settings.blockPGCCards && card.kind == .bangumi { return .pgcCard }
@@ -127,8 +148,13 @@ struct FeedFilter {
         case .popular, .ranking, .search, .related:
             guard settings.applyToAllLists else { return nil }
         case .dynamics:
+            // Every dynamic comes from a followed UP, so the follow exemption would switch these off.
+            if let rule = matchUploader(card) { return .uploader(rule: rule) }
             if settings.blockPromotedVideos, let evidence = FeedPromotionDetector.evidence(for: card) {
                 return .promoted(evidence: evidence)
+            }
+            if let rule = matchKeyword(card, includingText: !FeedFilter.isPlayableKind(card.kind)) {
+                return .keyword(rule: rule)
             }
             return nil
         case .space, .history, .favorites:
@@ -142,11 +168,10 @@ struct FeedFilter {
         if settings.blockPromotedVideos, let evidence = FeedPromotionDetector.evidence(for: card) {
             return .promoted(evidence: evidence)
         }
-        if !keywordRules.isEmpty {
-            let title = card.title.contains("<") ? card.title.strippingHTMLTags : card.title
-            if let rule = keywordRules.first(where: { $0.matches(title) }) {
-                return .keyword(rule: rule.source)
-            }
+        if let rule = matchKeyword(card, includingText: false) { return .keyword(rule: rule) }
+        if !zoneRules.isEmpty, !card.zone.isEmpty, scope == .recommend || scope == .popular || scope == .ranking,
+           let rule = zoneRules.first(where: { $0.matches(card.zone) }) {
+            return .zone(rule: rule.source)
         }
 
         // Numeric thresholds: plain videos only, never on search results (the user asked for them).
@@ -171,15 +196,30 @@ struct FeedFilter {
         return FeedFilter.followedMarkers.contains(card.reason) || FeedFilter.followedMarkers.contains(card.badge)
     }
 
-    private func matchUploader(_ card: VideoCard) -> String? {
+    /// The 「UP 主屏蔽」 rule that hides this card's uploader, nil when none does.
+    func matchUploader(_ card: VideoCard) -> String? {
         if card.ownerMid != 0, let rule = blockedMids[card.ownerMid] { return rule }
         if !card.ownerName.isEmpty, let rule = blockedNames[card.ownerName.lowercased()] { return rule }
         return nil
     }
 
+    /// First keyword rule matching the title (`<em>` markup stripped), and with `includingText` also
+    /// `desc` (the text of image / text dynamics).
+    private func matchKeyword(_ card: VideoCard, includingText: Bool) -> String? {
+        guard !keywordRules.isEmpty else { return nil }
+        let title = card.title.contains("<") ? card.title.strippingHTMLTags : card.title
+        let text = includingText && !card.desc.isEmpty ? title + "\n" + card.desc : title
+        return keywordRules.first(where: { $0.matches(text) })?.source
+    }
+
     // MARK: Helpers (static, also used by the settings UI and tests)
 
     static let followedMarkers: Set<String> = ["已关注", "新关注"]
+
+    /// Video / episode / live cards: in 动态 their `desc` is the video description, not the post text.
+    static func isPlayableKind(_ kind: CardKind) -> Bool {
+        kind == .video || kind == .bangumi || kind == .live
+    }
 
     /// `adSignals` (api-lists.md §1.5) that mark a UP's own commerce, not a platform ad card:
     /// goods attached to a dynamic / video (带货) and game promotion attachments. They only count
@@ -221,15 +261,18 @@ extension FeedFilter {
     private static let currentLock = NSLock()
     private static var cachedCurrent: (settings: FeedFilterSettings, filter: FeedFilter)?
 
-    /// Filter for the current `AppSettings.shared.feedFilter` and `FollowedUpsStore.shared`.
-    /// Rebuilt only when the settings change. Read it on the main thread (AppSettings is UI state).
+    /// Filter for the current `AppSettings.shared.feedFilter`, `FollowedUpsStore.shared` and
+    /// `AccountBlacklistStore.shared`. Rebuilt only when the settings change. Read it on the main
+    /// thread (AppSettings is UI state).
     static var current: FeedFilter {
         let settings = AppSettings.shared.feedFilter
         currentLock.lock()
         defer { currentLock.unlock() }
         if let cached = cachedCurrent, cached.settings == settings { return cached.filter }
         let store = FollowedUpsStore.shared
-        let filter = FeedFilter(settings: settings, isFollowed: { store.contains($0) })
+        let blacklist = AccountBlacklistStore.shared
+        let filter = FeedFilter(settings: settings, isFollowed: { store.contains($0) },
+                                isBlacklisted: { blacklist.contains($0) })
         cachedCurrent = (settings, filter)
         return filter
     }

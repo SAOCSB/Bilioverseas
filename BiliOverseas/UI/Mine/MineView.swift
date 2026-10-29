@@ -21,7 +21,7 @@ struct MineView: View {
                     recentSection
                 }
                 menuSection(MineMenuItem.services)
-                menuSection(MineMenuItem.general)
+                menuSection(auth.isLoggedIn ? [MineMenuItem.switchAccount] + MineMenuItem.general : MineMenuItem.general)
             }
             .padding(.horizontal, 12)
             .padding(.top, 8)
@@ -144,7 +144,7 @@ struct MineView: View {
             }
 
             HStack(spacing: 0) {
-                statItem(count: auth.stat?.dynamicCount, label: "动态", route: .user(mid: mid))
+                statItem(count: auth.stat?.dynamicCount, label: "动态", route: .userDynamics(mid: mid))
                 statItem(count: auth.stat?.following, label: "关注", route: .following(mid: mid))
                 statItem(count: auth.stat?.follower, label: "粉丝", route: .fans(mid: mid))
             }
@@ -366,6 +366,9 @@ struct MineMenuItem: Identifiable {
     static let general: [MineMenuItem] = [
         MineMenuItem(title: "设置", systemImage: "gearshape", route: .settings),
     ]
+
+    /// Logged in only: the login page replaces the current session with the newly scanned account.
+    static let switchAccount = MineMenuItem(title: "切换账号", systemImage: "person.2", route: .login)
 }
 
 // MARK: - Components

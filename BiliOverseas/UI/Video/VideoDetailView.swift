@@ -868,7 +868,7 @@ final class VideoDetailModel: ObservableObject {
         defer { end(.follow) }
         let following = isFollowing(mid)
         do {
-            try await SpaceAPI.modifyRelation(mid: mid, act: following ? 2 : 1)
+            if following { try await SpaceAPI.unfollow(mid: mid) } else { try await SpaceAPI.follow(mid: mid) }
             if following { followedStaff.remove(mid) } else { followedStaff.insert(mid) }
             if mid == ownerMid {
                 isFollowingOwner = !following

@@ -14,6 +14,12 @@ import XCTest
 /// - `/early-close` 206 declaring the full length, sends half, then closes
 /// - `/chunked`     206 with `Transfer-Encoding: chunked` (uneven chunks, an extension and a trailer)
 /// - `/forbidden`   403 with a 9-byte body, keep-alive
+/// - `/stale-rst`   206, then resets (RST) the connection when the next request arrives on it
+/// - `/idle-close`  206, then closes the connection 100 ms later (a server-side keep-alive timeout)
+/// - `/no-response` reads the request and never answers
+/// - `/stall`       206 declaring the full length, sends half, then goes silent (connection stays open)
+/// - `/junk-after`  206 with the body followed by stray bytes in the same write
+/// - `/no-content`  204, keep-alive
 final class LoopbackCDN: @unchecked Sendable {
     static let fileSize = 64 << 20
 
@@ -111,6 +117,7 @@ final class LoopbackCDN: @unchecked Sendable {
         var busy = false
         var isClosed = false
         var dropNextRequest = false
+        var resetNextRequest = false
 
         init(conn: NWConnection, server: LoopbackCDN) {
             self.conn = conn
@@ -137,11 +144,11 @@ final class LoopbackCDN: @unchecked Sendable {
             }
         }
 
-        func markClosed() {
+        func markClosed(reset: Bool = false) {
             guard !isClosed else { return }
             isClosed = true
             server.noteClosed()
-            conn.cancel()
+            if reset { conn.forceCancel() } else { conn.cancel() }
         }
 
         private func process() {
@@ -149,8 +156,8 @@ final class LoopbackCDN: @unchecked Sendable {
             let head = String(decoding: buffer[buffer.startIndex ..< end.upperBound], as: UTF8.self)
             buffer.removeSubrange(buffer.startIndex ..< end.upperBound)
             server.record(head)
-            if dropNextRequest {
-                markClosed()
+            if dropNextRequest || resetNextRequest {
+                markClosed(reset: resetNextRequest)
                 return
             }
             busy = true
@@ -183,7 +190,13 @@ final class LoopbackCDN: @unchecked Sendable {
             case "/forbidden":
                 write("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nforbidden", then: done)
                 return
-            case "/file", "/slow", "/close", "/stale-drop", "/early-close", "/chunked":
+            case "/no-content":
+                write("HTTP/1.1 204 No Content\r\n\r\n", then: done)
+                return
+            case "/no-response":
+                return // never answers, never calls `done`
+            case "/file", "/slow", "/close", "/stale-drop", "/stale-rst", "/idle-close", "/early-close", "/stall",
+                 "/junk-after", "/chunked":
                 break
             default:
                 write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n", then: done)
@@ -207,6 +220,27 @@ final class LoopbackCDN: @unchecked Sendable {
                         done()
                     }
                 }
+            case "/stale-rst":
+                write(partialHead()) {
+                    self.sendBody(from: start, to: end, chunk: 64 << 10, delay: 0) {
+                        self.resetNextRequest = true
+                        done()
+                    }
+                }
+            case "/idle-close":
+                write(partialHead()) {
+                    self.sendBody(from: start, to: end, chunk: 64 << 10, delay: 0) {
+                        self.server.queue.asyncAfter(deadline: .now() + 0.1) { self.markClosed() }
+                    }
+                }
+            case "/stall":
+                let half = (end - start + 1) / 2
+                write(partialHead()) { self.sendBody(from: start, to: start + half - 1, chunk: 64 << 10, delay: 0) {} }
+            case "/junk-after":
+                var bytes = Data(partialHead().utf8)
+                bytes.append(LoopbackCDN.content(offset: start, count: end - start + 1))
+                bytes.append(Data("HTTP/1.1 200 OK\r\n".utf8))
+                send(bytes, countAsBody: end - start + 1, then: done)
             case "/early-close":
                 let half = (end - start + 1) / 2
                 write(partialHead()) {

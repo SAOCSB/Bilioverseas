@@ -31,7 +31,7 @@ private func fastTuning(hedgeDelayMs: Double = 300, firstByteMs: Double = 1500) 
 
 private func make(_ client: FakeMediaClient, _ cfg: BTRConfig, tuning: BTRTuning = fastTuning(),
                   clock: MonotonicClock = SystemClock.shared, auto: AutoConcurrencyController? = nil) -> BTRDownloader {
-    BTRDownloader(config: { cfg }, client: client, auto: auto, clock: clock, tuning: tuning)
+    BTRDownloader(config: { cfg }, client: client, auto: auto, clock: clock, tuning: tuning, bans: BTRBanRegistry())
 }
 
 private func fetch(_ d: BTRDownloader, _ track: BTRTrackHandle, _ range: ByteRange, kind: BTRRangeKind = .ordinary,
@@ -358,7 +358,7 @@ final class BTRDownloaderTests: XCTestCase {
         let client = FakeMediaClient()
         let asked = NSLock()
         var cosovbv = 0
-        client.urlRule = { u in
+        client.urlRule = { u, _ in
             guard u.absoluteString.contains("os=cosovbv") else { return nil }
             asked.lock(); cosovbv += 1; asked.unlock()
             return .status(403)

@@ -65,6 +65,8 @@ final class FakeMediaClient: MediaHTTPClient, @unchecked Sendable {
         case hang
         /// The first `count` requests answer `status`, then ok.
         case failFirst(count: Int, status: Int)
+        /// 206, then `[(bytes, ms after the previous step)]`; the rest of the body never comes.
+        case steps([(bytes: Int, afterMs: Double)])
     }
 
     struct Request: Equatable {
@@ -81,8 +83,23 @@ final class FakeMediaClient: MediaHTTPClient, @unchecked Sendable {
     private var perHostCount: [String: Int] = [:]
     var defaultBehavior: Behavior = .ok
     var headDelayMs: Double = 0
-    /// Per-URL override (checked before the per-host behaviour).
-    var urlRule: ((URL) -> Behavior?)?
+    /// Per-request override (checked before the per-host behaviour).
+    var urlRule: ((URL, ByteRange) -> Behavior?)?
+    private var inFlight = 0
+    private var peak = 0
+
+    /// Most requests in flight at once.
+    var peakInFlight: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return peak
+    }
+
+    private func finished() {
+        lock.lock()
+        inFlight -= 1
+        lock.unlock()
+    }
 
     init(total: Int64 = 8 * 1024 * 1024) { self.total = total }
 
@@ -106,7 +123,9 @@ final class FakeMediaClient: MediaHTTPClient, @unchecked Sendable {
         log.append(Request(host: host, url: url.absoluteString, range: range, at: SystemClock.shared.nowMs()))
         let n = (perHostCount[host] ?? 0) + 1
         perHostCount[host] = n
-        var chosen = urlRule?(url) ?? behaviors[host] ?? defaultBehavior
+        inFlight += 1
+        peak = max(peak, inFlight)
+        var chosen = urlRule?(url, range) ?? behaviors[host] ?? defaultBehavior
         if case let .failFirst(count, status) = chosen { chosen = n <= count ? .status(status) : .ok }
         lock.unlock()
         let behavior = chosen
@@ -162,13 +181,26 @@ final class FakeMediaClient: MediaHTTPClient, @unchecked Sendable {
                         continuation.yield(.data(btrPattern(range.start, length)))
                     case .hang:
                         try await Task.sleep(nanoseconds: 60_000_000_000)
+                    case let .steps(steps):
+                        continuation.yield(.head(status: 206, headers: cr))
+                        var sent = 0
+                        for step in steps {
+                            try await Task.sleep(nanoseconds: UInt64(step.afterMs * 1_000_000))
+                            let n = min(step.bytes, length - sent)
+                            if n > 0 { continuation.yield(.data(btrPattern(range.start + Int64(sent), n))) }
+                            sent += n
+                        }
+                        if sent < length { try await Task.sleep(nanoseconds: 60_000_000_000) }
                     }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error is CancellationError ? MediaFetchError.cancelled : error)
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            continuation.onTermination = { [weak self] _ in
+                task.cancel()
+                self?.finished()
+            }
         }
     }
 

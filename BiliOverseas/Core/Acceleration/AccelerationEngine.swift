@@ -917,7 +917,7 @@ final class EngineMediaClientSwitch: MediaHTTPClient, @unchecked Sendable {
                 if case .head = event { self?.noteSuccess() }
                 return event
             } catch {
-                if case MediaFetchError.tls = error { self?.noteTLSFailure() }
+                if let fetchError = error as? MediaFetchError, case .tls = fetchError { self?.noteTLSFailure() }
                 throw error
             }
         })

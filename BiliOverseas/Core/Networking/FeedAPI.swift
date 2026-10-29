@@ -237,13 +237,4 @@ enum FeedAPI {
         let hasMore = cards.count >= 100
         return Page(items: cards, hasMore: hasMore, next: ListCursor.next(page: page, hasMore: hasMore))
     }
-
-    // MARK: - Related
-
-    /// Related videos of a video (`data[]`, HotVideoItem shape).
-    static func related(bvid: String) async throws -> [VideoCard] {
-        let data = try await BiliHTTP.shared.api(
-            BiliHost.api + "/x/web-interface/archive/related", query: ["bvid": bvid])
-        return parseRanking(data)
-    }
 }

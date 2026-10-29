@@ -91,7 +91,7 @@ struct PlayerSettings: SettingsGroup {
     /// Rotate to landscape fullscreen automatically for horizontal videos.
     var autoFullscreenOnRotate: Bool = true
     /// Speeds offered in the speed menu.
-    var speedOptions: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+    var speedOptions: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0]
     /// Show the BTR acceleration statistics overlay in the player.
     var showAccelerationStats: Bool = false
 }

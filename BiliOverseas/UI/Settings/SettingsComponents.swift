@@ -163,38 +163,15 @@ enum SettingsFormat {
     }
 }
 
-/// Image caches the 「存储」 section measures and clears: `URLCache.shared` plus the private
-/// URLCache / memory cache of `ImagePipeline` (covers, avatars).
+/// Image caches the 「存储」 section measures and clears: `URLCache.shared` plus `ImagePipeline`'s own caches.
 enum SettingsImageCache {
-    /// `ImagePipeline` keeps its session and memory cache private, so they are read reflectively.
-    /// Both are `let` properties (read-only, race-free) and `descendant` stops at the requested
-    /// label, so `inflight` is never touched. If the properties are renamed this degrades to
-    /// clearing `URLCache.shared` only. TODO: replace with an `ImagePipeline` clear API.
-    private static var pipelineSession: URLSession? {
-        Mirror(reflecting: ImagePipeline.shared).descendant("session") as? URLSession
-    }
-
-    private static var pipelineMemory: NSCache<NSString, UIImage>? {
-        Mirror(reflecting: ImagePipeline.shared).descendant("memory") as? NSCache<NSString, UIImage>
-    }
-
-    static func urlCaches() -> [URLCache] {
-        var caches: [URLCache] = [URLCache.shared]
-        if let cache = pipelineSession?.configuration.urlCache, !caches.contains(where: { $0 === cache }) {
-            caches.append(cache)
-        }
-        return caches
-    }
-
     /// Bytes on disk used by the caches.
     static func diskUsage() -> Int64 {
-        urlCaches().reduce(Int64(0)) { $0 + Int64($1.currentDiskUsage) }
+        Int64(URLCache.shared.currentDiskUsage) + ImagePipeline.shared.diskUsage
     }
 
     static func clear() {
-        for cache in urlCaches() {
-            cache.removeAllCachedResponses()
-        }
-        pipelineMemory?.removeAllObjects()
+        URLCache.shared.removeAllCachedResponses()
+        ImagePipeline.shared.clearCache()
     }
 }

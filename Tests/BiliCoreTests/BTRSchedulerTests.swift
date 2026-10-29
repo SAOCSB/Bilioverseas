@@ -157,12 +157,14 @@ final class BTRSchedulerTests: XCTestCase {
         let held = try await hold(pool, 1)
         let order = Order()
         let tasks = (0..<3).map { enqueue(pool, order, "w\($0)", priority: 0, queueClass: .ordinary) }
-        await waitUntil { pool.snapshot.queued == 3 }
-        lock.lock(); XCTAssertEqual(last.0, 1); XCTAssertEqual(last.1, 2); XCTAssertEqual(last.2, 3); lock.unlock()
+        let reported = { () -> [Int] in lock.lock(); defer { lock.unlock() }; return [last.0, last.1, last.2] }
+        await waitUntil { reported() == [1, 2, 3] }
+        XCTAssertEqual(reported(), [1, 2, 3], "demand(active, limit, queued) after every change")
         pool.setLimit(8) // normal limit 7
         await waitUntil { order.names.count == 3 }
         XCTAssertEqual(pool.snapshot.active, 4)
-        lock.lock(); XCTAssertEqual(last.0, 4); XCTAssertEqual(last.1, 8); XCTAssertEqual(last.2, 0); lock.unlock()
+        await waitUntil { reported() == [4, 8, 0] }
+        XCTAssertEqual(reported(), [4, 8, 0])
         pool.setLimit(1)
         XCTAssertEqual(pool.snapshot.limit, 1)
         held[0].release()

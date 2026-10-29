@@ -7,13 +7,15 @@ final class ImagePipeline: @unchecked Sendable {
 
     private let memory = NSCache<NSString, UIImage>()
     private let session: URLSession
+    private let diskCache: URLCache
     private var inflight: [String: Task<UIImage?, Never>] = [:]
     private let lock = NSLock()
 
     init() {
         memory.totalCostLimit = 120 * 1024 * 1024
         let cfg = URLSessionConfiguration.default
-        cfg.urlCache = URLCache(memoryCapacity: 16 * 1024 * 1024, diskCapacity: 300 * 1024 * 1024)
+        diskCache = URLCache(memoryCapacity: 16 * 1024 * 1024, diskCapacity: 300 * 1024 * 1024)
+        cfg.urlCache = diskCache
         cfg.requestCachePolicy = .returnCacheDataElseLoad
         cfg.httpMaximumConnectionsPerHost = 6
         cfg.timeoutIntervalForRequest = 20
@@ -21,6 +23,15 @@ final class ImagePipeline: @unchecked Sendable {
     }
 
     func cached(_ url: String) -> UIImage? { memory.object(forKey: url as NSString) }
+
+    /// Bytes the cover/avatar disk cache currently uses.
+    var diskUsage: Int64 { Int64(diskCache.currentDiskUsage) }
+
+    /// Drops every cached image (memory and disk).
+    func clearCache() {
+        memory.removeAllObjects()
+        diskCache.removeAllCachedResponses()
+    }
 
     func image(for url: String) async -> UIImage? {
         guard !url.isEmpty, let u = URL(string: url) else { return nil }

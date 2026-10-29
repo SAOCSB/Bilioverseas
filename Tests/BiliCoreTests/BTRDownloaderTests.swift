@@ -236,7 +236,7 @@ final class BTRDownloaderTests: XCTestCase {
     func testOnTimePieceGetsNoCopyALateOneDoes() async throws {
         func run(_ deadline: Double?) async throws -> [String] {
             let client = FakeMediaClient()
-            client.set(hostA, .trickle(chunk: 8 * KiB, intervalMs: 50)) // 64 KiB in ~350 ms
+            client.set(hostA, .trickle(chunk: 8 * KiB, intervalMs: 100)) // 64 KiB in ~700 ms
             let d = make(client, config(hosts: [hostA, hostB]))
             let track = d.makeTrack(kind: .video, urls: [btrMediaURL(hostA)], routeKey: "bv1:p1")
             let start = now()
@@ -246,7 +246,7 @@ final class BTRDownloaderTests: XCTestCase {
             return client.requests.map(\.host)
         }
         let far = try await run(20_000)
-        XCTAssertEqual(far, [hostA], "due in 20 s and arriving in ~0.4 s: no copy")
+        XCTAssertEqual(far, [hostA], "due in 20 s and arriving in ~0.7 s: no copy")
         let near = try await run(300)
         XCTAssertEqual(near, [hostA, hostB], "due in 0.3 s: the copy starts")
         let none = try await run(nil)

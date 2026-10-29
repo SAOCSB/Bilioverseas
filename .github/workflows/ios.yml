@@ -128,10 +128,11 @@ jobs:
           APP=build/Build/Products/Debug-iphonesimulator/BiliOverseas.app
           xcrun simctl install "$UDID" "$APP"
           xcrun simctl launch "$UDID" io.github.bilioverseas.app -BiliSmokeTest
-          sleep 25;  xcrun simctl io "$UDID" screenshot smoke/01-home.png
-          sleep 40;  xcrun simctl io "$UDID" screenshot smoke/02-video.png
-          sleep 30;  xcrun simctl io "$UDID" screenshot smoke/03-video-later.png
-          sleep 20;  xcrun simctl io "$UDID" screenshot smoke/04-final.png
+          # A shot every 7 s, named by UTC time; the report's "screen.*" entries say which screen was up when.
+          for i in $(seq 1 30); do
+            sleep 7
+            xcrun simctl io "$UDID" screenshot "smoke/shot-$(date -u +%H%M%S).png" >/dev/null 2>&1 || true
+          done
           DATA=$(xcrun simctl get_app_container "$UDID" io.github.bilioverseas.app data)
           cp "$DATA/Documents/smoke-report.json" smoke/ 2>/dev/null || echo "no report file"
           echo "===== SMOKE REPORT ====="
@@ -150,7 +151,7 @@ jobs:
         if: always() && github.event_name == 'push'
         run: |
           cd smoke || exit 0
-          for f in *.png; do [ -e "$f" ] && sips -Z 1000 "$f" --out "$f" >/dev/null; done
+          for f in *.png; do [ -e "$f" ] && sips -Z 800 "$f" --out "$f" >/dev/null; done
           echo "${GITHUB_SHA}" > COMMIT
           git init -q -b ci-smoke
           git config user.name "github-actions"

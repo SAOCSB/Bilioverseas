@@ -100,7 +100,53 @@ enum SmokeTest {
             try? await Task.sleep(nanoseconds: 15_000_000_000)
             recordPlayer(label: "player.t\(second)")
         }
+        await tour(router: router)
         finish()
+    }
+
+    /// Walks through the main screens while CI takes timed screenshots; `screen.<name>` records when each
+    /// screen came up (UTC), so the shots can be matched to screens.
+    private static func tour(router: TabRouter) async {
+        func show(_ name: String, seconds: UInt64 = 8, _ action: () -> Void) async {
+            action()
+            record("screen.\(name)", ISO8601DateFormatter().string(from: Date()))
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+        }
+        await show("player-fullscreen") { activePlayer?.enterFullscreen() }
+        await show("player-inline") { activePlayer?.exitFullscreen() }
+        await show("search") {
+            router.popToRoot()
+            router.push(.search(keyword: "原神"))
+        }
+        await show("settings") {
+            router.popToRoot()
+            router.push(.settings)
+        }
+        await show("settings-acceleration") { router.push(.settingsAcceleration) }
+        await show("settings-danmaku") {
+            router.pop()
+            router.push(.settingsDanmaku)
+        }
+        await show("settings-smartskip") {
+            router.pop()
+            router.push(.settingsSmartSkip)
+        }
+        await show("settings-feedfilter") {
+            router.pop()
+            router.push(.settingsFeedFilter)
+        }
+        await show("popular-weekly") {
+            router.popToRoot()
+            router.push(.popularWeekly)
+        }
+        if let room = try? await LiveAPI.recommendRooms().items.first {
+            await show("live", seconds: 20) {
+                router.popToRoot()
+                router.push(.live(roomId: room.roomId))
+            }
+        }
+        await show("home") { router.popToRoot() }
+        await show("mine") { NotificationCenter.default.post(name: .homeAvatarTapped, object: nil) }
     }
 
     /// Prepares a proxy session headlessly, fetches the playlists and one accelerated media segment.

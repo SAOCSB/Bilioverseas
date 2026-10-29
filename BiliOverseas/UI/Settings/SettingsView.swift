@@ -124,6 +124,7 @@ struct SettingsView: View {
 
     private var storageSection: some View {
         Section {
+            OfflineStorageSettingsRow()
             Button {
                 showClearCacheConfirm = true
             } label: {

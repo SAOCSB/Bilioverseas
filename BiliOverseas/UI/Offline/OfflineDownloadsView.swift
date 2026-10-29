@@ -124,6 +124,22 @@ struct OfflineDownloadsView: View {
 
 // MARK: - Rows
 
+/// 设置 → 存储: 「离线缓存」 with the space it takes; opens the 离线缓存 screen.
+struct OfflineStorageSettingsRow: View {
+    @ObservedObject private var manager = OfflineDownloadManager.shared
+
+    var body: some View {
+        NavigationLink(value: Route.offline) {
+            HStack {
+                Text("离线缓存")
+                Spacer()
+                Text(verbatim: manager.tasks.isEmpty ? "无" : Fmt.bytes(Double(manager.usedBytes)))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+}
+
 /// 「已缓存 1.2 GB · 手机剩余 23.4 GB」 with a bar of the cache's share.
 struct OfflineStorageSummary: View {
     let used: Int64

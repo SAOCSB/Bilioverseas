@@ -345,7 +345,7 @@ final class OfflineJobTests: XCTestCase {
 
     func testCancelKeepsProgressAndTheNextRunFinishes() async throws {
         let client = FakeMediaClient(total: 2 * MiB)
-        client.defaultBehavior = .trickle(chunk: 16 * Int(KiB), intervalMs: 4)
+        client.defaultBehavior = .trickle(chunk: 8 * Int(KiB), intervalMs: 5)
         let job = makeJob(client)
         let progress = OfflineProgressBox()
         let run = Task { await job.run(onProgress: { progress.set($0) }) }
@@ -518,7 +518,7 @@ final class OfflineManagerTests: XCTestCase {
     @MainActor
     func testPauseKeepsBytesAndResumeFinishes() async throws {
         let client = FakeMediaClient(total: 2 * MiB)
-        client.defaultBehavior = .trickle(chunk: 16 * Int(KiB), intervalMs: 4)
+        client.defaultBehavior = .trickle(chunk: 8 * Int(KiB), intervalMs: 5)
         let manager = makeManager(client)
         manager.enqueue([sampleTask()])
         let id = manager.tasks[0].id
@@ -577,7 +577,7 @@ final class OfflineManagerTests: XCTestCase {
     @MainActor
     func testDeletingARunningTaskAndQueueingItAgain() async throws {
         let client = FakeMediaClient(total: MiB)
-        client.defaultBehavior = .trickle(chunk: 16 * Int(KiB), intervalMs: 4)
+        client.defaultBehavior = .trickle(chunk: 8 * Int(KiB), intervalMs: 5)
         let manager = makeManager(client)
         manager.enqueue([sampleTask()])
         let id = manager.tasks[0].id
@@ -599,7 +599,7 @@ final class OfflineManagerTests: XCTestCase {
     @MainActor
     func testSuspendStopsAndForegroundResumes() async throws {
         let client = FakeMediaClient(total: 2 * MiB)
-        client.defaultBehavior = .trickle(chunk: 16 * Int(KiB), intervalMs: 4)
+        client.defaultBehavior = .trickle(chunk: 8 * Int(KiB), intervalMs: 5)
         let manager = makeManager(client)
         manager.enqueue([sampleTask()])
         let id = manager.tasks[0].id

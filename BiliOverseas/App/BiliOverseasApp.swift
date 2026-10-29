@@ -63,6 +63,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         AccelerationEngine.maxAutoThreads = UIDevice.current.userInterfaceIdiom == .pad ? 64 : 32
         // Start the local BTR proxy early so the first video does not wait for the listener.
         AccelerationEngine.shared.startIfNeeded()
+        // Downloads interrupted by the last exit resume right away instead of when 离线缓存 is first opened.
+        _ = OfflineDownloadManager.shared
         let center = NotificationCenter.default
         center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { _ in
             AccelerationEngine.shared.applicationWillEnterForeground()

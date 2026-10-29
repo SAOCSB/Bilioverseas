@@ -13,7 +13,7 @@ struct OfflineCacheActionItem: View {
         if let detail = model.detail, !model.isPGC {
             let state = partState(detail)
             Button {
-                showsSheet = true
+                open(detail, state: state)
             } label: {
                 VStack(spacing: 4) {
                     Image(systemName: state == .completed ? "arrow.down.circle.fill" : "arrow.down.circle")
@@ -36,6 +36,22 @@ struct OfflineCacheActionItem: View {
                 })
             }
         }
+    }
+
+    /// The sheet while some part can still be queued; otherwise a toast leading to 离线缓存.
+    private func open(_ detail: VideoDetail, state: OfflineTaskState?) {
+        let cids = detail.pages.isEmpty ? [detail.cid] : detail.pages.map(\.cid)
+        let queueable = cids.contains { cid in
+            guard let task = manager.task(aid: detail.aid, bvid: detail.bvid, cid: cid) else { return true }
+            return task.state == .paused || task.state == .failed
+        }
+        if queueable {
+            showsSheet = true
+            return
+        }
+        let router = self.router
+        ToastCenter.shared.show(state == .completed ? "已缓存，可在「离线缓存」中观看" : "已在缓存列表中",
+                                duration: 3, actionTitle: "查看") { router.push(.offline) }
     }
 
     private func partState(_ detail: VideoDetail) -> OfflineTaskState? {

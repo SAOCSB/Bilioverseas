@@ -125,7 +125,7 @@ jobs:
           mkdir -p smoke
           APP=build/Build/Products/Debug-iphonesimulator/BiliOverseas.app
           xcrun simctl install "$UDID" "$APP"
-          xcrun simctl launch "$UDID" io.github.bilioverseas.app -BiliSmokeTest -BiliSmokeBVID BV1GJ411x7h7
+          xcrun simctl launch "$UDID" io.github.bilioverseas.app -BiliSmokeTest
           sleep 25;  xcrun simctl io "$UDID" screenshot smoke/01-home.png
           sleep 40;  xcrun simctl io "$UDID" screenshot smoke/02-video.png
           sleep 30;  xcrun simctl io "$UDID" screenshot smoke/03-video-later.png

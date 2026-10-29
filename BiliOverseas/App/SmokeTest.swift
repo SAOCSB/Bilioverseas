@@ -12,10 +12,12 @@ import FoundationNetworking
 enum SmokeTest {
     static let isEnabled = ProcessInfo.processInfo.arguments.contains("-BiliSmokeTest")
 
-    static var bvid: String {
+    /// Explicit test video (`-BiliSmokeBVID`); otherwise candidates come from the popular feed, which is
+    /// always playable from wherever the test runs (fixed BVs can be region-hidden and answer -404).
+    static var explicitBVID: String? {
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-BiliSmokeBVID"), i + 1 < args.count { return args[i + 1] }
-        return "BV1GJ411x7h7"
+        return nil
     }
 
     /// Set by `PlayerController.load` while the smoke test runs, so the UI playback can be inspected.
@@ -34,7 +36,6 @@ enum SmokeTest {
 
     private static func run(router: TabRouter) async {
         record("startedAt", ISO8601DateFormatter().string(from: Date()))
-        record("bvid", bvid)
         try? await Task.sleep(nanoseconds: 3_000_000_000)
         record("loggedIn", BiliHTTP.shared.isLoggedIn)
         record("buvid3", BiliHTTP.shared.cookie(named: "buvid3") != nil)
@@ -46,9 +47,13 @@ enum SmokeTest {
                     "ads": page.items.filter { $0.kind == .ad }.count,
                     "titles": Array(filtered.prefix(3).map(\.title))]
         }
+        var candidates: [String] = explicitBVID.map { [$0] } ?? []
         await step("feed.popular") {
             let page = try await FeedAPI.popular(page: 1)
-            return ["count": page.items.count]
+            // Short-ish ordinary videos make the playback check quick and representative.
+            let picks = page.items.filter { $0.kind == .video && !$0.bvid.isEmpty && $0.duration > 0 && $0.duration < 1200 }
+            candidates += picks.prefix(3).map(\.bvid)
+            return ["count": page.items.count, "candidates": candidates]
         }
         await step("search.hotWords") {
             let words = try await SearchAPI.hotWords()
@@ -56,12 +61,15 @@ enum SmokeTest {
         }
 
         var detail: VideoDetail?
-        await step("video.detail") {
-            let d = try await VideoAPI.detail(VideoRef(bvid: bvid))
-            detail = d
-            return ["title": d.title, "aid": d.aid, "cid": d.cid, "pages": d.pages.count, "duration": d.duration]
+        for bvid in candidates where detail == nil {
+            await step("video.detail.\(bvid)") {
+                let d = try await VideoAPI.detail(VideoRef(bvid: bvid))
+                detail = d
+                return ["title": d.title, "aid": d.aid, "cid": d.cid, "pages": d.pages.count, "duration": d.duration]
+            }
         }
         guard let detail else { finish(); return }
+        record("bvid", detail.bvid)
 
         var info: PlayInfo?
         await step("video.playInfo") {

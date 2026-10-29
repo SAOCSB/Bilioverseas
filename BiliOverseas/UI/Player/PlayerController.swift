@@ -366,6 +366,7 @@ final class PlayerController: ObservableObject {
     // MARK: Contract API
 
     func load(_ newItem: PlaybackItem) {
+        if SmokeTest.isEnabled { SmokeTest.activePlayer = self }
         if let current = item, current == newItem {
             switch status {
             case .idle, .failed: break
@@ -413,7 +414,7 @@ final class PlayerController: ObservableObject {
         pausedByBackground = false
         pausedByInterruption = false
         guard startupDone else {
-            if status == .paused { status = .loading }
+            if status == .paused { status = hasFirstFrame ? .buffering : .loading }
             return
         }
         startPlayback()
@@ -596,6 +597,7 @@ final class PlayerController: ObservableObject {
         }
         transientMessage = message
         pendingSwitchToast = toast
+        ToastCenter.shared.show(message)
     }
 
     private func constraints() -> PlayerStreamConstraints {
@@ -1050,7 +1052,7 @@ final class PlayerController: ObservableObject {
         }
         transientMessage = nil
         switchRevert = nil
-        smartSkipTick(time: lastKnownPosition, playing: wantsToPlay)
+        smartSkipTick(time: lastKnownPosition, playing: isActuallyPlaying)
         PlayerNowPlayingCenter.shared.playbackChanged(self)
     }
 

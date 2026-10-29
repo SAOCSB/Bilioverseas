@@ -40,6 +40,10 @@ struct RootTabView: View {
         .onReceive(NotificationCenter.default.publisher(for: .homeAvatarTapped)) { _ in
             tab = .mine
         }
+        .task {
+            // CI self test (inactive unless launched with -BiliSmokeTest).
+            SmokeTest.start(router: homeRouter)
+        }
     }
 
     /// Re-tapping the current tab pops to its root, like the official client.

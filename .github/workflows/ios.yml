@@ -81,3 +81,66 @@ jobs:
         with:
           files: dist/BiliOverseas-unsigned.ipa
           generate_release_notes: true
+
+  simulator-smoke:
+    name: Simulator smoke test (real Bilibili, BTR proxy, player)
+    runs-on: macos-15
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build (iphonesimulator, Debug)
+        run: |
+          set +e
+          xcodebuild \
+            -project BiliOverseas.xcodeproj \
+            -scheme BiliOverseas \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build > sim-build.log 2>&1
+          STATUS=$?
+          grep -E "\*\* BUILD|error:" sim-build.log | sort -u | head -100
+          exit $STATUS
+      - name: Boot simulator
+        run: |
+          xcrun simctl list devices available | grep -E "iPhone" | head -20
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)["devices"]
+          cands = [x for rt, devs in d.items() if "iOS" in rt for x in devs if x["name"].startswith("iPhone")]
+          pref = [x for x in cands if x["name"] in ("iPhone 16 Pro", "iPhone 16", "iPhone 15 Pro", "iPhone 15")]
+          print((pref or cands)[0]["udid"])')
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+      - name: Run smoke test
+        run: |
+          mkdir -p smoke
+          APP=build/Build/Products/Debug-iphonesimulator/BiliOverseas.app
+          xcrun simctl install "$UDID" "$APP"
+          xcrun simctl launch "$UDID" io.github.bilioverseas.app -BiliSmokeTest -BiliSmokeBVID BV1GJ411x7h7
+          sleep 25;  xcrun simctl io "$UDID" screenshot smoke/01-home.png
+          sleep 40;  xcrun simctl io "$UDID" screenshot smoke/02-video.png
+          sleep 30;  xcrun simctl io "$UDID" screenshot smoke/03-video-later.png
+          sleep 20;  xcrun simctl io "$UDID" screenshot smoke/04-final.png
+          DATA=$(xcrun simctl get_app_container "$UDID" io.github.bilioverseas.app data)
+          cp "$DATA/Documents/smoke-report.json" smoke/ 2>/dev/null || echo "no report file"
+          echo "===== SMOKE REPORT ====="
+          cat smoke/smoke-report.json 2>/dev/null || true
+          echo "===== SMOKE LOG ====="
+          xcrun simctl spawn "$UDID" log show --last 10m --style compact --predicate 'eventMessage CONTAINS "SMOKE"' | tail -80 || true
+          echo "===== CRASHES ====="
+          ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i bili || echo "none"
+          xcrun simctl spawn "$UDID" launchctl list | grep -i bilioverseas || echo "app process not running (crashed or exited)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: simulator-smoke
+          path: smoke/

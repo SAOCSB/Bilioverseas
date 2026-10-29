@@ -152,15 +152,19 @@ final class DanmakuCloudSyncTests: XCTestCase {
 
     func testNewFieldsDecodeFromOlderSaves() throws {
         // A save from before `tapToInteract` / the id maps existed.
-        let old = #"{"enabled":false,"blockedKeywords":["x"]}"#
-        SettingsStore.defaults = UserDefaults(suiteName: "DanmakuCloudSyncTests") ?? .standard
-        SettingsStore.defaults.set(Data(old.utf8), forKey: "test.danmaku")
+        let defaults = UserDefaults(suiteName: "DanmakuCloudSyncTests") ?? .standard
+        let previous = SettingsStore.defaults
+        SettingsStore.defaults = defaults
+        defer {
+            defaults.removeObject(forKey: "test.danmaku")
+            SettingsStore.defaults = previous
+        }
+        defaults.set(Data(#"{"enabled":false,"blockedKeywords":["x"]}"#.utf8), forKey: "test.danmaku")
         let loaded: DanmakuSettings = SettingsStore.load(key: "test.danmaku")
         XCTAssertFalse(loaded.enabled)
         XCTAssertEqual(loaded.blockedKeywords, ["x"])
         XCTAssertTrue(loaded.tapToInteract)
+        XCTAssertFalse(loaded.hideAdvanced)
         XCTAssertTrue(loaded.cloudRuleIds.isEmpty)
-        SettingsStore.defaults.removeObject(forKey: "test.danmaku")
-        SettingsStore.defaults = .standard
     }
 }

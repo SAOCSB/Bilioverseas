@@ -43,6 +43,8 @@ final class OfflineAppEventRelay: NSObject {
 
     private weak var manager: OfflineDownloadManager?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// Ends the background time early once nothing is downloading any more.
+    private var backgroundWatch: Task<Void, Never>?
 
     func attach(_ manager: OfflineDownloadManager) {
         guard self.manager == nil else { return }
@@ -71,7 +73,21 @@ final class OfflineAppEventRelay: NSObject {
                 self?.endBackgroundTask()
             }
         }
-        if backgroundTask == .invalid { manager.suspend() }
+        if backgroundTask == .invalid {
+            manager.suspend()
+            return
+        }
+        backgroundWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, self.backgroundTask != .invalid, let manager = self.manager else { return }
+                if !manager.tasks.contains(where: { $0.state == .downloading }) {
+                    manager.suspend()
+                    self.endBackgroundTask()
+                    return
+                }
+            }
+        }
     }
 
     @objc private func willEnterForeground() {
@@ -85,6 +101,8 @@ final class OfflineAppEventRelay: NSObject {
     }
 
     private func endBackgroundTask() {
+        backgroundWatch?.cancel()
+        backgroundWatch = nil
         guard backgroundTask != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTask)
         backgroundTask = .invalid

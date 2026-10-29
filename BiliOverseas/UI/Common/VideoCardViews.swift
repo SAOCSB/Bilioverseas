@@ -216,6 +216,19 @@ enum VideoCardActions {
         }
     }
 
+    /// Removes every 「UP 主屏蔽」 rule naming the card's UP (by UID or by name).
+    static func unblockUploader(_ card: VideoCard) {
+        let mid = card.ownerMid
+        let lowerName = card.ownerName.lowercased()
+        AppSettings.shared.feedFilter.blockedUploaders.removeAll { raw in
+            let rule = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if mid != 0, FeedFilter.parseMid(rule) == mid { return true }
+            let name = rule.hasPrefix("@") ? String(rule.dropFirst()) : rule
+            return !lowerName.isEmpty && name.lowercased() == lowerName
+        }
+        ToastCenter.shared.show("已取消屏蔽")
+    }
+
     /// 不感兴趣 with one of the app feed's reasons: hides the card and reports it (TV-login token).
     static func dislike(_ card: VideoCard, reason: FeedDislikeReason, remove: Remove?) {
         guard let feedback = card.feedback else { return }
@@ -245,6 +258,8 @@ struct VideoCardMenuItems: View {
     let card: VideoCard
     /// Offer 不感兴趣 (home 推荐).
     var allowsDislike = false
+    /// Offer 屏蔽UP主 (not on the UP's own space page, where it would hide nothing).
+    var blocksUploader = true
     var remove: VideoCardActions.Remove?
 
     var body: some View {
@@ -258,7 +273,7 @@ struct VideoCardMenuItems: View {
         if allowsDislike {
             dislikeItems
         }
-        if VideoCardActions.canBlockUploader(card) {
+        if blocksUploader && VideoCardActions.canBlockUploader(card) {
             Button(role: .destructive) {
                 VideoCardActions.blockUploader(card, remove: remove)
             } label: {
@@ -321,10 +336,57 @@ struct VideoCardMenuButton: View {
 
 extension View {
     /// Long-press menu with the card actions (稍后再看 / 不感兴趣 / 屏蔽UP主) for any video row or card.
-    func videoCardMenu(_ card: VideoCard, allowsDislike: Bool = false,
+    func videoCardMenu(_ card: VideoCard, allowsDislike: Bool = false, blocksUploader: Bool = true,
                        remove: VideoCardActions.Remove? = nil) -> some View {
         contextMenu {
-            VideoCardMenuItems(card: card, allowsDislike: allowsDislike, remove: remove)
+            VideoCardMenuItems(card: card, allowsDislike: allowsDislike, blocksUploader: blocksUploader, remove: remove)
+        }
+    }
+}
+
+/// ⋯ menu items of an UP's space page: 「屏蔽TA的视频」 (the local 「UP 主屏蔽」 rule) and 拉黑 / 解除拉黑
+/// (the account blacklist; the page runs it through `SpaceAPI.modifyRelation`, which also updates
+/// `AccountBlacklistStore`). 拉黑 asks once more in a submenu.
+struct UploaderBlockMenuItems: View {
+    let mid: Int64
+    let name: String
+    let isBlacklisted: Bool
+    let setBlacklisted: (Bool) -> Void
+    @ObservedObject private var settings = AppSettings.shared
+
+    private var card: VideoCard {
+        var c = VideoCard(id: "up-\(mid)")
+        c.ownerMid = mid
+        c.ownerName = name
+        return c
+    }
+
+    var body: some View {
+        if FeedFilter(settings: settings.feedFilter).matchUploader(card) != nil {
+            Button {
+                VideoCardActions.unblockUploader(card)
+            } label: {
+                Label("取消屏蔽TA的视频", systemImage: "eye")
+            }
+        } else {
+            Button {
+                VideoCardActions.blockUploader(card, remove: nil)
+            } label: {
+                Label("屏蔽TA的视频", systemImage: "eye.slash")
+            }
+        }
+        if isBlacklisted {
+            Button {
+                setBlacklisted(false)
+            } label: {
+                Label("解除拉黑", systemImage: "person.crop.circle.badge.checkmark")
+            }
+        } else {
+            Menu {
+                Button("确认拉黑", role: .destructive) { setBlacklisted(true) }
+            } label: {
+                Label("拉黑", systemImage: "nosign")
+            }
         }
     }
 }

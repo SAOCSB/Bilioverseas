@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// 动态 tab root: 全部 | 投稿 | 番剧 | 专栏 segments, the followed-UP strip and the follow feed.
 struct DynamicsView: View {
@@ -180,6 +181,7 @@ final class DynamicsFeedModel: ObservableObject {
     let list: PagedListModel<DynamicItem>
     private let query: DynamicsFeedQuery
     private var upTask: Task<Void, Never>?
+    private var cancellables: Set<AnyCancellable> = []
 
     init() {
         let q = DynamicsFeedQuery()
@@ -187,6 +189,17 @@ final class DynamicsFeedModel: ObservableObject {
         list = PagedListModel(filter: DynamicFeedFiltering.liveFilter(scope: .dynamics)) { cursor in
             try await DynamicsFeedQuery.fetch(q, cursor: cursor)
         }
+        // Edited 屏蔽 rules (or a synced blacklist) also hide dynamics already on screen.
+        AppSettings.shared.$feedFilter
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.list.reapplyFilter() }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: AccountBlacklistStore.didChange)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.list.reapplyFilter() }
+            .store(in: &cancellables)
     }
 
     func loadIfNeeded() async {

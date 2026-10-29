@@ -660,9 +660,9 @@ final class PlayerController: ObservableObject {
 
     // MARK: 听视频
 
-    /// Only DASH answers have a separate audio track (not for local files).
+    /// Only DASH answers have a separate audio track, served by the proxy (not for local files).
     var supportsAudioOnly: Bool {
-        guard item?.localFileURL == nil, let info = playInfo else { return false }
+        guard item?.localFileURL == nil, !forceNoProxy, let info = playInfo else { return false }
         return info.isDash && !PlayerStreamPicker.allAudios(info).isEmpty
     }
 
@@ -1039,10 +1039,11 @@ final class PlayerController: ObservableObject {
         let allowHDR = settings.player.allowHDR && PlayerDeviceSupport.hdrEligible
         let total = info.duration > 0 ? info.duration : target.duration
         // A re-take installs only an accelerated session (the direct item keeps playing otherwise).
-        let attempts: [Bool] = retake ? [true] : (wantAccel ? [true, false] : [false])
+        let attempts: [Bool] = retake ? (accelerationOn ? [true] : []) : (wantAccel ? [true, false] : [false])
         let routeKey = PlayerStreamPicker.routeKey(aid: target.aid, bvid: target.bvid, cid: target.cid, epId: target.epId)
         var lastError: Error?
-        if audioOnly, !info.isDash { audioOnly = false }
+        // 听视频 needs a DASH audio track and the proxy.
+        if audioOnly, !info.isDash || forceNoProxy { audioOnly = false }
 
         /// A session prepared and is about to be installed.
         func prepared(accelerated: Bool) {
@@ -1055,7 +1056,7 @@ final class PlayerController: ObservableObject {
             }
         }
 
-        if audioOnly, !forceNoProxy {
+        if audioOnly {
             if let audio = audioOnlyTrack(info) {
                 for accelerate in attempts {
                     do {

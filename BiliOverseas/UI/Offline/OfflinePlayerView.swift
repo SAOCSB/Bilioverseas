@@ -212,9 +212,9 @@ final class OfflinePlayerModel: ObservableObject {
     private weak var player: PlayerController?
     private var started = false
 
-    init(taskId: String, manager: OfflineDownloadManager = OfflineDownloadManager.shared) {
+    init(taskId: String) {
         currentId = taskId
-        self.manager = manager
+        manager = OfflineDownloadManager.shared
     }
 
     var current: OfflineTask? { manager.task(id: currentId) }

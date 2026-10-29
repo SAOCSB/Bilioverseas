@@ -95,6 +95,10 @@ struct SettingsView: View {
             .pickerStyle(.menu)
             SettingsToggleRow(title: "省流量封面", subtitle: "加载较小尺寸的封面和头像，节省流量",
                               isOn: $settings.general.compactImages)
+            SettingsToggleRow(title: "检查未读动态", subtitle: "每 5 分钟检查一次，在「动态」标签上显示新动态数",
+                              isOn: $settings.general.checkUnreadDynamics)
+            SettingsToggleRow(title: "搜索建议", subtitle: "输入时显示联想词",
+                              isOn: $settings.general.searchSuggestion)
         } header: {
             Text("外观")
         }

@@ -535,6 +535,7 @@ struct VideoIntroView: View {
                         VideoRowCell(card: card)
                     }
                     .buttonStyle(.plain)
+                    .videoCardMenu(card)
                 }
             }
             .padding(.horizontal, 12)

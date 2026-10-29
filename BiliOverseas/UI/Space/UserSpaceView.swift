@@ -53,6 +53,12 @@ struct UserSpaceView: View {
                             Label("分享主页", systemImage: "square.and.arrow.up")
                         }
                     }
+                    if !model.isSelf {
+                        UploaderBlockMenuItems(mid: mid, name: model.info?.name ?? "",
+                                               isBlacklisted: model.relation == .blocked) { blocked in
+                            Task { await model.setBlocked(blocked) }
+                        }
+                    }
                 } label: {
                     Image(systemName: "ellipsis")
                 }
@@ -566,6 +572,7 @@ struct UserSpaceVideosSection: View {
                     VideoRowCell(card: card)
                 }
                 .buttonStyle(.plain)
+                .videoCardMenu(card, blocksUploader: false)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .onAppear { list.onItemAppear(card) }

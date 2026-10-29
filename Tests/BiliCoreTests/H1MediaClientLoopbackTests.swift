@@ -91,6 +91,10 @@ final class LoopbackCDN: @unchecked Sendable {
     var closed: Int { locked { closedCount } }
     var bodyBytesSent: Int { locked { bodyBytes } }
     var lastRequestHead: String { locked { requestHeads.last ?? "" } }
+    /// Request targets (`/path?query`) in arrival order.
+    var requestTargets: [String] {
+        locked { requestHeads.map { $0.split(separator: " ").dropFirst().first.map(String.init) ?? "" } }
+    }
 
     private func locked<T>(_ body: () -> T) -> T {
         lock.lock()
@@ -735,10 +739,46 @@ final class H1MediaClientLoopbackTests: XCTestCase {
     func testDroppedStreamsLeakNoConnections() async throws {
         let client = makeClient(maxConnectionsPerHost: 2)
         for i in 0 ..< 6 { _ = client.get(server.url("/slow"), range: range(i * 1000, count: 1 << 20), highPriority: false) }
+        try await Task.sleep(nanoseconds: 100_000_000) // let the client queue process submits and cancels
         let drained = await waitUntil { client.openConnectionCount == 0 }
         XCTAssertTrue(drained, "open=\(client.openConnectionCount)")
         let r = try await fetch(client, "/file", range(0, count: 100))
         XCTAssertEqual(r.status, 206)
+    }
+
+    func testHighPriorityWaitersGoFirstAndFIFOWithinAClass() async throws {
+        let client = makeClient(maxConnectionsPerHost: 1)
+        let busy = Task { try await self.fetch(client, "/slow", self.range(0, count: 320_000)) } // ~200 ms
+        let started = await waitUntil { self.server.bodyBytesSent > 0 }
+        XCTAssertTrue(started)
+        var waiters: [Task<Fetched, Error>] = []
+        for (tag, high) in [("n1", false), ("h1", true), ("n2", false), ("h2", true)] {
+            waiters.append(Task { try await self.fetch(client, "/file?\(tag)", self.range(0, count: 100), highPriority: high) })
+            try await Task.sleep(nanoseconds: 10_000_000) // deterministic queue order
+        }
+        _ = try await busy.value
+        for w in waiters { _ = try await w.value }
+        XCTAssertEqual(server.requestTargets, ["/slow", "/file?h1", "/file?h2", "/file?n1", "/file?n2"])
+        XCTAssertEqual(server.accepted, 1)
+    }
+
+    func testDroppingTheClientFailsInFlightRequestsAndClosesConnections() async throws {
+        var client: H1MediaClient? = makeClient()
+        weak var weakClient = client
+        var it = client!.get(server.url("/slow"), range: range(0, count: 4 << 20), highPriority: false).makeAsyncIterator()
+        guard case .head? = try await it.next() else { return XCTFail("missing head") }
+        client = nil
+        let gone = await waitUntil { weakClient == nil }
+        XCTAssertTrue(gone, "pending callbacks must not keep the client alive")
+        var failure: Error?
+        do {
+            while try await it.next() != nil {}
+        } catch {
+            failure = error
+        }
+        XCTAssertEqual(failure as? MediaFetchError, .cancelled)
+        let closed = await waitUntil { self.server.closed == 1 }
+        XCTAssertTrue(closed)
     }
 
     func testPreconnectToADeadHostLeavesNothingOpen() async throws {

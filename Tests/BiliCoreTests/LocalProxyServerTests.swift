@@ -333,7 +333,11 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertTrue(LocalProxyServer.isLoopback(.ipv4(.loopback)))
         XCTAssertTrue(LocalProxyServer.isLoopback(.ipv4(IPv4Address("127.0.0.2")!)))
         XCTAssertFalse(LocalProxyServer.isLoopback(.ipv4(IPv4Address("192.168.1.20")!)))
+        XCTAssertTrue(LocalProxyServer.isLoopback(.ipv4(IPv4Address("127.255.0.9")!)))
+        XCTAssertFalse(LocalProxyServer.isLoopback(.ipv4(IPv4Address("128.0.0.1")!)))
         XCTAssertTrue(LocalProxyServer.isLoopback(.ipv6(.loopback)))
+        XCTAssertTrue(LocalProxyServer.isLoopback(.ipv6(IPv6Address("::ffff:127.0.0.2")!)))
+        XCTAssertFalse(LocalProxyServer.isLoopback(.ipv6(IPv6Address("::ffff:10.0.0.1")!)))
         XCTAssertFalse(LocalProxyServer.isLoopback(.ipv6(IPv6Address("fe80::1")!)))
     }
 }

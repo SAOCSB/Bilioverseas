@@ -267,12 +267,16 @@ final class LocalProxyServer: LocalProxyServing, @unchecked Sendable {
         lock.unlock()
     }
 
+    /// 127.0.0.0/8, ::1 and IPv4-mapped 127/8. (`IPv4Address.isLoopback` is true for 127.0.0.1 only.)
     static func isLoopback(_ host: NWEndpoint.Host) -> Bool {
+        func loopbackV4(_ address: IPv4Address) -> Bool {
+            address.isLoopback || address.rawValue.first == 127
+        }
         switch host {
         case .ipv4(let address):
-            return address.isLoopback
+            return loopbackV4(address)
         case .ipv6(let address):
-            return address.isLoopback || (address.asIPv4?.isLoopback ?? false)
+            return address.isLoopback || (address.asIPv4.map(loopbackV4) ?? false)
         case .name(let name, _):
             return name == "localhost" || name == "127.0.0.1" || name == "::1"
         @unknown default:

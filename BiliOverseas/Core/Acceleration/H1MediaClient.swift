@@ -12,7 +12,8 @@ import Security
 ///   Cancelled, failed or partially read connections are closed, never reused.
 /// - If a pooled connection fails before any response byte arrives, the request is retried once, transparently, on a
 ///   fresh connection.
-/// - At most `maxConnectionsPerHost` connections (busy + idle + connecting) per origin; further requests wait FIFO.
+/// - At most `maxConnectionsPerHost` connections (busy + idle + connecting) per origin; further requests wait FIFO
+///   (high-priority ones ahead of the others).
 /// - Back-pressure: at most ~`maxBufferedBytesPerRequest` of body bytes not yet taken by the consumer; reading pauses
 ///   (TCP flow control then throttles the server) and resumes on demand. No data is ever dropped.
 /// - Timeouts: `connectTimeout` (TCP + TLS) and a backstop `responseTimeout` of reading silence. The downloader runs
@@ -22,7 +23,7 @@ import Security
 /// error), then `.data` in order, then the stream ends (body complete per Content-Length / chunked / close) or throws:
 /// - `.invalidURL`: not http(s), no host, or `range.end < range.start` (thrown before any head);
 /// - `.connectFailed`: DNS / refused / unreachable / `connectTimeout`, or no response byte within `responseTimeout`;
-/// - `.tls`: handshake or record failure (`NWError.tls`);
+/// - `.tls`: handshake or record failure (`NWError.tls`; a TLS-level hang-up after the handshake is `.connectionClosed`);
 /// - `.malformedResponse`: bad status line, header section > 64 KiB, bad Content-Length / chunk framing;
 /// - `.connectionClosed`: EOF or reset before the body was complete (also a mid-body `responseTimeout` stall);
 /// - `.cancelled`: the consumer's task was cancelled while waiting in `next()`. If it was cancelled before calling
@@ -68,9 +69,14 @@ final class H1MediaClient: MediaHTTPClient {
                 c.state = .closed
                 c.nw.stateUpdateHandler = nil
                 c.nw.forceCancel()
-                if let ex = c.exchange, !ex.finished {
-                    ex.finished = true
-                    ex.pipe.finish(throwing: MediaFetchError.cancelled)
+                if let ex = c.exchange {
+                    // Break the Connection <-> Exchange cycle, or both (and the NWConnection) leak.
+                    c.exchange = nil
+                    ex.connection = nil
+                    if !ex.finished {
+                        ex.finished = true
+                        ex.pipe.finish(throwing: MediaFetchError.cancelled)
+                    }
                 }
             }
         }
@@ -211,7 +217,12 @@ final class H1MediaClient: MediaHTTPClient {
             attach(ex, to: openConnection(ex.origin, highPriority: ex.highPriority))
             return
         }
-        pool.waiters.append(ex)
+        // High-priority requests (BTR startup / meta / early pieces) queue ahead of normal ones; FIFO within a class.
+        if ex.highPriority, let i = pool.waiters.firstIndex(where: { !$0.highPriority }) {
+            pool.waiters.insert(ex, at: i)
+        } else {
+            pool.waiters.append(ex)
+        }
     }
 
     private func attach(_ ex: Exchange, to c: Connection) {
@@ -531,8 +542,13 @@ final class H1MediaClient: MediaHTTPClient {
         return .connectFailed(error.debugDescription)
     }
 
+    /// Errors after the handshake. TLS "closed" statuses (errSSLClosedGraceful -9805, errSSLClosedAbort -9806,
+    /// errSSLClosedNoNotify -9816) are the peer hanging up, not a TLS failure: report them as `.connectionClosed` so
+    /// they don't count towards the engine's "TLS is broken here" fallback switch.
     private static func ioError(_ error: NWError) -> MediaFetchError {
-        if case .tls(let status) = error { return .tls("TLS error (OSStatus \(status))") }
+        if case .tls(let status) = error, ![-9805, -9806, -9816].contains(status) {
+            return .tls("TLS error (OSStatus \(status))")
+        }
         return .connectionClosed
     }
 }

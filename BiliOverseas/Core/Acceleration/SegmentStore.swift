@@ -670,7 +670,10 @@ final class SegmentStore {
         var cancelled: [Task<Void, Never>] = []
         for cancel in plan.cancels {
             let key = SegmentKey(kind: cancel.kind, index: cancel.index)
-            guard let entry = inflight[key], entry.readers == 0 else { continue }
+            // A fetch that already holds every byte is about to complete (its reader ended with the last byte):
+            // let it land in the cache instead of throwing the bytes away.
+            guard let entry = inflight[key], entry.readers == 0,
+                  entry.fetch.receivedCount < entry.fetch.range.length else { continue }
             inflight[key] = nil
             entry.fetch.markCancelled()
             cancelled.append(entry.task)

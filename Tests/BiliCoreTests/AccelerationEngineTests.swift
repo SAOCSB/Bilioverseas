@@ -159,8 +159,10 @@ final class AccelerationEngineTests: XCTestCase {
         let session = try await h.engine.prepare(request(audio: .some(nil)))
         let text = String(decoding: try await body(await get(h.engine, "/\(session.id)/master.m3u8")), as: UTF8.self)
         XCTAssertFalse(text.contains("AUDIO"))
-        XCTAssertEqual((await get(h.engine, "/\(session.id)/a.m3u8")).status, 404)
-        XCTAssertEqual((await get(h.engine, "/\(session.id)/a.m4s")).status, 404)
+        let response1 = await get(h.engine, "/\(session.id)/a.m3u8")
+        XCTAssertEqual(response1.status, 404)
+        let response2 = await get(h.engine, "/\(session.id)/a.m4s")
+        XCTAssertEqual(response2.status, 404)
         session.close()
     }
 
@@ -258,7 +260,7 @@ final class AccelerationEngineTests: XCTestCase {
     }
 
     func testProgressiveSession() async throws {
-        let file = Data((0..<5_000_000).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ 7) })
+        let file = EngineSyntheticMP4.pattern(count: 5_000_000, seed: 7)
         let h = makeHarness(files: [.video: file])
         let segment = ProgressiveSegment(order: 1, url: "https://upos-sz-mirrorali.bilivideo.com/x/1-1-16.mp4?deadline=9",
                                          backupURLs: [], lengthMs: 60_000, size: Int64(file.count))
@@ -274,7 +276,8 @@ final class AccelerationEngineTests: XCTestCase {
         let tail = await get(h.engine, "/\(session.id)/p.mp4", range: "bytes=3000000-")
         let tailBytes = try await body(tail)
         XCTAssertEqual(tailBytes, file.subdata(in: 3_000_000..<file.count))
-        XCTAssertEqual((await get(h.engine, "/\(session.id)/master.m3u8")).status, 404)
+        let response3 = await get(h.engine, "/\(session.id)/master.m3u8")
+        XCTAssertEqual(response3.status, 404)
         session.close()
 
         let units = AccelerationEngine.progressiveUnits(total: 5_000_000, from: 65536, duration: 60)
@@ -334,7 +337,7 @@ final class AccelerationEngineTests: XCTestCase {
         // Not due any more.
         await session.refreshIfDue()
         XCTAssertEqual(counter.calls, 1)
-        // A hard failure asks again, but only after the backoff.
+        // Near the new deadline it is due again, but only after the 45 s backoff.
         wall.now = Double(later) - 100
         await session.refreshIfDue()
         XCTAssertEqual(counter.calls, 1, "45 s gap since the last attempt (monotonic clock unchanged)")
@@ -361,6 +364,7 @@ final class AccelerationEngineTests: XCTestCase {
         let h = makeHarness(files: [.video: videoFile.data])
         let session = try await h.engine.prepare(request(audio: .some(nil)))
         XCTAssertEqual(h.auto.count("newSession"), 1)
+        h.downloader.gate = EngineAsyncGate() // keep prefetches pending: nothing gets cached
         session.update(time: 0, rate: 1, playing: true, bufferedAhead: 1, cacheFull: false)
         XCTAssertEqual(h.auto.count("buffer"), 1)
         session.playerDidStall()
@@ -402,7 +406,8 @@ final class AccelerationEngineTests: XCTestCase {
         XCTAssertNotNil(h.engine.session(forToken: tok))
         session = nil
         XCTAssertNil(h.engine.session(forToken: tok))
-        XCTAssertEqual((await get(h.engine, "/\(tok)/master.m3u8")).status, 404)
+        let response4 = await get(h.engine, "/\(tok)/master.m3u8")
+        XCTAssertEqual(response4.status, 404)
     }
 
     func testLifecycleHooks() {

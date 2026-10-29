@@ -424,7 +424,7 @@ struct SmartSkipDataLoader {
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<min(2, segmentCount) {
                 group.addTask {
-                    while let index = await pool.take() {
+                    while !Task.isCancelled, let index = await pool.take() {
                         do {
                             await pool.add(try await fetchDanmakuSegment(cid: cid, segmentIndex: index))
                         } catch {
@@ -477,7 +477,8 @@ struct SmartSkipDataLoader {
         let parser = XMLParser(data: data)
         parser.shouldResolveExternalEntities = false
         parser.delegate = delegate
-        guard parser.parse(), delegate.rootName == "i" else { throw XMLError() }
+        let ok = parser.parse()
+        guard ok, !delegate.failed, delegate.depth == 0, delegate.rootName == "i" else { throw XMLError() }
         let rows = delegate.rows.map { row in
             SmartSkipDanmaku(time: SmartSkipJS.parseFloat(row.p.components(separatedBy: ",")[0]), textContent: row.text)
         }.filter { $0.time.isFinite && $0.time >= 0 && !$0.textContent.isEmpty }
@@ -489,11 +490,18 @@ struct SmartSkipDataLoader {
 private final class SmartSkipDanmakuXMLDelegate: NSObject, XMLParserDelegate {
     var rootName: String?
     var rows: [(p: String, text: String)] = []
+    /// Open elements; must be 0 after a well-formed document.
+    private(set) var depth = 0
+    /// Set on any parse error (Linux' XMLParser does not always report it through `parse()`).
+    private(set) var failed = false
+    private var stack: [String] = []
     private var open: [Int] = []   // indices into `rows` of the currently open <d> elements
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
                 qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
-        if rootName == nil { rootName = elementName }
+        if rootName == nil { rootName = elementName } else if depth == 0 { failed = true }   // second root
+        depth += 1
+        stack.append(elementName)
         if elementName == "d" {
             rows.append((attributeDict["p"] ?? "", ""))
             open.append(rows.count - 1)
@@ -501,7 +509,14 @@ private final class SmartSkipDanmakuXMLDelegate: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        if stack.last != elementName { failed = true }
+        if !stack.isEmpty { stack.removeLast() }
+        depth -= 1
         if elementName == "d", !open.isEmpty { open.removeLast() }
+    }
+
+    func parser(_ parser: XMLParser, parseErrorOccurred parseError: Error) {
+        failed = true
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {

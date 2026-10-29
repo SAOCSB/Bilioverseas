@@ -55,7 +55,16 @@ final class BTRBanRegistry: @unchecked Sendable {
     private let capacity: Int
     private let lock = NSLock()
     private var lists: [(route: String, list: BTRBanList)] = []
-    private var listeners: [ObjectIdentifier: (weak: AnyObject?, call: (String, String, BTRBanKind) -> Void)] = [:]
+    private final class Listener {
+        weak var owner: AnyObject?
+        let call: (String, String, BTRBanKind) -> Void
+        init(owner: AnyObject, call: @escaping (String, String, BTRBanKind) -> Void) {
+            self.owner = owner
+            self.call = call
+        }
+    }
+
+    private var listeners: [ObjectIdentifier: Listener] = [:]
 
     init(capacity: Int = 4) { self.capacity = max(1, capacity) }
 
@@ -77,14 +86,14 @@ final class BTRBanRegistry: @unchecked Sendable {
     /// `owner` is told about every new ban (`routeKey`, host, kind) while it lives.
     func observe(_ owner: AnyObject, _ call: @escaping (String, String, BTRBanKind) -> Void) {
         lock.lock()
-        listeners = listeners.filter { $0.value.weak != nil }
-        listeners[ObjectIdentifier(owner)] = (owner, call)
+        listeners = listeners.filter { $0.value.owner != nil }
+        listeners[ObjectIdentifier(owner)] = Listener(owner: owner, call: call)
         lock.unlock()
     }
 
     private func report(_ route: String, _ host: String, _ kind: BTRBanKind) {
         lock.lock()
-        let calls = listeners.values.filter { $0.weak != nil }.map(\.call)
+        let calls = listeners.values.filter { $0.owner != nil }.map(\.call)
         lock.unlock()
         for c in calls { c(route, host, kind) }
     }

@@ -68,6 +68,8 @@ final class SegmentStoreTests: XCTestCase {
         store.updatePlayback(time: 0, rate: 1, playing: false, bufferedAhead: 0, cacheFull: false)
         let prefetched = await engineEventually { store.debugInflight(.video)[0] != nil }
         XCTAssertTrue(prefetched, "planner starts the startup segment")
+        let called = await engineEventually { !self.calls(downloader, file.segments[0]).isEmpty }
+        XCTAssertTrue(called)
         XCTAssertEqual(calls(downloader, file.segments[0]).first?.rangeKind, .startup)
         let reader = try XCTUnwrap(store.reader(kind: .video, range: file.segments[0]))
         let task = Task { try await engineDrain(reader) }
@@ -88,7 +90,9 @@ final class SegmentStoreTests: XCTestCase {
         let reader = try XCTUnwrap(store.reader(kind: .video, range: ByteRange(start: 0, end: Int64(file.data.count) - 1)))
         let bytes = try await engineDrain(reader)
         XCTAssertEqual(bytes, file.data)
-        XCTAssertEqual(store.debugCachedIndices(.video), [0, 1, 2])
+        // A reader ends with its last byte; the download's bookkeeping (cache insert) follows right after.
+        let allCached = await engineEventually { store.debugCachedIndices(.video) == [0, 1, 2] }
+        XCTAssertTrue(allCached, "\(store.debugCachedIndices(.video))")
         // The trailing box is fetched once as an uncached range.
         let trailing = ByteRange(start: file.segments[2].end + 1, end: Int64(file.data.count) - 1)
         XCTAssertEqual(calls(downloader, trailing).count, 1)
@@ -145,7 +149,8 @@ final class SegmentStoreTests: XCTestCase {
             XCTAssertEqual(direct?.direct, true)
             XCTAssertEqual(direct?.range, ByteRange(start: seg.start + 20_000, end: seg.end), "resumes after the verified prefix")
         }
-        XCTAssertEqual(store.debugConsecutiveFailures(.video), 6)
+        let six = await engineEventually { store.debugConsecutiveFailures(.video) == 6 }
+        XCTAssertTrue(six)
         XCTAssertTrue(store.fallbackActive)
         XCTAssertFalse(store.isAccelerating)
         let before = downloader.calls.count
@@ -170,7 +175,8 @@ final class SegmentStoreTests: XCTestCase {
             let reader = try XCTUnwrap(store.reader(kind: .video, range: file.segments[i]))
             _ = try await engineDrain(reader)
         }
-        XCTAssertEqual(store.debugConsecutiveFailures(.video), 0)
+        let reset = await engineEventually { store.debugConsecutiveFailures(.video) == 0 }
+        XCTAssertTrue(reset, "\(store.debugConsecutiveFailures(.video))")
         XCTAssertTrue(store.isAccelerating)
         store.close()
     }
@@ -212,8 +218,8 @@ final class SegmentStoreTests: XCTestCase {
     }
 
     func testOrphanNearPlayheadKeepsDownloadingUntilSeekAway() async throws {
-        let file = EngineSyntheticMP4.make(segmentSizes: Array(repeating: 70_000, count: 300),
-                                           durations: Array(repeating: 2000, count: 300))
+        let file = EngineSyntheticMP4.make(segmentSizes: Array(repeating: 70_000, count: 60),
+                                           durations: Array(repeating: 10_000, count: 60))
         let downloader = EngineFakeDownloader(files: [.video: file.data])
         let gate = EngineAsyncGate()
         downloader.gate = gate
@@ -233,9 +239,11 @@ final class SegmentStoreTests: XCTestCase {
                 && downloader.cancelledCalls.contains { $0.range == file.segments[0] }
         }
         XCTAssertTrue(gone, "a seek far away cancels the old position's downloads")
-        let restarted = await engineEventually { store.debugInflight(.video)[250] != nil }
+        let restarted = await engineEventually {
+            store.debugInflight(.video)[50] != nil && !self.calls(downloader, file.segments[50]).isEmpty
+        }
         XCTAssertTrue(restarted, "startup segment of the new position")
-        XCTAssertEqual(calls(downloader, file.segments[250]).first?.rangeKind, .startup)
+        XCTAssertEqual(calls(downloader, file.segments[50]).first?.rangeKind, .startup)
         store.close()
     }
 

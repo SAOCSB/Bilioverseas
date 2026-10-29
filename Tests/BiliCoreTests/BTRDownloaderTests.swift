@@ -596,4 +596,22 @@ final class BTRDownloaderTests: XCTestCase {
         let other = second.makeTrack(kind: .video, urls: [btrMediaURL(hostA)], routeKey: "bv2:p1") as! BTRTrack
         XCTAssertTrue(btrHosts(other.resolver.urls()).contains(hostA), "another video starts clean")
     }
+
+    func testDownloaderIsReleasedAfterItsSession() async throws {
+        let registry = BTRBanRegistry()
+        let auto = AutoConcurrencyController(clock: BTRManualClock())
+        let client = FakeMediaClient()
+        weak var weakDownloader: BTRDownloader?
+        do {
+            let d = BTRDownloader(config: { config(hosts: [hostA, hostB], auto: true) }, client: client, auto: auto,
+                                  tuning: fastTuning(), bans: registry)
+            weakDownloader = d
+            let track = d.makeTrack(kind: .video, urls: [btrMediaURL(hostA)], routeKey: "bv1:p1")
+            _ = try await fetch(d, track, range(0, 256 * KiB))
+            d.cancelAll()
+        }
+        await sleepMs(50)
+        XCTAssertNil(weakDownloader, "neither the ban registry nor the shared controller keeps a session alive")
+        auto.stall() // a listener of a released downloader is harmless
+    }
 }

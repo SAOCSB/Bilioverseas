@@ -381,11 +381,24 @@ enum EngineSyntheticMP4 {
         var segments: [ByteRange] = []
         for size in segmentSizes {
             let start = Int64(data.count)
-            data.append(Data((0..<size).map { UInt8(truncatingIfNeeded: (Int(start) + $0) &* 31 &+ seed) }))
+            data.append(pattern(count: size, offset: Int(start), seed: seed))
             segments.append(ByteRange(start: start, end: Int64(data.count) - 1))
         }
         if trailing > 0 { data.append(box("free", size: trailing)) }
         return File(data: data, initRange: initRange, indexRange: indexRange, segments: segments)
+    }
+
+    /// Deterministic bytes (fast in debug builds).
+    static func pattern(count: Int, offset: Int = 0, seed: Int = 1) -> Data {
+        var bytes = [UInt8](repeating: 0, count: count)
+        bytes.withUnsafeMutableBufferPointer { buffer in
+            var value = UInt8(truncatingIfNeeded: offset &* 31 &+ seed)
+            for i in 0..<count {
+                buffer[i] = value
+                value = value &+ 31
+            }
+        }
+        return Data(bytes)
     }
 
     /// A DashStream describing `file` on a whitelisted Bilibili host.

@@ -51,7 +51,15 @@ enum SmartSkipMode: String, Codable, CaseIterable, Identifiable {
 
 struct SmartSkipSettings: SettingsGroup {
     var enabled: Bool = true
+    /// `.auto` skips only trusted segments by itself; everything else shows the 「跳过广告」 prompt.
     var mode: SmartSkipMode = .auto
+    /// How long the 「跳过广告」 prompt stays (seconds of playback; pauses while paused / touched).
+    var countdownSeconds: Int = 5
+    /// Show the 「已跳过广告」 toast (with 「撤销」) after an automatic skip.
+    var showToast: Bool = true
+
+    /// Valid range for `countdownSeconds` in the settings screen.
+    static let countdownRange = 3...15
 }
 
 /// Feed filtering incl. "block ad videos" (owned by Core/Filter).

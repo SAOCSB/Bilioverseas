@@ -180,9 +180,11 @@ struct SmartSkipDataLoader {
         if c.subtitleTracks == nil { c.subtitleTracks = player?.subtitles ?? [] }
         if let fetchedDanmaku { c.danmaku = fetchedDanmaku }
         if c.subtitleLines == nil {
-            let chosen = Self.chooseSubtitleTrack(c.subtitleTracks ?? [])
-            c.subtitleLines = chosen.map { _ in [] } ?? []
-            if let chosen { c.subtitleLines = await fetchSubtitleBody(chosen.url) }
+            if let chosen = Self.chooseSubtitleTrack(c.subtitleTracks ?? []) {
+                c.subtitleLines = await fetchSubtitleBody(chosen.url)
+            } else {
+                c.subtitleLines = []
+            }
         }
         return c
     }
@@ -208,9 +210,15 @@ struct SmartSkipDataLoader {
         let duration = SmartSkipJS.number(page?["duration"] ?? data["duration"])
         return SmartSkipVideoInfo(
             cid: Int64(cid),
-            title: data["title"].string.flatMap { data["title"] == .string($0) ? $0 : nil } ?? "",
-            desc: { if case .string(let s) = data["desc"] { return s }; return "" }(),
+            title: jsString(data["title"]),
+            desc: jsString(data["desc"]),
             duration: duration.isFinite && duration > 0 ? duration : 0)
+    }
+
+    /// `typeof v === 'string' ? v : ''`.
+    private static func jsString(_ v: JSON) -> String {
+        if case .string(let s) = v { return s }
+        return ""
     }
 
     /// `fetchVideoInfo(bvid, pageNumber)`: `GET /x/web-interface/view?bvid=` (cookies included).

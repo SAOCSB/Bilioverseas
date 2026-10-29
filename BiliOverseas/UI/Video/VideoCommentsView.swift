@@ -617,9 +617,9 @@ struct VideoCommentRow: View {
     }
 
     private var contentText: Text {
-        let body = VideoRichText.text(VideoRichText.segments(for: item, timestamps: timestamps), emotes: emotes)
-        guard item.isUpTop else { return body }
-        return Text("置顶 ").font(.system(size: 13, weight: .medium)).foregroundColor(.biliPink) + body
+        let message = VideoRichText.text(VideoRichText.segments(for: item, timestamps: timestamps), emotes: emotes)
+        guard item.isUpTop else { return message }
+        return Text("置顶 ").font(.system(size: 13, weight: .medium)).foregroundColor(.biliPink) + message
     }
 
     private var timeLine: String {

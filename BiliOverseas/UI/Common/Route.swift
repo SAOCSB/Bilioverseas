@@ -11,6 +11,7 @@ enum Route: Hashable {
     case favFolder(id: Int64, title: String)
     case history
     case watchLater
+    case bangumiFollows
     case following(mid: Int64)
     case fans(mid: Int64)
     case live(roomId: Int64)
@@ -73,6 +74,8 @@ struct RouteView: View {
             HistoryView()
         case .watchLater:
             WatchLaterView()
+        case .bangumiFollows:
+            MyBangumiFollowsView()
         case .following(let mid):
             RelationListView(mid: mid, kind: .following)
         case .fans(let mid):

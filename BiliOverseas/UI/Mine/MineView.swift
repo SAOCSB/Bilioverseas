@@ -201,10 +201,7 @@ struct MineView: View {
                 MineQuickEntryLabel(title: "稍后再看", systemImage: "clock")
             }
             .buttonStyle(.plain)
-            // TODO(lead): switch to `NavigationLink(value: Route.<bangumiFollows>)` once the route exists.
-            NavigationLink {
-                MyBangumiFollowsView()
-            } label: {
+            NavigationLink(value: Route.bangumiFollows) {
                 MineQuickEntryLabel(title: "我的追番", systemImage: "tv")
             }
             .buttonStyle(.plain)

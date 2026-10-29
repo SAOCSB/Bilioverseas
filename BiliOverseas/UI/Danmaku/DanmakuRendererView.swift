@@ -205,6 +205,28 @@ final class DanmakuOverlayView: UIView {
         updateActiveState()
     }
 
+    /// Uses an already available list (offline cache, local file) instead of the network.
+    func load(items: [DanmakuItem], duration: Double) {
+        if let old = loader { Task { await old.cancelAll() } }
+        loader = nil
+        generation += 1
+        loadedCid = 0
+        removeAllSprites()
+        engine.reset()
+        selfMidHash = BiliHTTP.shared.mid.map { DanmakuHash.midHash(mid: $0) }
+        filter = DanmakuFilter(settings: settings, selfMidHash: selfMidHash)
+        rawSegments = Dictionary(grouping: items.sorted { $0.time < $1.time }) { DanmakuSegment.index(for: $0.time) }
+        segments = rawSegments.mapValues { filter.apply($0) }
+        requestedSegments.removeAll()
+        retryAfter.removeAll()
+        localItems.removeAll()
+        closedNotified = false
+        isClosedByUploader = false
+        lastRawTime = nil
+        prefetchAfterSeek = true
+        updateActiveState()
+    }
+
     /// Removes every danmaku from the screen (loaded data is kept).
     func clear() {
         removeAllSprites()

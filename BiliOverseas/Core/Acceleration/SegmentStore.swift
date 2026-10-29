@@ -552,7 +552,10 @@ final class SegmentStore {
                            priority: startup ? Self.readerStartupPriority : Self.readerPriority,
                            rangeKind: PrefetchPlanner.rangeKind(length: range.length, startup: startup),
                            accelerated: useAcceleratedLocked(track), segmentStart: nil, total: track.spec.total)
-        let task = Task { [weak self] in await self?.run(job) }
+        let task = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.run(job)
+        }
         gapFetches[ObjectIdentifier(fetch)] = (fetch, task)
         lock.unlock()
         let subscription = fetch.subscribe(onEnd: { [weak self] in self?.gapDetached(fetch) })
@@ -630,7 +633,10 @@ final class SegmentStore {
         let job = FetchJob(fetch: fetch, kind: key.kind, handle: track.spec.handle, priority: priority,
                            rangeKind: rangeKind, accelerated: useAcceleratedLocked(track),
                            segmentStart: segment.startTime, total: track.spec.total)
-        let task = Task { [weak self] in await self?.run(job) }
+        let task = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.run(job)
+        }
         let entry = Inflight(fetch: fetch, task: task, readers: 0, origin: origin)
         inflight[key] = entry
         return entry

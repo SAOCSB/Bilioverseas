@@ -172,9 +172,10 @@ struct SmartSkipDataLoader {
         }
         guard c.cid > 0 else { return nil }
         let needsPlayerInfo = c.chapters == nil || (c.subtitleLines == nil && c.subtitleTracks == nil)
+        let needsDanmaku = c.danmaku == nil
         let (bvid, aid, cid, duration) = (c.bvid, c.aid, c.cid, c.duration)
         async let playerInfo: SmartSkipPlayerInfo? = needsPlayerInfo ? fetchPlayerInfo(bvid: bvid, aid: aid, cid: cid) : nil
-        async let danmaku: [SmartSkipDanmaku]? = c.danmaku == nil ? fetchDanmakuWithTime(cid: cid, duration: duration) : nil
+        async let danmaku: [SmartSkipDanmaku]? = needsDanmaku ? fetchDanmakuWithTime(cid: cid, duration: duration) : nil
         let (player, fetchedDanmaku) = await (playerInfo, danmaku)
         if c.chapters == nil { c.chapters = player?.viewPoints ?? [] }
         if c.subtitleTracks == nil { c.subtitleTracks = player?.subtitles ?? [] }

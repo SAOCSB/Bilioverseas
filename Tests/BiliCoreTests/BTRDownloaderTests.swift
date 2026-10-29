@@ -67,6 +67,8 @@ final class BTRDownloaderTests: XCTestCase {
         XCTAssertGreaterThan(client.count(hostA), 0)
         XCTAssertGreaterThan(client.count(hostB), 0)
         XCTAssertTrue(client.requests.allSatisfy { r.contains($0.range) }, "never asks past the range")
+        XCTAssertLessThanOrEqual(client.requests.count, 10, "a steady 1 MiB range costs few requests")
+        XCTAssertLessThanOrEqual(client.peakInFlight, 8, "never more connections than threads")
         let stats = d.stats
         XCTAssertGreaterThanOrEqual(stats.totalBytes, Int64(MiB))
         XCTAssertEqual(stats.threads, 8)
@@ -205,6 +207,7 @@ final class BTRDownloaderTests: XCTestCase {
         XCTAssertLessThan(hedgeAt, 900, "a hedge uses the spare slot long before the first-byte timeout")
         await sleepMs(100)
         XCTAssertEqual(client.requests.count, 8, "only one spare slot")
+        XCTAssertEqual(client.peakInFlight, 8)
         task.cancel()
         let result = await task.result
         if case .success = result { XCTFail("a cancelled download must not succeed") }
@@ -481,5 +484,116 @@ final class BTRDownloaderTests: XCTestCase {
         _ = try await fetch(d, track, range(1000, 1000), kind: .meta)
         XCTAssertEqual(client.requests.map(\.host), [hostA, hostB])
         XCTAssertTrue(client.requests[1].url.contains("deadline=2"))
+    }
+    func testHedgeDueTruthTable() {
+        let clock = BTRManualClock(1000)
+        func downloader() -> BTRDownloader {
+            BTRDownloader(config: { config() }, client: FakeMediaClient(), auto: nil, clock: clock, tuning: fastTuning(),
+                          bans: BTRBanRegistry())
+        }
+        func context() -> BTRAttemptContext { BTRAttemptContext(startedAt: clock.nowMs(), length: 64 * KiB, base: 0) }
+        /// 8 KiB every 100 ms for `steps` steps, checking hedgeDue after each (as the 50 ms poll would).
+        func steady(_ d: BTRDownloader, _ c: BTRAttemptContext, steps: Int, chunk: Int = 8 * KiB) {
+            for i in 1...steps {
+                clock.advance(100)
+                c.recordChunk(total: i * chunk, now: clock.nowMs())
+                _ = d.hedgeDue(c, delayMs: 300, deadlineAt: .infinity, copyBps: 0, rescue: nil)
+            }
+        }
+        let far = { clock.nowMs() + 60_000 }
+
+        // Nothing measured yet.
+        let d = downloader()
+        let waiting = context()
+        clock.advance(100)
+        XCTAssertFalse(d.hedgeDue(waiting, delayMs: 300, deadlineAt: far(), copyBps: 0, rescue: nil), "before the delay")
+        clock.advance(250)
+        XCTAssertTrue(d.hedgeDue(waiting, delayMs: 300, deadlineAt: far(), copyBps: 0, rescue: nil), "no data yet")
+        let stopped = context()
+        steady(d, stopped, steps: 1)
+        clock.advance(400)
+        XCTAssertTrue(d.hedgeDue(stopped, delayMs: 300, deadlineAt: far(), copyBps: 0, rescue: nil), "stopped for a whole delay")
+        let onTime = context()
+        steady(d, onTime, steps: 4)
+        XCTAssertFalse(d.hedgeDue(onTime, delayMs: 300, deadlineAt: far(), copyBps: 0, rescue: nil), "on time with spare")
+        XCTAssertTrue(d.hedgeDue(onTime, delayMs: 300, deadlineAt: clock.nowMs() + 500, copyBps: 0, rescue: nil),
+                      "close to its deadline with no usual speed known")
+
+        // Usual connection speed measured: 64 KiB in 0.8 s = the first copy's pace.
+        let m = downloader()
+        m.meter.record(bytes: 64 * KiB, elapsedMs: 800)
+        let pace = Double(80 * KiB)
+        let paced = context()
+        steady(m, paced, steps: 4)
+        let soon = clock.nowMs() + 500 // finishes in ~400 ms: inside the slack, before the deadline
+        XCTAssertFalse(m.hedgeDue(paced, delayMs: 300, deadlineAt: soon, copyBps: pace, rescue: nil),
+                       "on pace, copy node not faster: no copy")
+        XCTAssertTrue(m.hedgeDue(paced, delayMs: 300, deadlineAt: soon, copyBps: pace * 3, rescue: nil),
+                      "copy node known 3× faster")
+        XCTAssertTrue(m.hedgeDue(paced, delayMs: 300, deadlineAt: soon, copyBps: 0, rescue: nil), "copy node unmeasured")
+        let budget = BTREarlyHedge(limit: 0)
+        let late = clock.nowMs() + 300
+        XCTAssertTrue(m.hedgeDue(paced, delayMs: 300, deadlineAt: late, copyBps: pace, rescue: budget),
+                      "will miss its deadline: one stale-measurement copy per range")
+        XCTAssertFalse(m.hedgeDue(paced, delayMs: 300, deadlineAt: late, copyBps: pace, rescue: budget), "budget spent")
+        let slow = context()
+        steady(m, slow, steps: 4, chunk: 2 * KiB)
+        XCTAssertTrue(m.hedgeDue(slow, delayMs: 300, deadlineAt: clock.nowMs() + 500, copyBps: Double(20 * KiB), rescue: nil),
+                      "well below the usual speed")
+        // lemon: with both sides measured, a first copy without a byte waits 1.5× the usual time to headers.
+        m.meter.recordHead(ms: 400)
+        let head = context()
+        clock.advance(350)
+        XCTAssertFalse(m.hedgeDue(head, delayMs: 300, deadlineAt: far(), copyBps: pace, rescue: nil))
+        XCTAssertTrue(m.hedgeDue(head, delayMs: 300, deadlineAt: far(), copyBps: 0, rescue: nil), "unmeasured copy node explores")
+        clock.advance(300)
+        XCTAssertTrue(m.hedgeDue(head, delayMs: 300, deadlineAt: far(), copyBps: pace, rescue: nil))
+    }
+
+    func testMeasuredStragglerGetsTheRescueSlotBeforeTheUsualDelay() async throws {
+        let warmStart = 60 * MiB
+        let client = FakeMediaClient(total: Int64(128 * MiB))
+        let lock = NSLock()
+        var seen: [Int64: Int] = [:]
+        client.urlRule = { _, r in
+            if r.start >= Int64(warmStart) { return .slowHead(ms: 600) }
+            lock.lock()
+            let n = (seen[r.start] ?? 0) + 1
+            seen[r.start] = n
+            lock.unlock()
+            // First copies: 8 KiB after 300 ms, the rest after another 700 ms.
+            return n == 1 ? .steps([(8 * KiB, 300), (128 * KiB, 700)]) : .ok
+        }
+        let d = make(client, config(.original), tuning: fastTuning(hedgeDelayMs: 900, firstByteMs: 5000))
+        let warm = d.makeTrack(kind: .video, urls: [btrMediaURL(hostA)], routeKey: "bv1:p1")
+        _ = try await fetch(d, warm, range(warmStart, MiB))
+        XCTAssertEqual(d.meter.hedgeDelayMs(maxMs: 900), 900, "pieces took ~600 ms: the usual delay is 900 ms")
+        let track = d.makeTrack(kind: .video, urls: [btrMediaURL(hostA), btrMediaURL(hostB)], routeKey: "bv1:p1")
+        let began = now()
+        let out = try await fetch(d, track, range(0, 8 * 64 * KiB), deadline: { began })
+        XCTAssertEqual(out.bytes, btrPattern(0, 8 * 64 * KiB))
+        let copies = client.requests.filter { $0.range.start < Int64(warmStart) }
+        var firsts = Set<Int64>()
+        let rescues = copies.filter { !firsts.insert($0.range.start).inserted }
+        let first = (rescues.map(\.at).min() ?? .infinity) - began
+        XCTAssertGreaterThanOrEqual(first, 250, "after the first progress report")
+        XCTAssertLessThan(first, 700, "before the usual 900 ms delay")
+    }
+
+    func testBansLastAcrossSessionsOfTheSameVideoOnly() async throws {
+        let registry = BTRBanRegistry()
+        let client = FakeMediaClient()
+        client.set(hostA, .status(503))
+        let cfg = config(hosts: [hostA, hostB])
+        let first = BTRDownloader(config: { cfg }, client: client, auto: nil, tuning: fastTuning(), bans: registry)
+        let track = first.makeTrack(kind: .video, urls: [btrMediaURL(hostA)], routeKey: "bv1:p1")
+        _ = try await fetch(first, track, range(0, MiB))
+        XCTAssertEqual(registry.banList(for: "bv1:p1").bannedHosts(), [hostA])
+        first.cancelAll()
+        let second = BTRDownloader(config: { cfg }, client: client, auto: nil, tuning: fastTuning(), bans: registry)
+        let again = second.makeTrack(kind: .video, urls: [btrMediaURL(hostA)], routeKey: "bv1:p1") as! BTRTrack
+        XCTAssertFalse(btrHosts(again.resolver.urls()).contains(hostA), "a new session of the same video keeps its bans")
+        let other = second.makeTrack(kind: .video, urls: [btrMediaURL(hostA)], routeKey: "bv2:p1") as! BTRTrack
+        XCTAssertTrue(btrHosts(other.resolver.urls()).contains(hostA), "another video starts clean")
     }
 }

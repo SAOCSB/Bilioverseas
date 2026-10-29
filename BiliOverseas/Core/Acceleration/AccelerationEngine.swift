@@ -672,7 +672,12 @@ final class PlaybackSession {
         let wanted = refreshURLs != nil && !closed
         if wanted { urgentRefresh = true }
         lock.unlock()
-        if wanted { Task { [weak self] in await self?.refreshIfDue() } }
+        if wanted {
+            Task<Void, Never> { [weak self] in
+                guard let self else { return }
+                await self.refreshIfDue()
+            }
+        }
     }
 
     /// Refreshes the signed URLs when due: 120 s before the earliest `deadline`, or after a hard failure, with the

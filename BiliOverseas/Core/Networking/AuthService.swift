@@ -471,7 +471,10 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         }
         if loggedIn, p != nil, locked({ announcedGeneration != gen }) {
             locked { announcedGeneration = gen }
-            // TODO(lead): fill FollowedUpsStore via SpaceAPI.allFollowingMids (wire through onLoginStateChanged).
+            // Followed UPs are exempt from feed filters; refresh the set once per login session.
+            Task.detached(priority: .utility) {
+                _ = try? await SpaceAPI.refreshFollowedUps()
+            }
             onLoginStateChanged?(true)
         }
     }

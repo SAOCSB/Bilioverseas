@@ -2,7 +2,7 @@ name: iOS Build
 
 on:
   push:
-    branches: ['**']
+    branches: ['**', '!ci-smoke']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -87,6 +87,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     continue-on-error: true
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Install XcodeGen
@@ -144,3 +146,15 @@ jobs:
         with:
           name: simulator-smoke
           path: smoke/
+      - name: Publish smoke results to the ci-smoke branch
+        if: always() && github.event_name == 'push'
+        run: |
+          cd smoke || exit 0
+          for f in *.png; do [ -e "$f" ] && sips -Z 1000 "$f" --out "$f" >/dev/null; done
+          echo "${GITHUB_SHA}" > COMMIT
+          git init -q -b ci-smoke
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -qm "Smoke results for ${GITHUB_SHA}"
+          git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" ci-smoke || echo "push failed"

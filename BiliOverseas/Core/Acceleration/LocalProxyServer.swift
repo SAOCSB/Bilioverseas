@@ -2,7 +2,8 @@ import Foundation
 import Network
 
 // Loopback HTTP/1.1 server for AVPlayer (proxy-ports §5.2, §6.6):
-// - NWListener bound to 127.0.0.1 only (`requiredLocalEndpoint` + `acceptLocalOnly`), an ephemeral port the first
+// - NWListener bound to 127.0.0.1 only (`requiredLocalEndpoint`, plus a loopback check per connection; not
+//   `acceptLocalOnly`, a local-link filter that is not needed here), an ephemeral port the first
 //   time, the SAME port again when it has to be rebuilt (the app was suspended, `ensureListening()`), so the URLs
 //   of items already handed to AVPlayer stay valid;
 // - keep-alive with several sequential requests per connection (`Connection: close` honoured), back-pressure by
@@ -10,6 +11,32 @@ import Network
 //   producing the response;
 // - a body that cannot be completed after the head was sent closes the connection (truncation, never padding).
 // Request routing / content come from `LocalProxyRequestHandler` (AccelerationEngine).
+
+/// Opt-in event trace of the loopback server (smoke test / diagnostics). Bounded so a long session cannot flood
+/// the log; costs nothing while no sink is set.
+enum LocalProxyTrace {
+    private static let lock = NSLock()
+    private static var sink: (@Sendable (String) -> Void)?
+    private static var remaining = 0
+
+    static func setSink(_ newSink: (@Sendable (String) -> Void)?, limit: Int = 400) {
+        lock.lock()
+        sink = newSink
+        remaining = limit
+        lock.unlock()
+    }
+
+    static func log(_ message: @autoclosure () -> String) {
+        lock.lock()
+        guard let sink, remaining > 0 else {
+            lock.unlock()
+            return
+        }
+        remaining -= 1
+        lock.unlock()
+        sink(message())
+    }
+}
 
 enum LocalProxyServerError: Error, Equatable {
     case timeout
@@ -132,7 +159,6 @@ final class LocalProxyServer: LocalProxyServing, @unchecked Sendable {
         tcp.noDelay = true
         let parameters = NWParameters(tls: nil, tcp: tcp)
         parameters.allowLocalEndpointReuse = true
-        parameters.acceptLocalOnly = true
         let nwPort: NWEndpoint.Port = port == 0 ? .any : (NWEndpoint.Port(rawValue: port) ?? .any)
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: nwPort)
 
@@ -172,6 +198,7 @@ final class LocalProxyServer: LocalProxyServing, @unchecked Sendable {
 
     private func listenerStateChanged(_ state: NWListener.State, generation gen: Int, listener: NWListener?,
                                       requestedPort: UInt16, allowFallback: Bool) {
+        LocalProxyTrace.log("listener#\(gen) \(state) port=\(listener?.port?.rawValue ?? 0)")
         switch state {
         case .ready:
             let actual = listener?.port?.rawValue ?? 0
@@ -245,9 +272,11 @@ final class LocalProxyServer: LocalProxyServing, @unchecked Sendable {
 
     private func accept(_ nw: NWConnection) {
         if case let .hostPort(host, _) = nw.endpoint, !Self.isLoopback(host) {
+            LocalProxyTrace.log("reject non-loopback peer \(nw.endpoint)")
             nw.cancel()
             return
         }
+        LocalProxyTrace.log("accept \(nw.endpoint)")
         guard let handler else {
             nw.cancel()
             return
@@ -309,8 +338,13 @@ final class LocalProxyConnection: @unchecked Sendable {
         self.handler = handler
     }
 
+    /// Short id in trace lines.
+    private let traceId = String(UInt32.random(in: 0..<100_000))
+
     func start() {
+        let tid = traceId
         connection.stateUpdateHandler = { [weak self] state in
+            LocalProxyTrace.log("conn \(tid) state \(state)")
             switch state {
             case .failed, .cancelled:
                 self?.peerGone()
@@ -345,6 +379,7 @@ final class LocalProxyConnection: @unchecked Sendable {
         connection.receive(minimumIncompleteLength: 1, maximumLength: Self.receiveChunk) {
             [weak self] data, _, isComplete, error in
             guard let self else { return }
+            LocalProxyTrace.log("conn \(self.traceId) recv \(data?.count ?? 0)B complete=\(isComplete) error=\(error.map { "\($0)" } ?? "nil")")
             var overflow = false
             self.lock.lock()
             if let data, !data.isEmpty {
@@ -404,6 +439,14 @@ final class LocalProxyConnection: @unchecked Sendable {
         waiting?.resume()
     }
 
+    /// First bytes of an unparseable request head (trace only).
+    private func rejectedHeadPreview() -> String {
+        lock.lock()
+        let head = inbox.prefix(160)
+        lock.unlock()
+        return String(decoding: head, as: UTF8.self).replacingOccurrences(of: "\r\n", with: "⏎")
+    }
+
     private enum NextStep {
         case request(ProxyHTTPRequest)
         case reject(Int)
@@ -434,6 +477,7 @@ final class LocalProxyConnection: @unchecked Sendable {
             case .request(let request):
                 return request
             case .reject(let status):
+                LocalProxyTrace.log("conn \(traceId) reject \(status) head=\(rejectedHeadPreview())")
                 let head = ProxyHTTPResponseHead(status: status, headers: [("Content-Length", "0"),
                                                                            ("Connection", "close")])
                 try? await send(head.serialized)
@@ -464,14 +508,19 @@ final class LocalProxyConnection: @unchecked Sendable {
         finished = true
         lock.unlock()
         guard !already else { return }
+        LocalProxyTrace.log("conn \(traceId) finish peerClosed=\(isPeerClosed)")
         connection.cancel()
         onClose?()
     }
 
     /// Writes one response. Returns whether the connection may serve another request.
     private func respond(to request: ProxyHTTPRequest) async -> Bool {
-        guard let handler else { return false }
+        guard let handler else {
+            LocalProxyTrace.log("conn \(traceId) no handler for \(request.method) \(request.path)")
+            return false
+        }
         let response = await handler.handle(request)
+        LocalProxyTrace.log("conn \(traceId) \(request.method) \(request.path) range=\(request.header("range") ?? "-") -> \(response.status) len=\(response.contentLength)")
         let keepAlive = !request.wantsClose && !response.closeConnection && !request.hasBody
         var headers = response.headers
         headers.append(("Connection", keepAlive ? "keep-alive" : "close"))
@@ -509,6 +558,7 @@ final class LocalProxyConnection: @unchecked Sendable {
                 if sent < response.contentLength { return false }
             }
         } catch {
+            LocalProxyTrace.log("conn \(traceId) response aborted: \(error)")
             if case .stream(let source) = response.body { source.cancel() }
             return false
         }

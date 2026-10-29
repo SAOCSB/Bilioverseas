@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import Network
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -29,6 +30,7 @@ enum SmokeTest {
     static func start(router: TabRouter) {
         guard isEnabled, !started else { return }
         started = true
+        LocalProxyTrace.setSink({ NSLog("SMOKE-PROXY %@", $0) })
         Task { await run(router: router) }
     }
 
@@ -112,6 +114,9 @@ enum SmokeTest {
             accelerate: true, allowHDR: false))
         defer { session.close() }
         let prepareMs = Int(Date().timeIntervalSince(t0) * 1000)
+        // Raw socket first (tells a server-side drop from a URLSession-specific problem).
+        let raw = await rawGet(port: session.port, path: session.url.path)
+        record("engine.rawGet", raw)
         let master = try await fetchText(session.url)
         let variant = try await fetchText(session.url.deletingLastPathComponent().appendingPathComponent("v.m3u8"))
         var result: [String: Any] = [
@@ -146,6 +151,67 @@ enum SmokeTest {
         result["accelerated"] = stats.accelerated
         result["fallback"] = stats.fallbackActive
         result["nodes"] = stats.nodes.map { "\($0.host) \($0.state.rawValue) \(Int($0.bytesPerSecond / 1024))KB/s" }
+        return result
+    }
+
+    /// One `GET` over a bare NWConnection to the loopback proxy; reports the status line or what went wrong.
+    nonisolated private static func rawGet(port: UInt16, path: String) async -> [String: Any] {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return ["error": "bad port \(port)"] }
+        let connection = NWConnection(host: .ipv4(.loopback), port: nwPort, using: .tcp)
+        let queue = DispatchQueue(label: "smoke.rawget")
+        final class Box: @unchecked Sendable {
+            let lock = NSLock()
+            var done = false
+            var received = Data()
+            func finish() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                if done { return false }
+                done = true
+                return true
+            }
+        }
+        let box = Box()
+        let t0 = Date()
+        let result: [String: Any] = await withCheckedContinuation { (cont: CheckedContinuation<[String: Any], Never>) in
+            func complete(_ value: [String: Any]) {
+                guard box.finish() else { return }
+                var v = value
+                v["ms"] = Int(Date().timeIntervalSince(t0) * 1000)
+                connection.cancel()
+                cont.resume(returning: v)
+            }
+            func receive() {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
+                    if let data { box.received.append(data) }
+                    let text = String(decoding: box.received.prefix(200), as: UTF8.self)
+                    if text.contains("\r\n\r\n") {
+                        complete(["ok": true, "head": text.components(separatedBy: "\r\n").first ?? ""])
+                    } else if isComplete || error != nil {
+                        complete(["ok": false, "bytes": box.received.count, "complete": isComplete,
+                                  "error": error.map { "\($0)" } ?? "EOF"])
+                    } else {
+                        receive()
+                    }
+                }
+            }
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    let request = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAccept: */*\r\n\r\n"
+                    connection.send(content: Data(request.utf8), completion: .contentProcessed { error in
+                        if let error { complete(["ok": false, "error": "send \(error)"]) }
+                    })
+                    receive()
+                case .failed(let error), .waiting(let error):
+                    complete(["ok": false, "error": "state \(error)"])
+                default:
+                    break
+                }
+            }
+            connection.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + 10) { complete(["ok": false, "error": "timeout"]) }
+        }
         return result
     }
 

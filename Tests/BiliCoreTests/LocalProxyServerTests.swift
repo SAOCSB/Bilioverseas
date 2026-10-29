@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Network
 import XCTest
 @testable import BiliCore
@@ -228,6 +231,35 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertTrue(closed)
         client.close()
         session.close()
+    }
+
+    /// The real clients are CFNetwork (URLSession / AVPlayer), not a hand-written socket client.
+    func testURLSessionClientGetsPlaylistsAndRanges() async throws {
+        let downloader = EngineFakeDownloader(files: [.video: videoFile.data, .audio: audioFile.data])
+        let engine = makeEngine(downloader: downloader)
+        engine.startIfNeeded()
+        let session = try await prepare(engine)
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 5
+        let urlSession = URLSession(configuration: config)
+        defer {
+            urlSession.invalidateAndCancel()
+            session.close()
+        }
+        let (masterData, masterResponse) = try await urlSession.data(for: URLRequest(url: session.url))
+        XCTAssertEqual((masterResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertTrue(String(decoding: masterData, as: UTF8.self).hasPrefix("#EXTM3U\n"))
+
+        let base = session.url.deletingLastPathComponent()
+        let (mediaData, _) = try await urlSession.data(for: URLRequest(url: base.appendingPathComponent("v.m3u8")))
+        XCTAssertTrue(String(decoding: mediaData, as: UTF8.self).contains("#EXT-X-ENDLIST"))
+
+        let s1 = videoFile.segments[1]
+        var request = URLRequest(url: base.appendingPathComponent("v.m4s"))
+        request.setValue("bytes=\(s1.start)-\(s1.end)", forHTTPHeaderField: "Range")
+        let (segment, segmentResponse) = try await urlSession.data(for: request)
+        XCTAssertEqual((segmentResponse as? HTTPURLResponse)?.statusCode, 206)
+        XCTAssertEqual(segment, slice(videoFile, s1))
     }
 
     func testWholeFileWithoutRangeAndPipelinedRequests() async throws {

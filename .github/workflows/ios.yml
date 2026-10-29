@@ -137,7 +137,7 @@ jobs:
           echo "===== SMOKE REPORT ====="
           cat smoke/smoke-report.json 2>/dev/null || true
           echo "===== SMOKE LOG ====="
-          xcrun simctl spawn "$UDID" log show --last 10m --style compact --predicate 'eventMessage CONTAINS "SMOKE"' | tail -80 || true
+          xcrun simctl spawn "$UDID" log show --last 10m --style compact --predicate 'eventMessage CONTAINS "SMOKE"' | tail -400 || true
           echo "===== CRASHES ====="
           ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i bili || echo "none"
           xcrun simctl spawn "$UDID" launchctl list | grep -i bilioverseas || echo "app process not running (crashed or exited)"

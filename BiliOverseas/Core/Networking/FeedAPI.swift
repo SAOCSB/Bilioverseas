@@ -89,11 +89,12 @@ enum FeedAPI {
             }
             if c.badge.isEmpty { c.badge = ogv["badge"].string ?? "番剧" }
         default:
-            if goto == "ad" {
-                // An ad's `id` is a creative id, not an aid: only trust a real bvid.
-                ListMapping.applyIDs(&c, aid: 0, bvid: item["bvid"].stringValue)
-            } else {
+            let isVideoGoto = goto == "av" || goto.isEmpty
+            if isVideoGoto {
                 ListMapping.applyIDs(&c, aid: item["id"].int64 ?? item["aid"].int64Value, bvid: item["bvid"].stringValue)
+            } else {
+                // For ads / banners / unknown cards `id` is not an aid: only trust a real bvid.
+                ListMapping.applyIDs(&c, aid: 0, bvid: item["bvid"].stringValue)
             }
             if !signals.isEmpty {
                 c.kind = .ad
@@ -109,7 +110,7 @@ enum FeedAPI {
                 }
                 let creative = business["id"].int64Value
                 c.id = (c.id.isEmpty ? "ad" : "ad-\(c.id)") + "-\(position)" + (creative != 0 ? "-\(creative)" : "")
-            } else if goto == "av" || (goto.isEmpty && !c.id.isEmpty) {
+            } else if isVideoGoto {
                 c.kind = .video
                 if c.id.isEmpty { return nil }
             } else {

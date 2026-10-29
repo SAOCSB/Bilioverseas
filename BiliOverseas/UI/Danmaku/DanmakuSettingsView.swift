@@ -329,7 +329,11 @@ struct DanmakuBlockListView: View {
                 if let error = result.uploadError {
                     message = "部分规则上传失败：\(error.localizedDescription)"
                 }
-                ToastCenter.shared.show(parts.isEmpty ? "屏蔽列表已是最新" : "已同步：" + parts.joined(separator: "，"))
+                if !parts.isEmpty {
+                    ToastCenter.shared.show("已同步：" + parts.joined(separator: "，"))
+                } else if result.uploadError == nil {
+                    ToastCenter.shared.show("屏蔽列表已是最新")
+                }
             } catch {
                 message = error.localizedDescription
             }

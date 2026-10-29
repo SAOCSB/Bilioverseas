@@ -707,6 +707,7 @@ final class H1MediaClientLoopbackTests: XCTestCase {
         let client = makeClient()
         let r = try await fetch(client, "/junk-after", range(50, count: 5000))
         XCTAssertTrue(r.body == LoopbackCDN.content(offset: 50, count: 5000))
+        try await Task.sleep(nanoseconds: 50_000_000) // the stray bytes have surely arrived
         _ = try await fetch(client, "/file", range(0, count: 100))
         XCTAssertEqual(server.accepted, 2, "a connection with unread bytes must never be reused")
     }
@@ -751,13 +752,14 @@ final class H1MediaClientLoopbackTests: XCTestCase {
         let busy = Task { try await self.fetch(client, "/slow", self.range(0, count: 320_000)) } // ~200 ms
         let started = await waitUntil { self.server.bodyBytesSent > 0 }
         XCTAssertTrue(started)
-        var waiters: [Task<Fetched, Error>] = []
-        for (tag, high) in [("n1", false), ("h1", true), ("n2", false), ("h2", true)] {
-            waiters.append(Task { try await self.fetch(client, "/file?\(tag)", self.range(0, count: 100), highPriority: high) })
-            try await Task.sleep(nanoseconds: 10_000_000) // deterministic queue order
+        // `get` enqueues synchronously, so the queue order is the call order.
+        let queued = [("n1", false), ("h1", true), ("n2", false), ("h2", true)].map { tag, high in
+            client.get(server.url("/file?\(tag)"), range: range(0, count: 100), highPriority: high)
         }
         _ = try await busy.value
-        for w in waiters { _ = try await w.value }
+        for stream in queued {
+            for try await _ in stream {}
+        }
         XCTAssertEqual(server.requestTargets, ["/slow", "/file?h1", "/file?h2", "/file?n1", "/file?n2"])
         XCTAssertEqual(server.accepted, 1)
     }

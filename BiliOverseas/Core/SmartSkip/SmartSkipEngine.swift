@@ -300,14 +300,17 @@ final class SmartSkipTracker {
         consumeCountdown(now: now)
         lastTime = time
         lastIsPlaying = isPlaying
-        countdownRunning = isPlaying && !interacting
 
         let active = segments.first { time >= $0.start && time < $0.end }
         activeSegment = active
         if active?.id != visit?.segmentID {
             visit = active.map { Visit(segmentID: $0.id) }
+            // An interaction belonged to the previous visit's prompt (a hover that ends by the
+            // prompt disappearing never reports `false`).
+            interacting = false
             if let p = pendingSeek, p.segmentID != active?.id { pendingSeek = nil }
         }
+        countdownRunning = isPlaying && !interacting
         if let u = undone {
             if active?.id == u.segmentID { undone?.entered = true } else if u.entered { undone = nil }
         }
@@ -365,6 +368,7 @@ final class SmartSkipTracker {
     func didSeek(to time: Double) {
         pendingSeek = nil
         visit = nil
+        interacting = false
         lastTime = time
     }
 

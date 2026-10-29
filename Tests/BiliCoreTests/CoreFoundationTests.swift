@@ -17,6 +17,15 @@ final class JSONTests: XCTestCase {
         XCTAssertEqual(json[path: "arr.0"].intValue, 1)
     }
 
+    func testHugeNumbersDoNotTrap() throws {
+        let json = try JSON(string: #"{"a":"99999999999999999999","b":1.5e19,"c":"1e400","d":"9999999999999999亿"}"#)
+        XCTAssertNil(json["a"].int64)
+        XCTAssertNil(json["b"].int64)
+        XCTAssertNil(json["c"].int64)
+        XCTAssertNil(json["d"].int64)
+        XCTAssertEqual(json["b"].stringValue, "1.5e+19")
+    }
+
     func testUnwrapEnvelope() throws {
         let ok = try JSON(string: #"{"code":0,"message":"0","data":{"x":1}}"#)
         XCTAssertEqual(try BiliHTTP.unwrap(ok)["x"].intValue, 1)

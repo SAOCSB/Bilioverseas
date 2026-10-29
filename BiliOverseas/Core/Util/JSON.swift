@@ -104,7 +104,7 @@ enum JSON: Equatable {
         switch self {
         case .string(let s): return s
         case .int(let i): return String(i)
-        case .double(let d): return d.rounded() == d ? String(Int64(d)) : String(d)
+        case .double(let d): return d.rounded() == d && abs(d) < 9.0e18 ? String(Int64(d)) : String(d)
         case .bool(let b): return b ? "true" : "false"
         default: return nil
         }
@@ -114,12 +114,12 @@ enum JSON: Equatable {
     var int64: Int64? {
         switch self {
         case .int(let i): return i
-        case .double(let d): return d.isFinite ? Int64(d) : nil
+        case .double(let d): return JSON.safeInt64(d)
         case .bool(let b): return b ? 1 : 0
         case .string(let s):
             let t = s.trimmingCharacters(in: .whitespaces)
             if let i = Int64(t) { return i }
-            if let d = Double(t), d.isFinite { return Int64(d) }
+            if let d = Double(t) { return JSON.safeInt64(d) }
             return JSON.parseChineseCount(t)
         default: return nil
         }
@@ -180,12 +180,18 @@ enum JSON: Equatable {
         return try? JSONSerialization.data(withJSONObject: any)
     }
 
+    /// `Int64(d)` traps for NaN, ±inf and |d| ≥ 2^63; server values can be anything.
+    static func safeInt64(_ d: Double) -> Int64? {
+        guard d.isFinite, abs(d) < 9.0e18 else { return nil }
+        return Int64(d)
+    }
+
     /// Parses counts such as "1.2万", "3亿", "12,345".
     static func parseChineseCount(_ s: String) -> Int64? {
         var t = s.replacingOccurrences(of: ",", with: "")
         var mul: Double = 1
         if t.hasSuffix("万") { mul = 1e4; t.removeLast() } else if t.hasSuffix("亿") { mul = 1e8; t.removeLast() }
         guard mul != 1, let d = Double(t) else { return nil }
-        return Int64(d * mul)
+        return safeInt64(d * mul)
     }
 }

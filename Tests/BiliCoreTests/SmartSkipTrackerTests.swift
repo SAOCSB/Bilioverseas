@@ -132,6 +132,21 @@ final class SmartSkipTrackerTests: XCTestCase {
         XCTAssertEqual(remaining(tracker.update(time: 104, isPlaying: true, now: 4)), 3.0)
     }
 
+    /// SwiftUI's `onHover` sends no `false` when the prompt is removed under the pointer, so an
+    /// interaction never outlives the visit whose prompt it was on.
+    func testInteractionEndsWithItsVisit() {
+        let h = SSHarness(segments: [M(100, 130), M(200, 230)], mode: .manual)
+        h.tick(100)
+        h.tracker.setInteracting(true, now: h.now)
+        h.advance(2)
+        h.dismiss()                       // prompt removed while "hovered"
+        h.tick(150)
+        h.tick(200)
+        XCTAssertTrue(h.buttonVisible)
+        h.advance(5.25)
+        XCTAssertFalse(h.buttonVisible, "the next prompt counts down and hides")
+    }
+
     func testALongSilentGapCountsAsAtMostOneTick() {
         let tracker = SmartSkipTracker(segments: [M(100, 200)], mode: .manual)
         _ = tracker.update(time: 100, isPlaying: true, now: 0)

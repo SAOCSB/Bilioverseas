@@ -164,7 +164,8 @@ enum SmartSkipJS {
     static func numberString(_ x: Double) -> String {
         if x.isNaN { return "NaN" }
         if x.isInfinite { return x < 0 ? "-Infinity" : "Infinity" }
-        if x == x.rounded(), abs(x) < 1e21 { return String(Int64(x)) }
+        // Int64(x) traps at |x| >= 2^63 (absurd but server-controlled times, e.g. a chapter end).
+        if x == x.rounded(), abs(x) < 9_223_372_036_854_775_808 { return String(Int64(x)) }
         return "\(x)"
     }
 
@@ -241,13 +242,18 @@ final class SmartSkipRegex {
             let c = chars[i]
             if c == "\\", i + 1 < chars.count {
                 let n = chars[i + 1]
-                // Escapes with a fixed-length operand are copied whole (their hex digits / control
-                // letter must never be case-expanded).
+                // Escapes with a fixed-length operand are handled whole: their hex digits / control
+                // letter are never case-expanded (only an escaped ASCII letter itself is).
                 let operand = n == "u" ? 4 : n == "x" ? 2 : n == "c" ? 1 : 0
                 if operand > 0, i + 1 + operand < chars.count,
                    chars[(i + 2)...(i + 1 + operand)].allSatisfy({ n == "c" ? isASCIILetter($0) : $0.properties.isASCIIHexDigit }) {
-                    out += "\\"
-                    for k in (i + 1)...(i + 1 + operand) { out.unicodeScalars.append(chars[k]) }
+                    let hex = String(String.UnicodeScalarView(chars[(i + 2)...(i + 1 + operand)]))
+                    if ignoreCase, n != "c", let v = UInt32(hex, radix: 16), let e = Unicode.Scalar(v), isASCIILetter(e) {
+                        out += inClass ? "\(e)\(otherCase(e))" : "[\(e)\(otherCase(e))]"
+                    } else {
+                        out += "\\"
+                        for k in (i + 1)...(i + 1 + operand) { out.unicodeScalars.append(chars[k]) }
+                    }
                     i += 2 + operand
                     continue
                 }

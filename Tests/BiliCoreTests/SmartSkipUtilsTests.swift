@@ -83,7 +83,8 @@ final class SmartSkipRegexTests: XCTestCase {
         XCTAssertTrue(SmartSkipRegex("^ads$", ignoreCase: true).test("ADS"))
         XCTAssertTrue(SmartSkipRegex(#"free\b"#, ignoreCase: true).test("FREEſ"), "ſ is not a JS word character")
         XCTAssertTrue(SmartSkipRegex("[a-c]x", ignoreCase: true).test("BX"))
-        XCTAssertTrue(SmartSkipRegex(#"^A\x42$"#, ignoreCase: true).test("ab"), "escape operands are not case-expanded")
+        XCTAssertTrue(SmartSkipRegex(#"^A\x42$"#, ignoreCase: true).test("ab"), "escaped letters fold, their hex digits do not")
+        XCTAssertEqual(SmartSkipRegex.translate(#"\u00a0\x41"#, ignoreCase: true), #"\u00a0[Aa]"#)
         XCTAssertEqual(SmartSkipRegex.translate("a[b-dX]", ignoreCase: true), "[aA][b-dB-DXx]")
         // Upstream getAdLabelEvidence: "ad free" followed by ſ is negated by the ad-free rule.
         XCTAssertNil(SmartSkipDetectors.getAdLabelEvidence("ad freeſponsor|~sponsor"))
@@ -156,6 +157,8 @@ final class SmartSkipJSSemanticsTests: XCTestCase {
         XCTAssertEqual(SmartSkipJS.unique(["b", "a", "b", "c", "a"]), ["b", "a", "c"])
         XCTAssertEqual(SmartSkipJS.numberString(79), "79")
         XCTAssertEqual(SmartSkipJS.numberString(39.751), "39.751")
+        XCTAssertFalse(SmartSkipJS.numberString(1e20).isEmpty, "huge integral values must not trap in Int64(_:)")
+        XCTAssertFalse(AdSegment(start: 1e19, end: 2e19, requiresConfirmation: true, source: "chapters").id.isEmpty)
     }
 }
 

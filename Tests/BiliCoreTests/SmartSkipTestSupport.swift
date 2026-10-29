@@ -179,13 +179,24 @@ final class SSFakeTransport: SmartSkipTransport, @unchecked Sendable {
 
     func get(_ url: String, query: [String: String], credentials: SmartSkipCredentials, wbi: Bool) async throws -> Data {
         let request = Request(url: url, query: query, credentials: credentials, wbi: wbi)
+        begin(request)
+        defer { end() }
+        return try await handler(request)
+    }
+
+    // NSLock is not callable directly from async functions under the Swift 6 compiler.
+    private func begin(_ request: Request) {
         lock.lock()
         _requests.append(request)
         active += 1
         peakConcurrency = max(peakConcurrency, active)
         lock.unlock()
-        defer { lock.lock(); active -= 1; lock.unlock() }
-        return try await handler(request)
+    }
+
+    private func end() {
+        lock.lock()
+        active -= 1
+        lock.unlock()
     }
 
     static func json(_ object: Any) -> Data { try! JSONSerialization.data(withJSONObject: object) }

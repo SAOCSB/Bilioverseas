@@ -31,9 +31,9 @@ struct OfflineCacheActionItem: View {
             .buttonStyle(.plain)
             .accessibilityLabel("离线缓存")
             .sheet(isPresented: $showsSheet) {
-                OfflineCacheSheet(detail: detail, currentCid: model.currentCid) {
+                OfflineCacheSheet(detail: detail, currentCid: model.currentCid, onShowList: { [router] in
                     router.push(.offline)
-                }
+                })
             }
         }
     }
@@ -134,7 +134,7 @@ struct OfflineCacheSheet: View {
             }
         }
         .tint(.biliPink)
-        .presentationDetents(parts.count > 1 ? [.medium, .large] : [.medium])
+        .presentationDetents([.medium, .large])
         .task { await loadQualities() }
     }
 

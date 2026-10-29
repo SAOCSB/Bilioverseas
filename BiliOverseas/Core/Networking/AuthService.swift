@@ -193,7 +193,7 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         guard nav.isLogin else {
             throw nav.code == 0 || nav.code == -101 ? BiliError.other("Cookie 无效或已过期") : BiliError.api(code: nav.code, message: "")
         }
-        let cookies = pairs.compactMap { LoginAPI.makeCookie(name: $0.name, value: $0.value) }
+        let cookies = LoginAPI.pastedLoginCookies(pairs, navMid: nav.profile?.mid ?? 0)
         await applyLogin(cookies: cookies, replaceExisting: true) { t in
             t.refreshToken = refreshToken
         }

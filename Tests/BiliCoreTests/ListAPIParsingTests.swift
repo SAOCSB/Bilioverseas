@@ -33,6 +33,17 @@ final class ListAPIParsingTests: XCTestCase {
         XCTAssertNil(ListCursor.next(page: 3, hasMore: false))
     }
 
+    /// `Int64(_: Double)` traps beyond 2^63: oversized counts from the server must clamp, not crash.
+    func testCountsClampInsteadOfTrapping() throws {
+        XCTAssertEqual(ListMapping.count(.double(1e20)), Int64.max)
+        XCTAssertEqual(ListMapping.count(.double(-5)), 0)
+        XCTAssertEqual(ListMapping.count(.string("99999999999999999999")), Int64.max)
+        XCTAssertEqual(ListMapping.count(.string("999999999999亿")), Int64.max)
+        let stat = try JSON(string: #"{"view":1.5e19,"like":"12.3万"}"#)
+        XCTAssertEqual(ListMapping.count(stat["view"]), Int64.max)
+        XCTAssertEqual(ListMapping.count(stat["like"]), 123_000)
+    }
+
     // MARK: - Web recommend
 
     func testWebRecommendKindsAndAdSignals() {
@@ -430,6 +441,28 @@ final class ListAPIParsingTests: XCTestCase {
         XCTAssertEqual(FavAPI.parseFolderInfo(data)?.id, 1052622027)
     }
 
+    /// Removing audio / invalid PGC items used to send `0:2` (aid 0, video type).
+    func testFavResourceKeysForAudioAndInvalidPGC() {
+        let data = json(#"""
+        {"has_more":false,"medias":[
+          {"id":3344,"type":12,"title":"音频","cover":"https://i0.hdslb.com/a.jpg","attr":0},
+          {"id":778899,"type":24,"title":"已失效视频","cover":"","attr":1,"ogv":{"season_id":4455}},
+          {"id":555,"type":2,"title":"已失效视频","cover":"","attr":9,"bv_id":"BV1bb411c7Bc"}
+        ]}
+        """#)
+        let items = FavAPI.parseContents(data, page: 1, includeInvalid: true).items
+        XCTAssertEqual(items.count, 3)
+        XCTAssertEqual(items.map { FavAPI.resourceKey(for: $0) }, ["3344:12", "778899:24", "555:2"])
+        // Other PGC cards (timeline / rank) carry only an ep id.
+        XCTAssertEqual(FavAPI.resourceKey(for: ListMapping.pgcCard(seasonId: 1, epId: 99, title: "", cover: "")), "99:24")
+        // A PGC history card carries the episode's archive aid and keeps the video key.
+        var history = VideoCard(id: "pgc_7890")
+        history.kind = .bangumi
+        history.aid = 1234
+        history.epId = 99
+        XCTAssertEqual(FavAPI.resourceKey(for: history), "1234:2")
+    }
+
     // MARK: - Dynamics
 
     func testDynamicsFeedParsing() throws {
@@ -526,6 +559,18 @@ final class ListAPIParsingTests: XCTestCase {
         XCTAssertEqual(ad.adSignals, ["type=DYNAMIC_TYPE_AD"])
         XCTAssertEqual(ad.video?.kind, .ad)
         XCTAssertEqual(ad.video?.adSignals, ["type=DYNAMIC_TYPE_AD"])
+    }
+
+    /// dyn/thumb takes a JSON body (csrf in the query); the old code sent a form body.
+    func testDynamicLikeBodyIsJSON() throws {
+        let body = DynamicsAPI.likeBody(dynamicId: "913000000000000001", like: false)
+        let data = try JSONSerialization.data(withJSONObject: body)
+        let back = try JSON(data: data)
+        XCTAssertEqual(back["dyn_id_str"].stringValue, "913000000000000001", "id stays a string (> 2^53)")
+        XCTAssertEqual(back["up"].intValue, 2)
+        XCTAssertEqual(back["spmid"].stringValue, "333.1365.0.0")
+        XCTAssertNil(body["csrf"], "csrf goes in the query")
+        XCTAssertEqual(DynamicsAPI.likeBody(dynamicId: "1", like: true)["up"] as? Int, 1)
     }
 
     func testDynamicsUpList() {

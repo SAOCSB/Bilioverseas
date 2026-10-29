@@ -820,4 +820,49 @@ final class H1MediaClientLoopbackTests: XCTestCase {
         let idle = await waitUntil { client.openConnectionCount == 0 }
         XCTAssertTrue(idle, "cancelled task must be removed")
     }
+
+    func testURLSessionBackPressureSuspendsAndResumesWithoutLosingBytes() async throws {
+        let client = URLSessionMediaClient(lanes: 1)
+        let size = 8 << 20
+        var it = client.get(server.url("/file"), range: range(0, count: size), highPriority: false).makeAsyncIterator()
+        do {
+            guard case .head(let status, _)? = try await it.next() else { return XCTFail("missing head") }
+            XCTAssertEqual(status, 206)
+        } catch MediaFetchError.connectFailed(let message) where message.contains("-1022") {
+            throw XCTSkip("ATS blocks cleartext loopback in this test host")
+        }
+        try await Task.sleep(nanoseconds: 400_000_000) // stalled consumer: the task gets suspended
+        var body = Data()
+        body.reserveCapacity(size)
+        while let event = try await it.next() {
+            if case .data(let d) = event {
+                body.append(d)
+                if body.count % (2 << 20) < d.count { try await Task.sleep(nanoseconds: 50_000_000) } // stall again
+            }
+        }
+        XCTAssertEqual(body.count, size)
+        XCTAssertTrue(body == LoopbackCDN.content(offset: 0, count: size), "suspend/resume must continue, not restart")
+        XCTAssertEqual(server.accepted, 1)
+        let done = await waitUntil { client.openConnectionCount == 0 }
+        XCTAssertTrue(done)
+    }
+
+    func testURLSessionCancelWhileBackPressuredRemovesTheTask() async throws {
+        try XCTSkipUnless(URLSessionMediaLane.suspendsForBackPressure, "no task suspension on this platform")
+        let client = URLSessionMediaClient(lanes: 1)
+        do {
+            var it = client.get(server.url("/file"), range: range(0, count: 16 << 20), highPriority: false).makeAsyncIterator()
+            do {
+                _ = try await it.next()
+            } catch MediaFetchError.connectFailed(let message) where message.contains("-1022") {
+                throw XCTSkip("ATS blocks cleartext loopback in this test host")
+            }
+            try await Task.sleep(nanoseconds: 300_000_000) // suspended for back-pressure (Apple platforms)
+            XCTAssertEqual(client.openConnectionCount, 1)
+        } // iterator released: the consumer is gone
+        let removed = await waitUntil(5) { client.openConnectionCount == 0 }
+        XCTAssertTrue(removed, "a cancelled (suspended) task must complete and be removed")
+        let closed = await waitUntil(5) { self.server.closed == 1 }
+        XCTAssertTrue(closed)
+    }
 }

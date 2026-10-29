@@ -906,13 +906,20 @@ final class HeartbeatReporter: @unchecked Sendable {
         AppSettings.shared.general.reportHistory && BiliHTTP.shared.isLoggedIn
     }
 
+    /// AVPlayer reports NaN (item not ready) or ±∞ (indefinite time); `Int(_:)` traps on those.
+    private static func finitePosition(_ p: Double?) -> Double? {
+        guard let p, p.isFinite else { return nil }
+        return min(max(0, p), 1e9)
+    }
+
     /// Begins a new source. Any previous source is stopped (and reported) first.
     func start(_ context: HeartbeatContext, position: Double = 0) {
         stop()
+        let position = HeartbeatReporter.finitePosition(position) ?? 0
         lock.lock()
         self.context = context
-        lastSent = Int(max(0, position))
-        lastPosition = max(0, position)
+        lastSent = Int(position)
+        lastPosition = position
         lastPlaying = false
         realPlayed = 0
         lastTickAt = nil
@@ -923,7 +930,8 @@ final class HeartbeatReporter: @unchecked Sendable {
     }
 
     /// Call about once per second with the current position.
-    func tick(position: Double, isPlaying: Bool) {
+    func tick(position rawPosition: Double, isPlaying: Bool) {
+        guard let position = HeartbeatReporter.finitePosition(rawPosition) else { return }
         lock.lock()
         guard context != nil else { lock.unlock(); return }
         let t = now()
@@ -947,15 +955,17 @@ final class HeartbeatReporter: @unchecked Sendable {
     }
 
     /// A seek moves the baseline without reporting.
-    func seeked(to position: Double) {
+    func seeked(to rawPosition: Double) {
+        guard let position = HeartbeatReporter.finitePosition(rawPosition) else { return }
         lock.lock()
-        lastSent = Int(max(0, position))
+        lastSent = Int(position)
         lastPosition = position
         lock.unlock()
     }
 
     /// Playback reached the end (AVPlayerItemDidPlayToEndTime).
     func finished(position: Double? = nil) {
+        let position = HeartbeatReporter.finitePosition(position)
         lock.lock()
         guard let ctx = context else { lock.unlock(); return }
         let p = position ?? lastPosition
@@ -973,6 +983,7 @@ final class HeartbeatReporter: @unchecked Sendable {
 
     /// Leaving the page / switching part or episode: reports the final position.
     func stop(position: Double? = nil) {
+        let position = HeartbeatReporter.finitePosition(position)
         lock.lock()
         guard let ctx = context else { lock.unlock(); return }
         let p = position ?? lastPosition

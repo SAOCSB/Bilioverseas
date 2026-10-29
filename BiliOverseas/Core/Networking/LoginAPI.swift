@@ -206,6 +206,19 @@ enum LoginAPI {
         return out
     }
 
+    /// Cookies to store for a verified pasted login. Pastes often carry only `SESSDATA` + `bili_jct`,
+    /// but `BiliHTTP.mid` (favourites, follows, bangumi follows, own replies …) reads `DedeUserID`,
+    /// so it is set from the mid nav returned for this very session (nav wins over a stale paste).
+    static func pastedLoginCookies(_ pairs: [(name: String, value: String)], navMid: Int64,
+                                   now: Date = Date()) -> [HTTPCookie] {
+        var pairs = pairs
+        if navMid > 0 {
+            pairs.removeAll { $0.name == "DedeUserID" }
+            pairs.append((name: "DedeUserID", value: String(navMid)))
+        }
+        return pairs.compactMap { makeCookie(name: $0.name, value: $0.value, now: now) }
+    }
+
     /// A `.bilibili.com` `/` cookie. `expires == nil` → `now + defaultSessionLifetime`.
     static func makeCookie(name: String, value: String, expires: Date? = nil, secure: Bool = false,
                            httpOnly: Bool = false, now: Date = Date()) -> HTTPCookie? {

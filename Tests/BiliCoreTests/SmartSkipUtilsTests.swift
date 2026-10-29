@@ -72,6 +72,22 @@ final class SmartSkipRegexTests: XCTestCase {
         XCTAssertTrue(SmartSkipRegex("sponsoredby", ignoreCase: true).test("SponsoredBy"))
         XCTAssertFalse(SmartSkipRegex("sponsoredby").test("SponsoredBy"))
     }
+
+    /// V8's `i` flag (no `u`) never folds a non-ASCII character onto an ASCII letter; ICU's
+    /// case-insensitive mode does (ſ U+017F ~ s, K U+212A ~ k), also inside the `\b` emulation.
+    /// Expected values checked with node 22.
+    func testCaseInsensitiveFlagIsASCIIOnlyLikeV8() {
+        XCTAssertFalse(SmartSkipRegex("^ads$", ignoreCase: true).test("adſ"))
+        XCTAssertFalse(SmartSkipRegex("^k$", ignoreCase: true).test("\u{212A}"))
+        XCTAssertFalse(SmartSkipRegex("^sponsoredby$", ignoreCase: true).test("ſponsoredby"))
+        XCTAssertTrue(SmartSkipRegex("^ads$", ignoreCase: true).test("ADS"))
+        XCTAssertTrue(SmartSkipRegex(#"free\b"#, ignoreCase: true).test("FREEſ"), "ſ is not a JS word character")
+        XCTAssertTrue(SmartSkipRegex("[a-c]x", ignoreCase: true).test("BX"))
+        XCTAssertTrue(SmartSkipRegex(#"^A\x42$"#, ignoreCase: true).test("ab"), "escape operands are not case-expanded")
+        XCTAssertEqual(SmartSkipRegex.translate("a[b-dX]", ignoreCase: true), "[aA][b-dB-DXx]")
+        // Upstream getAdLabelEvidence: "ad free" followed by ſ is negated by the ad-free rule.
+        XCTAssertNil(SmartSkipDetectors.getAdLabelEvidence("ad freeſponsor|~sponsor"))
+    }
 }
 
 final class SmartSkipJSSemanticsTests: XCTestCase {

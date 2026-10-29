@@ -130,6 +130,27 @@ final class H1ResponseParserTests: XCTestCase {
         XCTAssertTrue(parser.isComplete)
     }
 
+    func testConflictingContentLengthLinesAreRejected() {
+        var parser = H1ResponseParser()
+        XCTAssertThrowsError(try parser.feed(Data("HTTP/1.1 206 X\r\nContent-Length: 5\r\ncontent-length: 6\r\n\r\nhello".utf8))) {
+            guard case .invalidContentLength? = $0 as? H1ParseError else { return XCTFail("\($0)") }
+        }
+        XCTAssertFalse(parser.isReusable)
+    }
+
+    func testNotModifiedIgnoresContentLength() throws {
+        let p = try parse(Data("HTTP/1.1 304 Not Modified\r\nContent-Length: 100\r\n\r\n".utf8))
+        XCTAssertEqual(p.head?.status, 304)
+        XCTAssertTrue(p.body.isEmpty)
+        XCTAssertTrue(p.complete)
+        XCTAssertTrue(p.reusable)
+        // A body sent anyway is stray data: never reuse.
+        let q = try parse(Data("HTTP/1.1 204 No Content\r\nContent-Length: 3\r\n\r\nabc".utf8))
+        XCTAssertTrue(q.body.isEmpty)
+        XCTAssertTrue(q.complete)
+        XCTAssertFalse(q.reusable)
+    }
+
     // MARK: Chunked
 
     func testChunkedWithExtensionsAndTrailersAnySplit() throws {
@@ -195,6 +216,17 @@ final class H1ResponseParserTests: XCTestCase {
         XCTAssertEqual(p.body, Data("ok".utf8))
         XCTAssertTrue(p.complete)
         XCTAssertFalse(p.reusable)
+    }
+
+    func testNonChunkedTransferCodingReadsUntilCloseAndTEOnHTTP10IsNeverReused() throws {
+        let p = try parse(Data("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: 2\r\n\r\nabcdef".utf8), eof: true)
+        XCTAssertEqual(p.body, Data("abcdef".utf8), "Content-Length is ignored when Transfer-Encoding is present")
+        XCTAssertTrue(p.complete)
+        XCTAssertFalse(p.reusable)
+        let q = try parse(Data("HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n".utf8))
+        XCTAssertEqual(q.body, Data("ok".utf8))
+        XCTAssertTrue(q.complete)
+        XCTAssertFalse(q.reusable)
     }
 
     // MARK: Connection management

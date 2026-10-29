@@ -230,6 +230,9 @@ actor DanmakuSegmentLoader {
     private var inFlight: [Int: Task<DanmakuSegmentReply?, Never>] = [:]
     private var fallbackTask: Task<[DanmakuItem]?, Never>?
     private var fallbackItems: [DanmakuItem]?
+    /// Bumped by `cancelAll()`: waiters from before it report a failure instead of caching or
+    /// falling back to the XML list.
+    private var epoch = 0
     private(set) var isClosed = false
 
     init(cid: Int64, aid: Int64, duration: Double,
@@ -283,7 +286,9 @@ actor DanmakuSegmentLoader {
     func items(from: Double, to: Double) -> [DanmakuItem] {
         guard to > from else { return [] }
         let first = DanmakuSegment.index(for: max(0, from))
-        let last = DanmakuSegment.index(for: to)
+        // `index(for:)` maps a non-finite time to 1; an open-ended window ends at the last loaded segment.
+        let last = to.isFinite ? DanmakuSegment.index(for: to) : (cache.keys.max() ?? first)
+        guard last >= first else { return [] }
         var out: [DanmakuItem] = []
         for s in first...last {
             guard let list = cache[s] else { continue }
@@ -296,6 +301,7 @@ actor DanmakuSegmentLoader {
     func load(segment index: Int) async -> [DanmakuItem]? {
         guard index >= 1 else { return [] }
         if let cached = cache[index] { return cached }
+        let startEpoch = epoch
         let task: Task<DanmakuSegmentReply?, Never>
         if let existing = inFlight[index] {
             task = existing
@@ -305,8 +311,11 @@ actor DanmakuSegmentLoader {
             inFlight[index] = task
         }
         let reply = await task.value
-        inFlight[index] = nil
+        // Actor reentrancy: after `cancelAll()` a newer request may own this slot — keep it.
+        if inFlight[index] == task { inFlight[index] = nil }
         if let cached = cache[index] { return cached }
+        // Cancelled while waiting: a failure, never a reason to download the whole XML list.
+        guard startEpoch == epoch else { return nil }
         if let reply {
             if reply.isClosed { isClosed = true }
             let sorted = reply.items.sorted { $0.time < $1.time }
@@ -323,6 +332,7 @@ actor DanmakuSegmentLoader {
     private func loadFallback() async -> [DanmakuItem]? {
         if let fallbackItems { return fallbackItems }
         guard let fetchAll else { return nil }
+        let startEpoch = epoch
         let task: Task<[DanmakuItem]?, Never>
         if let existing = fallbackTask {
             task = existing
@@ -331,7 +341,9 @@ actor DanmakuSegmentLoader {
             fallbackTask = task
         }
         let result = await task.value
-        fallbackTask = nil
+        if fallbackTask == task { fallbackTask = nil }
+        if let fallbackItems { return fallbackItems }
+        guard startEpoch == epoch else { return nil }
         if let result {
             let sorted = result.sorted { $0.time < $1.time }
             fallbackItems = sorted
@@ -342,6 +354,7 @@ actor DanmakuSegmentLoader {
 
     /// Cancels in-flight requests (e.g. when the player switches video).
     func cancelAll() {
+        epoch += 1
         for t in inFlight.values { t.cancel() }
         inFlight.removeAll()
         fallbackTask?.cancel()

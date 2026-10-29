@@ -30,7 +30,7 @@ struct DashStream: Hashable {
 
     var allURLs: [String] { [baseURL] + backupURLs.filter { $0 != baseURL } }
 
-    var isDolbyAudio: Bool { kind == .audio && (id == 30250 || codecs.hasPrefix("ec-3") || codecs.hasPrefix("ac-3")) }
+    var isDolbyAudio: Bool { kind == .audio && (id == 30250 || id == 30255 || codecs.hasPrefix("ec-3") || codecs.hasPrefix("ac-3")) }
     var isFlacAudio: Bool { kind == .audio && (id == 30251 || codecs.lowercased().hasPrefix("flac")) }
 
     var codecFamily: String {
@@ -47,7 +47,7 @@ struct DashStream: Hashable {
         case 30216: return "64K"
         case 30232: return "132K"
         case 30280: return "192K"
-        case 30250: return "杜比全景声"
+        case 30250, 30255: return "杜比全景声"
         case 30251: return "Hi-Res 无损"
         default: return "\(id)"
         }

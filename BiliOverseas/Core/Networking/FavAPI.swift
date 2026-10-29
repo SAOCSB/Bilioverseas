@@ -166,9 +166,13 @@ enum FavAPI {
 
     // MARK: - Mutations
 
-    /// `"<rid>:<type>"` for a card: video `aid:2`, PGC `ep_id:24`.
+    /// `"<rid>:<type>"` for a card: video `aid:2`, PGC `ep_id:24`, audio `au_id:12`.
+    /// Keyed off the card id too, because invalid ("已失效") items come back as `kind == .other`.
     static func resourceKey(for card: VideoCard) -> String {
-        if card.kind == .bangumi, card.epId != 0, card.aid == 0 || card.id.hasPrefix("ep") { return "\(card.epId):24" }
+        if card.id.hasPrefix("au"), let au = Int64(card.id.dropFirst(2)), au != 0 { return "\(au):12" }
+        if card.epId != 0, card.kind == .bangumi || card.id.hasPrefix("ep"), card.aid == 0 || card.id.hasPrefix("ep") {
+            return "\(card.epId):24"
+        }
         return "\(card.aid):2"
     }
 

@@ -99,15 +99,16 @@ final class BTRDownloaderTests: XCTestCase {
         var bans: [(String, BTRBanKind)] = []
         let lock = NSLock()
         d.onBan = { host, kind in lock.lock(); bans.append((host, kind)); lock.unlock() }
+        // Synchronous accessor: NSLock must not be taken directly in an async function (Swift 6 `noasync`).
+        let reported = { () -> [(String, BTRBanKind)] in lock.lock(); defer { lock.unlock() }; return bans }
         let track = d.makeTrack(kind: .video, urls: [btrMediaURL(hostA)], routeKey: "bv1:p1")
         let out = try await fetch(d, track, range(0, MiB))
         XCTAssertEqual(out.bytes, btrPattern(0, MiB))
         XCTAssertGreaterThanOrEqual(client.count(hostA), 2)
         XCTAssertEqual(d.banList(routeKey: "bv1:p1")?.bannedHosts(), [hostA])
-        lock.lock()
-        XCTAssertEqual(bans.map(\.0), [hostA])
-        XCTAssertEqual(bans.map(\.1), [.node])
-        lock.unlock()
+        let seen = reported()
+        XCTAssertEqual(seen.map(\.0), [hostA])
+        XCTAssertEqual(seen.map(\.1), [.node])
         XCTAssertEqual(track.nodeStatus().first { $0.host == hostA }?.state, .banned)
         let before = client.count(hostA)
         let again = try await fetch(d, track, range(2 * MiB, MiB))
@@ -366,6 +367,7 @@ final class BTRDownloaderTests: XCTestCase {
             asked.lock(); cosovbv += 1; asked.unlock()
             return .status(403)
         }
+        let refusedAsks = { () -> Int in asked.lock(); defer { asked.unlock() }; return cosovbv }
         let d = make(client, config(.mainland))
         let track = d.makeTrack(kind: .video, urls: [url("cosovbv"), url("akam")], routeKey: "bv1:p1")
         let meta = try await fetch(d, track, range(0, 1000), kind: .meta)
@@ -375,9 +377,9 @@ final class BTRDownloaderTests: XCTestCase {
         let bans = d.banList(routeKey: "bv1:p1")!
         XCTAssertFalse(bans.allowsAddress(url("cosovbv")))
         XCTAssertEqual(bans.bannedHosts(), [], "no node is banned for the refused address")
-        asked.lock(); let before = cosovbv; asked.unlock()
+        let before = refusedAsks()
         _ = try await fetch(d, track, range(3 * MiB, MiB))
-        asked.lock(); XCTAssertEqual(cosovbv, before, "the refused address gets no new requests"); asked.unlock()
+        XCTAssertEqual(refusedAsks(), before, "the refused address gets no new requests")
         XCTAssertTrue(track.nodeStatus().allSatisfy { $0.state != .banned })
     }
 
@@ -405,6 +407,20 @@ final class BTRDownloaderTests: XCTestCase {
             XCTAssertEqual(error as? BTRError, .rangeRejected(status: 200))
         }
         XCTAssertEqual(sink2.bytes.count, 0, "nothing unverified was delivered")
+    }
+
+    func testDirectDownloadFailingAfterItsLastByteIsComplete() async throws {
+        let client = FakeMediaClient()
+        client.set(hostA, .truncated(bytes: Int.max)) // the whole body, then the connection fails
+        let d = make(client, config(.mainland))
+        let track = d.makeTrack(kind: .video, urls: [btrMediaURL(hostA), btrMediaURL(hostB)], routeKey: "bv1:p1")
+        let sink = BTRByteSink()
+        let total = try await d.downloadDirect(range(0, 300_000), track: track) { sink.add($0) }
+        XCTAssertEqual(total, client.total)
+        XCTAssertEqual(sink.bytes, btrPattern(0, 300_000))
+        XCTAssertTrue(client.requests.allSatisfy { $0.range.end >= $0.range.start }, "never an empty, inverted Range")
+        XCTAssertEqual(client.requests.count, 1, "nothing left to ask for")
+        XCTAssertEqual(d.banList(routeKey: "bv1:p1")?.bannedHosts(), [], "no node blamed for our own request")
     }
 
     func testCancelAllAbortsAndRefusesNewDownloads() async throws {

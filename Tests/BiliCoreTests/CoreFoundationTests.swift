@@ -58,6 +58,29 @@ final class SignerTests: XCTestCase {
     func testQueryEncodingMatchesEncodeURIComponentForUnreserved() {
         XCTAssertEqual(BiliHTTP.encodeQuery(["k": "中 文&="], sorted: true), "k=%E4%B8%AD%20%E6%96%87%26%3D")
     }
+
+    /// api-auth §5.1 / §5.2 vectors (space must be `%20`, keys byte-sorted).
+    func testSpecSigningVectors() {
+        let mixin = "ea1db124af3c7062474693fa704f4ff8"
+        XCTAssertEqual(WbiSigner.sign(["mid": "2", "keyword": "a b"], mixinKey: mixin, wts: 1702204169)["w_rid"],
+                       "de095135c21c73f0b5ceea70e647cd05")
+        let dfca = AppKey(key: "dfca71928277209b", secret: "b5475a8825547a4fc26c7d518eaaa02e")
+        XCTAssertEqual(ListMapping.appKey, dfca)
+        XCTAssertEqual(AppSigner.sign(["auth_code": "abc", "local_id": "0"], key: dfca, ts: 1700000000)["sign"],
+                       "77ac440a7f4c033d8f62ea07505fa64f")
+        XCTAssertEqual(AppSigner.sign(["id": "1"], key: .android, ts: 1700000000)["sign"],
+                       "1bb92841ca97bc9f7e4b2c533fd254ff")
+    }
+
+    /// `Int64(Double)` traps on ±∞ / ≥ 2^63; query stringification must not.
+    func testStringifyNonIntegralDoubles() {
+        XCTAssertEqual(BiliHTTP.stringify(3.0), "3")
+        XCTAssertEqual(BiliHTTP.stringify(444.8), "444.8")
+        XCTAssertEqual(BiliHTTP.stringify(Double.infinity), "inf")
+        XCTAssertEqual(BiliHTTP.stringify(1e20), "1e+20")
+        XCTAssertEqual(BiliHTTP.stringify(true), "1")
+        XCTAssertEqual(BiliHTTP.stringify(Int64(9007199254740993)), "9007199254740993")
+    }
 }
 
 final class FormatterTests: XCTestCase {

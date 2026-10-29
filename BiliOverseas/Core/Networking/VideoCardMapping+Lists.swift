@@ -55,7 +55,7 @@ enum ListMapping {
     static func count(_ j: JSON) -> Int64 {
         switch j {
         case .int(let i): return max(0, i)
-        case .double(let d): return d.isFinite ? Int64(max(0, d)) : 0
+        case .double(let d): return clampedCount(d)
         case .string(let s): return parseCount(s)
         case .bool: return 0
         default: return 0
@@ -70,7 +70,13 @@ enum ListMapping {
         let rest = t[r.upperBound...].trimmingCharacters(in: .whitespaces)
         var mul = 1.0
         if rest.hasPrefix("千") { mul = 1e3 } else if rest.hasPrefix("万") { mul = 1e4 } else if rest.hasPrefix("亿") { mul = 1e8 }
-        return Int64((v * mul).rounded())
+        return clampedCount((v * mul).rounded())
+    }
+
+    /// `Int64(_: Double)` traps outside ±2^63 (and on NaN); server data must never crash the app.
+    static func clampedCount(_ d: Double) -> Int64 {
+        guard d.isFinite, d > 0 else { return 0 }
+        return d >= Double(Int64.max) ? Int64.max : Int64(d)
     }
 
     /// Image URL normalised to https.

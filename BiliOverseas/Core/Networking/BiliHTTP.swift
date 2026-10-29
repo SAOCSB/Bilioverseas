@@ -238,7 +238,8 @@ final class BiliHTTP: @unchecked Sendable {
         case let b as Bool: return b ? "1" : "0"
         case let i as Int: return String(i)
         case let i as Int64: return String(i)
-        case let d as Double: return d.rounded() == d ? String(Int64(d)) : String(d)
+        // `Int64(d)` traps on ±∞ and beyond 2^63; only whole numbers in the exact-integer range print as ints.
+        case let d as Double: return d.isFinite && d.rounded() == d && abs(d) < 9.0e15 ? String(Int64(d)) : String(d)
         case let a as [Any]: return a.map { stringify($0) }.joined(separator: ",")
         default: return String(describing: v)
         }

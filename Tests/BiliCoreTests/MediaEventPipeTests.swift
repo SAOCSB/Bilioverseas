@@ -158,6 +158,58 @@ final class MediaEventPipeTests: XCTestCase {
         XCTAssertTrue(pipe.isCancelled)
     }
 
+    /// A threaded producer that honours `push == false` by waiting for `onDemand`, against a consumer that stalls at
+    /// random: every byte arrives once, in order, and neither side hangs.
+    func testThreadedProducerHonouringDemandLosesNothing() async throws {
+        for round in 0 ..< 20 {
+            let pipe = MediaEventPipe(highWaterBytes: 64)
+            let demand = DispatchSemaphore(value: 0)
+            pipe.setHandlers(onDemand: { demand.signal() }, onCancel: {})
+            let total = 3000
+            DispatchQueue.global().async {
+                var seed = UInt64(round + 1)
+                var sent = 0
+                pipe.push(.head(status: 206, headers: [:]))
+                while sent < total {
+                    seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                    let n = min(total - sent, Int(seed >> 59) + 1) // 1…32 bytes
+                    let chunk = Data((sent ..< sent + n).map { UInt8(truncatingIfNeeded: $0) })
+                    sent += n
+                    if !pipe.push(.data(chunk)) { demand.wait() }
+                }
+                pipe.finish()
+            }
+            var got = Data()
+            var stalls = 0
+            for try await e in pipe.makeStream() {
+                if case .data(let d) = e { got.append(d) }
+                stalls += 1
+                if stalls % 97 == 0 { try await Task.sleep(nanoseconds: 1_000_000) }
+            }
+            XCTAssertEqual(got, Data((0 ..< total).map { UInt8(truncatingIfNeeded: $0) }), "round \(round)")
+        }
+    }
+
+    func testFinishAfterCancelAndPushAfterFinishAreIgnored() async throws {
+        let pipe = MediaEventPipe()
+        let cancels = Counter()
+        pipe.setHandlers(onDemand: {}, onCancel: { cancels.bump() })
+        pipe.push(.head(status: 206, headers: [:]))
+        pipe.cancel()
+        pipe.cancel()
+        pipe.finish(throwing: MediaFetchError.connectionClosed)
+        XCTAssertFalse(pipe.push(bytes("x")))
+        XCTAssertEqual(cancels.value, 1)
+        XCTAssertEqual(pipe.bufferedByteCount, 0)
+        var it = pipe.makeStream().makeAsyncIterator()
+        do {
+            _ = try await it.next()
+            XCTFail("a cancelled pipe must not deliver")
+        } catch {
+            XCTAssertEqual(error as? MediaFetchError, .cancelled)
+        }
+    }
+
     func testDroppedStreamNotifies() {
         let pipe = MediaEventPipe()
         let cancels = Counter()

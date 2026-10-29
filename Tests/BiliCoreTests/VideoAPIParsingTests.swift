@@ -151,6 +151,23 @@ final class VideoAPIPlayurlParsingTests: XCTestCase {
         XCTAssertEqual(merged.map(\.baseURL), ["a", "c", "b"])
     }
 
+    /// 30255 is the second Dolby Atmos id (spec §4.4); it used to be labelled "30255" and, without a
+    /// codecs string, not recognised as Dolby (so it could be offered as a plain AAC track).
+    func testDolby30255IsDolby() throws {
+        let data = fixture(#"""
+        {"dash":{"duration":10,"video":[{"id":80,"baseUrl":"https://upos-sz-mirrorali.bilivideo.com/v.m4s","codecs":"avc1.640032","codecid":7}],
+          "audio":[{"id":30280,"baseUrl":"https://upos-sz-mirrorali.bilivideo.com/a.m4s","codecs":"mp4a.40.2"}],
+          "dolby":{"type":1,"audio":[{"id":30255,"baseUrl":"https://upos-sz-mirrorali.bilivideo.com/d.m4s","codecs":""}]}}}
+        """#)
+        let info = VideoAPI.parsePlayInfo(data)
+        let dolby = try XCTUnwrap(info.dolbyAudios.first)
+        XCTAssertEqual(dolby.id, 30255)
+        XCTAssertTrue(dolby.isDolbyAudio)
+        XCTAssertFalse(info.audios[0].isDolbyAudio)
+        XCTAssertEqual(DashStream.audioTitle(30255), "杜比全景声")
+        XCTAssertEqual(VideoAPI.audioRank(30255), VideoAPI.audioRank(30250))
+    }
+
     func testFrameRateVariants() {
         XCTAssertEqual(VideoAPI.parseFrameRate(.string("30")), 30)
         XCTAssertEqual(VideoAPI.parseFrameRate(.string("30000/1001")), 29.97, accuracy: 0.01)
@@ -541,6 +558,24 @@ final class VideoAPIHeartbeatReporterTests: XCTestCase {
         r.start(.ugc(aid: 1, bvid: "BV1", cid: 4, duration: 0))
         r.stop() // position 0 is never reported
         XCTAssertEqual(sent(), [50, 23])
+    }
+
+    /// AVPlayer's `currentTime().seconds` is NaN before the item is ready; `Int(.nan)` / `Int(.infinity)`
+    /// used to trap in `tick` / `stop` / `finished`.
+    func testNonFinitePositionsAreIgnored() {
+        let (r, sent) = makeReporter()
+        r.start(.ugc(aid: 1, bvid: "BV1", cid: 2, duration: 100), position: .nan)
+        r.tick(position: .nan, isPlaying: true)
+        r.tick(position: .infinity, isPlaying: true)
+        r.seeked(to: -.infinity)
+        r.stop()
+        XCTAssertEqual(sent(), [], "nothing valid was played")
+        r.start(.ugc(aid: 1, bvid: "BV1", cid: 3, duration: 100))
+        for t in 0...6 { r.tick(position: Double(t), isPlaying: true) }
+        r.tick(position: .nan, isPlaying: true)
+        r.finished(position: .nan) // falls back to the last finite position (6)
+        r.stop(position: .infinity)
+        XCTAssertEqual(sent(), [5, 6])
     }
 
     func testDisabledReportsNothing() {

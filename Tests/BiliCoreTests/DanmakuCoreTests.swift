@@ -560,6 +560,43 @@ private final class FetchCounter: @unchecked Sendable {
     var all: Int { lock.lock(); defer { lock.unlock() }; return allCount }
 }
 
+/// Async gates for ordering tests: `wait(n)` suspends (ignoring cancellation) while `n` is held.
+private final class Gates: @unchecked Sendable {
+    private let lock = NSLock()
+    private var held: Set<Int> = []
+    private var waiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+
+    func hold(_ ns: [Int]) { lock.lock(); held.formUnion(ns); lock.unlock() }
+
+    func release(_ n: Int) {
+        lock.lock()
+        held.remove(n)
+        let w = waiters.removeValue(forKey: n) ?? []
+        lock.unlock()
+        w.forEach { $0.resume() }
+    }
+
+    func wait(_ n: Int) async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in enqueue(n, c) }
+    }
+
+    private func enqueue(_ n: Int, _ c: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        if held.contains(n) {
+            waiters[n, default: []].append(c)
+            lock.unlock()
+        } else {
+            lock.unlock()
+            c.resume()
+        }
+    }
+}
+
+private func waitUntil(timeout: Double = 2, _ condition: () -> Bool) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition(), Date() < deadline { try? await Task.sleep(nanoseconds: 2_000_000) }
+}
+
 final class DanmakuSegmentLoaderTests: XCTestCase {
     func testSegmentsToLoad() {
         XCTAssertEqual(DanmakuSegmentLoader.segmentsToLoad(time: 10, duration: 1000, afterSeek: false), [1])
@@ -631,6 +668,66 @@ final class DanmakuSegmentLoaderTests: XCTestCase {
         XCTAssertEqual(s2?.map(\.id), [3])
         XCTAssertEqual(s3?.map(\.id), [])
         XCTAssertEqual(counter.all, 1, "the XML list is fetched once")
+    }
+
+    func testCancelAllDoesNotFallBackToTheXMLList() async {
+        let counter = FetchCounter()
+        let loader = DanmakuSegmentLoader(cid: 1, aid: 2, duration: 1000, fetchSegment: { index in
+            _ = counter.hit(index)
+            try await Task.sleep(nanoseconds: 10_000_000_000)   // cancelled long before
+            return DanmakuSegmentReply()
+        }, fetchAll: {
+            counter.hitAll()
+            return [DanmakuItem(id: 1, time: 5, content: "a")]
+        })
+        async let pending = loader.load(segment: 1)
+        await waitUntil { counter.count(1) == 1 }
+        await loader.cancelAll()                 // e.g. the player switched video
+        let result = await pending
+        XCTAssertNil(result, "a cancelled load is a failure")
+        XCTAssertEqual(counter.all, 0, "cancellation must not download the legacy XML list")
+        let loaded = await loader.isLoaded(1)
+        XCTAssertFalse(loaded)
+    }
+
+    func testStaleWaiterKeepsANewerInFlightRequest() async {
+        let counter = FetchCounter()
+        let gates = Gates()
+        gates.hold([1, 2])
+        let loader = DanmakuSegmentLoader(cid: 1, aid: 2, duration: 1000, fetchSegment: { index in
+            let n = counter.hit(index)
+            await gates.wait(n)                  // ignores cancellation, like a slow network call
+            if n == 1 { throw BiliError.http(status: 500) }
+            return DanmakuSegmentReply(items: [DanmakuItem(id: Int64(n), time: 1, content: "x")])
+        })
+        async let first = loader.load(segment: 1)        // request #1
+        await waitUntil { counter.count(1) == 1 }
+        await loader.cancelAll()                          // forgets #1
+        async let second = loader.load(segment: 1)       // request #2 owns the slot now
+        await waitUntil { counter.count(1) == 2 }
+        gates.release(1)                                  // #1 fails, its waiter resumes
+        let r1 = await first
+        XCTAssertNil(r1)
+        async let third = loader.load(segment: 1)        // must join #2, not start #3
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        gates.release(2)
+        let (r2, r3) = await (second, third)
+        XCTAssertEqual(r2?.map(\.id), [2])
+        XCTAssertEqual(r3?.map(\.id), [2], "joined the in-flight request")
+        XCTAssertEqual(counter.count(1), 2, "no duplicate request")
+    }
+
+    func testItemsWindowWithAnOpenEnd() async {
+        let loader = DanmakuSegmentLoader(cid: 1, aid: 2, duration: 1000, fetchSegment: { index in
+            let base = DanmakuSegment.range(of: index).lowerBound
+            return DanmakuSegmentReply(items: [DanmakuItem(id: Int64(index), time: base + 50, content: "x")])
+        })
+        _ = await loader.load(segment: 2)
+        _ = await loader.load(segment: 3)
+        let open = await loader.items(from: 400, to: .infinity)    // used to trap (range 2...1)
+        XCTAssertEqual(open.map(\.id), [2, 3])
+        let empty = await loader.items(from: 400, to: .nan)
+        XCTAssertEqual(empty.count, 0)
     }
 
     func testCloudRuleMerge() {

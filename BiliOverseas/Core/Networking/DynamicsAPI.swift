@@ -358,16 +358,22 @@ enum DynamicsAPI {
 
     // MARK: - Like
 
-    /// 点赞 / 取消点赞 a dynamic (`/x/dynamic/feed/dyn/thumb`, form body) [unverified encoding];
-    /// falls back to the legacy vc endpoint.
+    /// JSON body of `/x/dynamic/feed/dyn/thumb` (`up` 1 = like, 2 = cancel).
+    static func likeBody(dynamicId: String, like: Bool) -> [String: Any] {
+        ["dyn_id_str": dynamicId, "up": like ? 1 : 2, "spmid": "333.1365.0.0"]
+    }
+
+    /// 点赞 / 取消点赞 a dynamic: `POST /x/dynamic/feed/dyn/thumb?csrf=` with a **JSON** body (PiliPlus
+    /// passes a Map to Dio without a content type, i.e. `application/json`; the web client does the same).
+    /// Falls back to the legacy vc endpoint.
     static func like(dynamicId: String, like: Bool) async throws {
         let http = BiliHTTP.shared
         guard let csrf = http.csrf else { throw BiliError.notLoggedIn }
         do {
-            _ = try await http.api(
-                BiliHost.api + "/x/dynamic/feed/dyn/thumb", method: "POST", query: ["csrf": csrf],
-                form: ["dyn_id_str": dynamicId, "up": like ? 1 : 2, "spmid": "333.1365.0.0", "csrf": csrf],
-                headers: ["Referer": "https://t.bilibili.com/", "Origin": "https://t.bilibili.com"])
+            let root = try await VideoAPI.postJSON(
+                BiliHost.api + "/x/dynamic/feed/dyn/thumb", query: ["csrf": csrf],
+                body: likeBody(dynamicId: dynamicId, like: like), signWbi: false, referer: "https://t.bilibili.com/")
+            _ = try BiliHTTP.unwrap(root)
         } catch BiliError.api(let code, let msg) {
             if code == -101 { throw BiliError.api(code: code, message: msg) }
             // 65006 已赞过 / 65004 未点赞: already in the requested state.

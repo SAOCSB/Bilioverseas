@@ -300,6 +300,32 @@ final class AuthParsingTests: XCTestCase {
         XCTAssertTrue(LoginAPI.parseCookieString("   ").isEmpty)
     }
 
+    /// A paste of just `SESSDATA` + `bili_jct` used to leave `BiliHTTP.mid` nil (no `DedeUserID`), so
+    /// favourites / follows threw "请先登录" while `isLoggedIn` was true.
+    func testPastedLoginFillsDedeUserIDFromNav() throws {
+        let pairs = LoginAPI.parseCookieString("SESSDATA=abc%2C1%2Cx; bili_jct=csrf123")
+        let cookies = LoginAPI.pastedLoginCookies(pairs, navMid: 4242)
+        let dede = try XCTUnwrap(cookies.first { $0.name == "DedeUserID" })
+        XCTAssertEqual(dede.value, "4242")
+        XCTAssertEqual(dede.domain, ".bilibili.com")
+        #if !canImport(Darwin)
+        // Isolated jar on Linux (Darwin's shared jar must not get real session cookie names).
+        let storage = scratchCookieStorage()
+        let http = BiliHTTP(cookieStorage: storage)
+        for c in cookies { storage.setCookie(c) }
+        XCTAssertTrue(http.isLoggedIn)
+        XCTAssertEqual(http.csrf, "csrf123")
+        XCTAssertEqual(http.mid, 4242)
+        #endif
+
+        // A stale DedeUserID in the paste loses to the mid of the verified session.
+        let stale = LoginAPI.parseCookieString("SESSDATA=s; DedeUserID=1; bili_jct=j")
+        let names = LoginAPI.pastedLoginCookies(stale, navMid: 4242).map { "\($0.name)=\($0.value)" }
+        XCTAssertEqual(names.sorted(), ["DedeUserID=4242", "SESSDATA=s", "bili_jct=j"])
+        // Unknown mid: the paste is stored as is.
+        XCTAssertEqual(LoginAPI.pastedLoginCookies(stale, navMid: 0).count, 3)
+    }
+
     func testMakeCookieAndStoredCookieRoundTrip() throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let c = try XCTUnwrap(LoginAPI.makeCookie(name: "SESSDATA", value: "v%2C1", secure: true, httpOnly: true, now: now))

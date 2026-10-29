@@ -23,7 +23,8 @@ import Security
 /// error), then `.data` in order, then the stream ends (body complete per Content-Length / chunked / close) or throws:
 /// - `.invalidURL`: not http(s), no host, or `range.end < range.start` (thrown before any head);
 /// - `.connectFailed`: DNS / refused / unreachable / `connectTimeout`, or no response byte within `responseTimeout`;
-/// - `.tls`: handshake or record failure (`NWError.tls`; a TLS-level hang-up after the handshake is `.connectionClosed`);
+/// - `.tls`: handshake or record failure (`NWError.tls`; a TLS close alert after the handshake is a hang-up:
+///   `.connectionClosed`);
 /// - `.malformedResponse`: bad status line, header section > 64 KiB, bad Content-Length / chunk framing;
 /// - `.connectionClosed`: EOF or reset before the body was complete (also a mid-body `responseTimeout` stall);
 /// - `.cancelled`: the consumer's task was cancelled while waiting in `next()`. If it was cancelled before calling

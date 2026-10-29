@@ -203,11 +203,15 @@ final class SmartSkipRegex {
     let icuPattern: String
     private let regex: NSRegularExpression
 
+    /// `ignoreCase` = the JS `i` flag. It is translated into explicit ASCII case alternatives
+    /// instead of ICU's case-insensitive mode: V8 (no `u` flag) never folds a non-ASCII character
+    /// onto an ASCII one, whereas ICU matches `ſ` (U+017F) for `s`, `K` (U+212A) for `k` and
+    /// applies the same folding to the ASCII word class behind `\b`.
     init(_ source: String, ignoreCase: Bool = false) {
         self.source = source
-        icuPattern = SmartSkipRegex.translate(source)
+        icuPattern = SmartSkipRegex.translate(source, ignoreCase: ignoreCase)
         do {
-            regex = try NSRegularExpression(pattern: icuPattern, options: ignoreCase ? [.caseInsensitive] : [])
+            regex = try NSRegularExpression(pattern: icuPattern, options: [])
         } catch {
             fatalError("SmartSkipRegex: invalid pattern \(source) → \(icuPattern): \(error)")
         }
@@ -217,8 +221,18 @@ final class SmartSkipRegex {
     private static let boundary = "(?:(?<=[A-Za-z0-9_])(?![A-Za-z0-9_])|(?<![A-Za-z0-9_])(?=[A-Za-z0-9_]))"
     private static let nonBoundary = "(?:(?<=[A-Za-z0-9_])(?=[A-Za-z0-9_])|(?<![A-Za-z0-9_])(?![A-Za-z0-9_]))"
 
-    /// Mechanical JS (no `u` flag) → ICU translation. See spec §13.1.
-    static func translate(_ js: String) -> String {
+    private static func isASCIILetter(_ c: Unicode.Scalar) -> Bool {
+        ("a"..."z").contains(c) || ("A"..."Z").contains(c)
+    }
+
+    private static func otherCase(_ c: Unicode.Scalar) -> Unicode.Scalar {
+        Unicode.Scalar(("a"..."z").contains(c) ? c.value - 32 : c.value + 32)!
+    }
+
+    /// Mechanical JS (no `u` flag) → ICU translation. See spec §13.1. With `ignoreCase`, every
+    /// ASCII letter becomes an explicit two-case alternative (letter ranges inside a class get
+    /// both cases); non-ASCII characters keep their exact identity, like V8's `i` flag.
+    static func translate(_ js: String, ignoreCase: Bool = false) -> String {
         let chars = Array(js.unicodeScalars)
         var out = ""
         var inClass = false
@@ -227,6 +241,16 @@ final class SmartSkipRegex {
             let c = chars[i]
             if c == "\\", i + 1 < chars.count {
                 let n = chars[i + 1]
+                // Escapes with a fixed-length operand are copied whole (their hex digits / control
+                // letter must never be case-expanded).
+                let operand = n == "u" ? 4 : n == "x" ? 2 : n == "c" ? 1 : 0
+                if operand > 0, i + 1 + operand < chars.count,
+                   chars[(i + 2)...(i + 1 + operand)].allSatisfy({ n == "c" ? isASCIILetter($0) : $0.properties.isASCIIHexDigit }) {
+                    out += "\\"
+                    for k in (i + 1)...(i + 1 + operand) { out.unicodeScalars.append(chars[k]) }
+                    i += 2 + operand
+                    continue
+                }
                 switch n {
                 case "d": out += inClass ? "0-9" : "[0-9]"
                 case "D": out += inClass ? #"\x{0}-/:-\x{10FFFF}"# : "[^0-9]"
@@ -246,6 +270,15 @@ final class SmartSkipRegex {
                 case "]": inClass = false; out += "]"
                 // Characters with a meaning in ICU set syntax but literal in a JS class.
                 case "[", ":", "&", "$", "{", "}": out += "\\" + String(c)
+                case _ where ignoreCase && isASCIILetter(c):
+                    if i + 2 < chars.count, chars[i + 1] == "-", isASCIILetter(chars[i + 2]),
+                       ("a"..."z").contains(c) == ("a"..."z").contains(chars[i + 2]) {
+                        // `a-z` → `a-zA-Z`
+                        out += "\(c)-\(chars[i + 2])\(otherCase(c))-\(otherCase(chars[i + 2]))"
+                        i += 2
+                    } else {
+                        out += "\(c)\(otherCase(c))"
+                    }
                 default: out.unicodeScalars.append(c)
                 }
             } else {
@@ -256,6 +289,7 @@ final class SmartSkipRegex {
                     if i + 1 < chars.count, chars[i + 1] == "^" { out += "^"; i += 1 }
                 case "$": out += #"\z"#
                 case ".": out += #"[^\n\r  ]"#
+                case _ where ignoreCase && isASCIILetter(c): out += "[\(c)\(otherCase(c))]"
                 default: out.unicodeScalars.append(c)
                 }
             }

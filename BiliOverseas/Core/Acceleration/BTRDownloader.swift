@@ -770,22 +770,26 @@ final class BTRDownloader: BTRDownloading, @unchecked Sendable {
         pool.close()
     }
 
+    // Synchronous so that NSLock is never taken directly in an async function (Swift 6 `noasync`).
+    private func register(_ op: BTROperation) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if cancelled { return false }
+        operations[ObjectIdentifier(op)] = op
+        return true
+    }
+
+    private func unregister(_ op: BTROperation) {
+        lock.lock()
+        operations[ObjectIdentifier(op)] = nil
+        lock.unlock()
+    }
+
     /// Runs `body` in its own task so `cancelAll()` can abort it; cancelling the caller cancels it too.
     private func runOperation(_ body: @escaping () async throws -> Int64) async throws -> Int64 {
         let op = BTROperation()
-        let id = ObjectIdentifier(op)
-        lock.lock()
-        if cancelled {
-            lock.unlock()
-            throw CancellationError()
-        }
-        operations[id] = op
-        lock.unlock()
-        defer {
-            lock.lock()
-            operations[id] = nil
-            lock.unlock()
-        }
+        guard register(op) else { throw CancellationError() }
+        defer { unregister(op) }
         let task = Task { try await body() }
         op.attach(task)
         return try await withTaskCancellationHandler {
@@ -986,6 +990,10 @@ final class BTRDownloader: BTRDownloading, @unchecked Sendable {
                     if Task.isCancelled || error is CancellationError { throw CancellationError() }
                     lastError = error
                     if delivered.value > before { progressed = true }
+                    // Every byte arrived (verified) before the connection failed: the range is complete. Asking again
+                    // would send an inverted `Range: bytes=end+1-end`, which CDNs answer 200/416 — a strike against
+                    // a healthy node — and the range would fail although it was delivered.
+                    if delivered.value >= range.length, let total = track.total { return total }
                 }
             }
             round = progressed ? 0 : round + 1

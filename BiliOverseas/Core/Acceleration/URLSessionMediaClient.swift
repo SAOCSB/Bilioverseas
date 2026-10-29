@@ -9,8 +9,9 @@ import FoundationNetworking
 /// connection per request.
 ///
 /// Same stream contract as `H1MediaClient` (head first, ordered data, demand-driven back-pressure by suspending
-/// the data task, cancellation cancels the task). Redirects are not followed (the 3xx head is returned, like the
-/// HTTP/1.1 client). No cookies, no cache, `Accept-Encoding: identity`.
+/// the data task on Apple platforms, cancellation cancels the task; a transfer that restarts fails with
+/// `.connectionClosed` instead of repeating the head and body). Redirects are not followed (the 3xx head is
+/// returned, like the HTTP/1.1 client). No cookies, no cache, `Accept-Encoding: identity`.
 ///
 /// `openConnectionCount` reports in-flight tasks (URLSession doesn't expose its sockets); `preconnect` is a no-op.
 final class URLSessionMediaClient: MediaHTTPClient {
@@ -94,7 +95,26 @@ final class URLSessionMediaLane: NSObject, URLSessionDataDelegate {
             suspended = false
             task.resume()
         }
+
+        /// Consumer went away. A task we suspended is resumed first so its cancellation is fully processed
+        /// (`didCompleteWithError`, which removes it from `tasks`, and metrics) — as Alamofire does.
+        func cancel() {
+            lock.lock()
+            let wasSuspended = suspended
+            suspended = false
+            lock.unlock()
+            if wasSuspended { task.resume() }
+            task.cancel()
+        }
     }
+
+    /// Back-pressure suspends the data task. Only on Apple platforms: swift-corelibs-foundation (Linux harness)
+    /// restarts a resumed data task from scratch (new connection, second response, body from byte 0).
+    #if canImport(Darwin)
+    static let suspendsForBackPressure = true
+    #else
+    static let suspendsForBackPressure = false
+    #endif
 
     let index: Int
     private(set) var session: URLSession!
@@ -141,7 +161,7 @@ final class URLSessionMediaLane: NSObject, URLSessionDataDelegate {
         lock.unlock()
         pipe.setHandlers(
             onDemand: { [weak state] in state?.resumeIfSuspended() },
-            onCancel: { [weak task] in task?.cancel() }
+            onCancel: { [weak state] in state?.cancel() }
         )
         task.resume()
     }
@@ -172,9 +192,20 @@ final class URLSessionMediaLane: NSObject, URLSessionDataDelegate {
             if let existing = headers[name] { headers[name] = existing + ", " + v } else { headers[name] = v }
         }
         state.lock.lock()
-        state.gotResponse = true
-        state.expected = http.expectedContentLength
+        let restarted = state.gotResponse
+        if !restarted {
+            state.gotResponse = true
+            state.expected = http.expectedContentLength
+        }
         state.lock.unlock()
+        if restarted {
+            // A second response for one task means the transfer started over (a resumed data task may restart):
+            // never hand the consumer a second head and the body again from its first byte.
+            state.pipe.finish(throwing: MediaFetchError.connectionClosed)
+            completionHandler(.cancel)
+            dataTask.cancel() // swift-corelibs-foundation never completes a task on `.cancel` alone
+            return
+        }
         state.pipe.push(.head(status: http.statusCode, headers: headers))
         completionHandler(.allow)
     }
@@ -184,7 +215,7 @@ final class URLSessionMediaLane: NSObject, URLSessionDataDelegate {
         // Hold the state lock across push + suspend so a concurrent onDemand can't slip in between and be lost.
         state.lock.lock()
         state.received += Int64(data.count)
-        if !state.pipe.push(.data(data)), !state.suspended, !state.pipe.isCancelled {
+        if !state.pipe.push(.data(data)), Self.suspendsForBackPressure, !state.suspended, !state.pipe.isCancelled {
             state.suspended = true
             dataTask.suspend()
         }

@@ -67,6 +67,38 @@ final class DanmakuAdvancedSpecTests: XCTestCase {
         XCTAssertEqual(noDuration.duration, DanmakuAdvancedSpec.defaultDuration)
     }
 
+    func testHostileNumbersStayFinite() throws {
+        // Huge coordinates (also negative "fractions") and angles: × the view size or × π they would overflow to an
+        // infinite layer position or a NaN transform in the renderer.
+        let spec = try XCTUnwrap(DanmakuAdvancedSpec.parse(
+            #"[-1e308,1e308,"1-0",1e308,"a",1e308,-1e308,1.7e308,-1.7e308,1e308,1e308,1,0,1]"#))
+        let limit = DanmakuAdvancedSpec.coordinateLimit
+        XCTAssertEqual(spec.startX, -limit)
+        XCTAssertEqual(spec.startY, limit)
+        XCTAssertEqual(spec.endX, limit)
+        XCTAssertEqual(spec.endY, -limit)
+        XCTAssertTrue(spec.rotateZ.isFinite && abs(spec.rotateZ) < 360)
+        XCTAssertTrue(spec.rotateY.isFinite && abs(spec.rotateY) < 360)
+        XCTAssertTrue((spec.rotateZ * .pi / 180).isFinite)
+        for t in [0, 1, 1e300] {
+            let p = spec.position(at: t)
+            XCTAssertTrue(p.x.isFinite && p.y.isFinite && (p.x * 3000 * 3).isFinite, "t = \(t)")
+            XCTAssertTrue(spec.alpha(at: t).isFinite)
+        }
+        // NaN / infinity spelled as strings, short arrays and wrong element types.
+        XCTAssertNil(DanmakuAdvancedSpec.parse(#"["nan",0,"1-1",3,"a"]"#))
+        XCTAssertNil(DanmakuAdvancedSpec.parse(#"[0,"inf","1-1",3,"a"]"#))
+        let odd = try XCTUnwrap(DanmakuAdvancedSpec.parse(#"[0,0,"nan-inf","inf","a","nan","inf","nan",{},[],null,"x"]"#))
+        XCTAssertEqual(odd.startAlpha, 1)
+        XCTAssertEqual(odd.endAlpha, 1)
+        XCTAssertEqual(odd.duration, DanmakuAdvancedSpec.defaultDuration)
+        XCTAssertEqual(odd.rotateZ, 0)
+        XCTAssertEqual(odd.rotateY, 0)
+        XCTAssertFalse(odd.isMoving)
+        XCTAssertNil(DanmakuAdvancedSpec.parse("[]"))
+        XCTAssertNil(DanmakuAdvancedSpec.parse("[0,0,{},[],{}]"))
+    }
+
     func testReadableText() {
         let advanced = DanmakuItem(id: 1, time: 0, mode: 7, content: #"[0.1,0.1,"1-1",3,"你好"]"#)
         XCTAssertEqual(advanced.readableText, "你好")

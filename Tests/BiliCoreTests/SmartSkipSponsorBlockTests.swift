@@ -295,6 +295,26 @@ final class SmartSkipSponsorBlockTests: XCTestCase {
         XCTAssertSeeks(h, [40.05, 20, 40.05], "a later entry is skipped again")
     }
 
+    func testAlwaysSkipNeverRepeatsASeekThatCannotLeaveTheSegment() {
+        // An outro row ending past the media's real end (600.5 > 599.9): the player clamps the seek to the duration,
+        // which is still inside. The 4 Hz tick goes on at the end; it must not seek again on every tick.
+        let outro = sb(590, 600.5, always: true)
+        let h = SSHarness(segments: [outro])
+        h.tick(590.2)
+        h.tracker.didSeek(to: 599.9)
+        for _ in 0..<8 {
+            h.advanceSilently(0.25)
+            h.tick(599.9)
+        }
+        XCTAssertSeeks(h, [600.55])
+        XCTAssertTrue(h.buttonVisible, "the manual button still offers the skip")
+        h.tracker.didSeek(to: 100)
+        h.tick(100)
+        h.tracker.didSeek(to: 592)
+        h.tick(592)
+        XCTAssertSeeks(h, [600.55, 600.55], "entered again after leaving it: skipped again")
+    }
+
     func testSkipOnceOffersTheButtonOnReentryAndManualModeOnlyPrompts() {
         let h = SSHarness(segments: [sb(20, 40)])
         h.tick(20)

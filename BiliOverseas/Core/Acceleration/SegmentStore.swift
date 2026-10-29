@@ -472,15 +472,17 @@ final class SegmentStore {
         for track in tracks.values { track.cache = [:] }
         cachedBytes = 0
         lock.unlock()
+        // Fail first: a cancelled job unwinds on another thread and fails its fetch with CancellationError — if it got
+        // there before this `fail`, readers would see that instead of `sessionClosed`. The first failure wins.
         for entry in entries {
+            entry.fetch.fail(MediaProxyError.sessionClosed)
             entry.fetch.markCancelled()
             entry.task.cancel()
-            entry.fetch.fail(MediaProxyError.sessionClosed)
         }
         for gap in gaps {
+            gap.fetch.fail(MediaProxyError.sessionClosed)
             gap.fetch.markCancelled()
             gap.task.cancel()
-            gap.fetch.fail(MediaProxyError.sessionClosed)
         }
     }
 

@@ -326,7 +326,8 @@ enum SmartSkipAction: Equatable {
 ///   again during the same visit after expiry / ✕. Leaving the interval or seeking ends a visit.
 /// * Mode changes apply on the next update. Skip history survives `replaceSegments`.
 /// * 空降助手 (native addition): `displayOnly` segments are left out; an `alwaysSkip` segment is
-///   auto-skipped on every entry in auto mode, except while the user watches it after 「撤销」.
+///   auto-skipped on every entry in auto mode, except while the user watches it after 「撤销」. An entry
+///   needs a position outside it since its last skip, so a seek that cannot leave it never repeats.
 final class SmartSkipTracker {
     /// The actionable segments (`displayOnly` ones removed), sorted by start.
     private(set) var segments: [AdSegment]
@@ -353,6 +354,9 @@ final class SmartSkipTracker {
     }
     private var visit: Visit?
     private var pendingSeek: (segmentID: String, issuedAt: Double)?
+    /// 总是跳过 segments auto-skipped and not yet seen to be left: one whose end lies past the media's real end
+    /// gets its seek clamped to the duration, still inside, and must not seek again on every tick.
+    private var skipsAwaitingExit: Set<String> = []
     private var undone: (segmentID: String, entered: Bool)?
     private var skipOrigins: [String: Double] = [:]
     private var lastTime: Double?
@@ -387,6 +391,11 @@ final class SmartSkipTracker {
         if let u = undone {
             if active?.id == u.segmentID { undone?.entered = true } else if u.entered { undone = nil }
         }
+        if !skipsAwaitingExit.isEmpty {
+            skipsAwaitingExit = skipsAwaitingExit.filter { id in
+                segments.contains { $0.id == id && time >= $0.start && time < $0.end }
+            }
+        }
         guard let segment = active else { return finish(nil) }
 
         // Our own seek out of this segment is still in flight.
@@ -396,9 +405,10 @@ final class SmartSkipTracker {
         }
 
         let skipped = skippedSegmentIDs.contains(segment.id)
-        let skipAgain = segment.alwaysSkip && undone?.segmentID != segment.id
+        let skipAgain = segment.alwaysSkip && undone?.segmentID != segment.id && !skipsAwaitingExit.contains(segment.id)
         if mode == .auto && (!skipped || skipAgain) && !segment.requiresConfirmation {
             markSkipped(segment, origin: time, now: now)
+            if segment.alwaysSkip { skipsAwaitingExit.insert(segment.id) }
             isPromptVisible = false
             return .autoSkip(segment)
         }

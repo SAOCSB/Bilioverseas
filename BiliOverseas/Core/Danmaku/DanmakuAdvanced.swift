@@ -15,6 +15,9 @@ struct DanmakuAdvancedSpec: Equatable, Sendable {
     static let referenceHeight: Double = 438
     /// Used when the lifetime is missing or invalid.
     static let defaultDuration: Double = 4.5
+    /// Coordinates are clamped to ± this many player sizes: anything further is off-screen anyway, and a huge value
+    /// would overflow to an infinite layer position once multiplied by the view size.
+    static let coordinateLimit: Double = 10
 
     /// Fractions of the player width / height (top-left corner of the text).
     var startX: Double
@@ -79,8 +82,9 @@ struct DanmakuAdvancedSpec: Equatable, Sendable {
         var spec = DanmakuAdvancedSpec(startX: x, startY: y, endX: x, endY: y,
                                        startAlpha: alphas.from, endAlpha: alphas.to, duration: duration,
                                        text: text, moveDuration: duration)
-        spec.rotateZ = element(list, 5).flatMap(number).flatMap(finite) ?? 0
-        spec.rotateY = element(list, 6).flatMap(number).flatMap(finite) ?? 0
+        // Whole turns dropped: a huge finite angle would become infinite in radians (a NaN transform).
+        spec.rotateZ = element(list, 5).flatMap(number).flatMap(finite)?.truncatingRemainder(dividingBy: 360) ?? 0
+        spec.rotateY = element(list, 6).flatMap(number).flatMap(finite)?.truncatingRemainder(dividingBy: 360) ?? 0
         if let toX = element(list, 7).flatMap({ coordinate($0, reference: referenceWidth) }) { spec.endX = toX }
         if let toY = element(list, 8).flatMap({ coordinate($0, reference: referenceHeight) }) { spec.endY = toY }
         // A missing or zero move duration spans the whole lifetime (DanmakuFlameMaster).
@@ -121,7 +125,7 @@ struct DanmakuAdvancedSpec: Equatable, Sendable {
     }
 
     /// Fraction of the player size: values up to 1 as they are, pixels (above 1, or a string without a decimal
-    /// point) divided by the reference size.
+    /// point) divided by the reference size; clamped to `±coordinateLimit`.
     private static func coordinate(_ raw: Any, reference: Double) -> Double? {
         guard let v = number(raw), v.isFinite else { return nil }
         let isPixel: Bool
@@ -130,7 +134,7 @@ struct DanmakuAdvancedSpec: Equatable, Sendable {
         } else {
             isPixel = v > 1
         }
-        return isPixel ? v / reference : v
+        return min(max(isPixel ? v / reference : v, -coordinateLimit), coordinateLimit)
     }
 
     /// `"1-0.2"` → (1, 0.2); a single number is a constant opacity.

@@ -285,7 +285,7 @@ final class OfflineDownloadJob: @unchecked Sendable {
     private func fetch(_ chunk: ByteRange, track: BTRTrackHandle, writer: OfflineFileWriter,
                        refresher: OfflineURLRefresher) async throws {
         var failures = 0
-        var direct = !config.accelerated || isHoldingPlainPath()
+        var direct = !config.accelerated
         var fellBack = false
         while let range = missingPart(of: chunk) {
             try Task.checkCancellation()

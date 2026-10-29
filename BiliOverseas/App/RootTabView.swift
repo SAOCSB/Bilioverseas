@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 enum MainTab: Hashable {
     case home, dynamics, mine
@@ -19,7 +20,8 @@ struct RootTabView: View {
     @StateObject private var dynamicsRouter = TabRouter()
     @StateObject private var mineRouter = TabRouter()
     @ObservedObject private var auth = AuthService.shared
-    @ObservedObject private var settings = AppSettings.shared
+    /// Only 「检查未读动态」 matters here; observing all of AppSettings would re-render the tabs on every settings tick.
+    @State private var checkUnreadDynamics = AppSettings.shared.general.checkUnreadDynamics
     @ObservedObject private var dynamicsUnread = DynamicsUnreadModel.shared
     @Environment(\.scenePhase) private var scenePhase
     @State private var lastReselectTab: MainTab?
@@ -55,6 +57,9 @@ struct RootTabView: View {
         .overlay { ToastOverlay() }
         .onReceive(NotificationCenter.default.publisher(for: .homeAvatarTapped)) { _ in
             tab = .mine
+        }
+        .onReceive(AppSettings.shared.$general.map(\.checkUnreadDynamics).removeDuplicates()) {
+            checkUnreadDynamics = $0
         }
         .task {
             // Links opened from other apps (bilioverseas://…) push onto the current tab.
@@ -97,7 +102,7 @@ struct RootTabView: View {
 
     private var unreadPollKey: DynamicsUnreadModel.PollKey {
         DynamicsUnreadModel.PollKey(loggedIn: auth.isLoggedIn, active: scenePhase == .active,
-                                    enabled: settings.general.checkUnreadDynamics)
+                                    enabled: checkUnreadDynamics)
     }
 
     private func router(for tab: MainTab) -> TabRouter {

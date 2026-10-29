@@ -18,6 +18,17 @@ import Security
 /// - Timeouts: `connectTimeout` (TCP + TLS) and a backstop `responseTimeout` of reading silence. The downloader runs
 ///   BTR's first-byte / stall / attempt timers itself and cancels the consuming task.
 ///
+/// Stream contract (`get`): `.head` exactly once first (1xx skipped; any status, including 403/404, is a head, not an
+/// error), then `.data` in order, then the stream ends (body complete per Content-Length / chunked / close) or throws:
+/// - `.invalidURL`: not http(s), no host, or `range.end < range.start` (thrown before any head);
+/// - `.connectFailed`: DNS / refused / unreachable / `connectTimeout`, or no response byte within `responseTimeout`;
+/// - `.tls`: handshake or record failure (`NWError.tls`);
+/// - `.malformedResponse`: bad status line, header section > 64 KiB, bad Content-Length / chunk framing;
+/// - `.connectionClosed`: EOF or reset before the body was complete (also a mid-body `responseTimeout` stall);
+/// - `.cancelled`: the consumer's task was cancelled while waiting in `next()`. If it was cancelled before calling
+///   `next()`, the stream just ends (standard `AsyncThrowingStream` behaviour) — check `Task.isCancelled`.
+/// Cancelling the task or dropping the stream/iterator force-closes the connection (RST) so the server stops sending.
+///
 /// Thread safety: all state lives on one serial queue (also the NWConnection callback queue); the open-connection
 /// counter is lock-protected. Configure the `var` tunables before the first request.
 final class H1MediaClient: MediaHTTPClient {

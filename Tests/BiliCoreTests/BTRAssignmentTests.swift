@@ -50,7 +50,7 @@ final class BTRAssignmentTests: XCTestCase {
 
     func testWeightedShareAndFloor() {
         let assigner = BTRAssigner()
-        let src = FakeSpeeds([a: 9 * 1024 * 1024, b: 1 * 1024 * 1024])
+        let src = FakeSpeeds([a: 9.0 * 1024 * 1024, b: 1.0 * 1024 * 1024])
         let p = assigner.assignPrimaries([a, b], source: src, count: 20)
         let fast = p.filter { $0 == a }.count, slow = p.filter { $0 == b }.count
         XCTAssertEqual(fast + slow, 20)

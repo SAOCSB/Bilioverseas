@@ -24,6 +24,11 @@ final class AuthService: ObservableObject, @unchecked Sendable {
     @Published private(set) var profile: UserProfile?
     @Published private(set) var stat: UserStat?
 
+    /// Called on the main actor once per session: `true` when a login (or the restored session)
+    /// has been confirmed by nav, `false` after logout / server-side invalidation.
+    /// Integration point for per-account caches (e.g. filling `FollowedUpsStore`).
+    @MainActor var onLoginStateChanged: ((Bool) -> Void)?
+
     let http: BiliHTTP
 
     private let lock = NSLock()
@@ -34,6 +39,8 @@ final class AuthService: ObservableObject, @unchecked Sendable {
     private var bootstrapTask: Task<Void, Never>?
     private var profileTask: (generation: Int, task: Task<Void, Never>)?
     private var activatedKeys: Set<String> = []
+    /// Generation for which `onLoginStateChanged(true)` was already delivered.
+    private var announcedGeneration: Int?
     private var persistPending = false
     private var observers: [NSObjectProtocol] = []
     private let persistQueue = DispatchQueue(label: "io.github.bilioverseas.auth.persist", qos: .utility)
@@ -98,7 +105,8 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         let task: Task<Void, Never> = locked {
             if let t = bootstrapTask { return t }
             let t = Task.detached(priority: .userInitiated) { [weak self] in
-                await self?.runBootstrap()
+                guard let self else { return }
+                await self.runBootstrap()
             }
             bootstrapTask = t
             return t
@@ -112,8 +120,9 @@ final class AuthService: ObservableObject, @unchecked Sendable {
             if let p = profileTask, p.generation == generation { return p.task }
             let gen = generation
             let t = Task.detached(priority: .userInitiated) { [weak self] in
-                await self?.loadProfile(generation: gen)
-                self?.clearProfileTask(generation: gen)
+                guard let self else { return }
+                await self.loadProfile(generation: gen)
+                self.clearProfileTask(generation: gen)
             }
             profileTask = (gen, t)
             return t
@@ -277,8 +286,9 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         req.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
         req.setValue("https://www.bilibili.com", forHTTPHeaderField: "Origin")
         let session = http.session
+        let request = req
         Task.detached(priority: .utility) {
-            _ = try? await session.data(for: req)
+            _ = try? await session.data(for: request)
         }
     }
 
@@ -323,8 +333,9 @@ final class AuthService: ObservableObject, @unchecked Sendable {
             AuthService.saveCached(p, key: AuthService.profileCacheKey)
             await publish(generation: gen, loggedIn: true, profile: p, stat: nil, updateStat: false)
             activateIfNeeded()
+            let mid = p.mid
             async let statResult = fetchStat()
-            async let signResult = fetchSign(mid: p.mid)
+            async let signResult = fetchSign(mid: mid)
             let (s, sign) = await (statResult, signResult)
             guard gen == currentGeneration else { return }
             if let sign { p.sign = sign }
@@ -363,6 +374,7 @@ final class AuthService: ObservableObject, @unchecked Sendable {
 
     private func applyLogin(cookies: [HTTPCookie], replaceExisting: Bool, tokens update: (inout StoredSession) -> Void) async {
         bumpGeneration()
+        FollowedUpsStore.shared.clear()
         if replaceExisting { removeSessionCookies() }
         removeCookies(named: ["bili_ticket", "bili_ticket_expires"])
         for c in cookies { http.cookieStorage.setCookie(AuthService.normalized(c)) }
@@ -392,6 +404,7 @@ final class AuthService: ObservableObject, @unchecked Sendable {
             http.cookieStorage.deleteCookie(c)
         }
         locked { tokens = StoredSession() }
+        FollowedUpsStore.shared.clear()
         UserDefaults.standard.removeObject(forKey: AuthService.profileCacheKey)
         UserDefaults.standard.removeObject(forKey: AuthService.statCacheKey)
         UserDefaults.standard.removeObject(forKey: AuthService.lastRefreshCheckKey)
@@ -456,6 +469,11 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         if changed || notify {
             NotificationCenter.default.post(name: AuthService.loginStateDidChange, object: self)
         }
+        if loggedIn, p != nil, locked({ announcedGeneration != gen }) {
+            locked { announcedGeneration = gen }
+            // TODO(lead): fill FollowedUpsStore via SpaceAPI.allFollowingMids (wire through onLoginStateChanged).
+            onLoginStateChanged?(true)
+        }
     }
 
     @MainActor
@@ -463,7 +481,9 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         isLoggedIn = false
         profile = nil
         stat = nil
+        locked { announcedGeneration = nil }
         NotificationCenter.default.post(name: AuthService.loginStateDidChange, object: self)
+        onLoginStateChanged?(false)
     }
 
     // MARK: - Persistence

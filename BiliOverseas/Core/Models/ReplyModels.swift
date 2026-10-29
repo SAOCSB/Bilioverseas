@@ -145,7 +145,7 @@ struct ReplyItem: Identifiable, Hashable {
 }
 
 /// A page of comments.
-struct ReplyPage {
+struct ReplyPage: Hashable {
     var items: [ReplyItem] = []
     /// Pinned comments (first page of the main list only).
     var topItems: [ReplyItem] = []

@@ -170,13 +170,11 @@ final class LoopbackCDN: @unchecked Sendable {
                 guard let colon = line.firstIndex(of: ":") else { continue }
                 headers[line[..<colon].lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
             }
-            var start = 0
-            var end = LoopbackCDN.fileSize - 1
-            if let r = headers["range"], r.hasPrefix("bytes=") {
-                let parts = r.dropFirst(6).split(separator: "-").compactMap { Int($0) }
-                if parts.count == 2 { start = parts[0]; end = parts[1] }
-            }
             let size = LoopbackCDN.fileSize
+            let parts = (headers["range"] ?? "").replacingOccurrences(of: "bytes=", with: "")
+                .split(separator: "-").compactMap { Int($0) }
+            let start = parts.count == 2 ? parts[0] : 0
+            let end = parts.count == 2 ? parts[1] : size - 1
             func partialHead(_ extra: String = "", length: Int? = nil) -> String {
                 "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Range: bytes \(start)-\(end)/\(size)\r\n" +
                     "Content-Length: \(length ?? end - start + 1)\r\n\(extra)\r\n"
@@ -309,8 +307,7 @@ final class H1MediaClientLoopbackTests: XCTestCase {
     private func makeClient(maxConnectionsPerHost: Int = 64) -> H1MediaClient {
         let client = H1MediaClient(maxConnectionsPerHost: maxConnectionsPerHost, idleTimeout: 30, connectTimeout: 2)
         client.responseTimeout = 3 // backstop so a bug fails fast instead of hanging CI
-        addTeardownBlock { client.closeIdleConnections() }
-        return client
+        return client // deinit at the end of the test closes whatever is still open
     }
 
     private struct Fetched {

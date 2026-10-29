@@ -57,7 +57,8 @@ struct DynamicItem: Identifiable, Hashable {
     /// 带货: `additional.type == ADDITIONAL_TYPE_GOODS` on the item or its original.
     var hasGoods: Bool = false
     /// Raw filter signals: `"type=DYNAMIC_TYPE_AD"`, `"goods"`, `"game"` (game promotion card).
-    /// They are NOT copied into `video.adSignals`; filter dynamics on these.
+    /// The soft ones (`goods`, `game`) are copied into `video.adSignals` (kind stays `.video`);
+    /// for `DYNAMIC_TYPE_AD` the embedded card becomes `kind == .ad`.
     var adSignals: [String] = []
     /// Deleted / unavailable placeholder (`MAJOR_TYPE_NONE`); `text` holds the tips.
     var isDeleted: Bool = false

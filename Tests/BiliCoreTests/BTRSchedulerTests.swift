@@ -149,13 +149,11 @@ final class BTRSchedulerTests: XCTestCase {
     }
 
     func testLiveLimitChangeAndDemandReports() async throws {
-        let reports = Order()
         let lock = NSLock()
         var last: (Int, Int, Int) = (0, 0, 0)
         let pool = BTRSlotPool(limit: 2, clock: BTRManualClock(), onChange: { a, l, q in
             lock.lock(); last = (a, l, q); lock.unlock()
         })
-        _ = reports
         let held = try await hold(pool, 1)
         let order = Order()
         let tasks = (0..<3).map { enqueue(pool, order, "w\($0)", priority: 0, queueClass: .ordinary) }

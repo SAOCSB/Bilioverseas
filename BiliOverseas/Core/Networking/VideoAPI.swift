@@ -882,6 +882,7 @@ final class HeartbeatReporter: @unchecked Sendable {
     private var lastTickAt: Date?
     private var startTs: Int64 = 0
     private var finishedSent = false
+    private var lastReported: Int?
     private let sender: Sender
     private let isAllowed: () -> Bool
     private let now: () -> Date
@@ -917,6 +918,7 @@ final class HeartbeatReporter: @unchecked Sendable {
         lastTickAt = nil
         startTs = Int64(now().timeIntervalSince1970)
         finishedSent = false
+        lastReported = nil
         lock.unlock()
     }
 
@@ -977,7 +979,8 @@ final class HeartbeatReporter: @unchecked Sendable {
         var payload: HeartbeatPayload?
         if !(finishedSent && abs(p - lastPosition) < 1) {
             let ended = ctx.duration > 0 && ctx.duration - p <= 1
-            payload = makePayload(playedTime: ended ? -1 : Int(p))
+            let value = ended ? -1 : Int(p)
+            if value != lastReported { payload = makePayload(playedTime: value) }
         }
         context = nil
         lock.unlock()
@@ -987,6 +990,7 @@ final class HeartbeatReporter: @unchecked Sendable {
     /// Must be called with the lock held.
     private func makePayload(playedTime: Int) -> HeartbeatPayload? {
         guard let ctx = context, playedTime != 0, isAllowed() else { return nil }
+        lastReported = playedTime
         return HeartbeatPayload(context: ctx, playedTime: playedTime, realPlayedTime: Int(realPlayed), startTs: startTs)
     }
 

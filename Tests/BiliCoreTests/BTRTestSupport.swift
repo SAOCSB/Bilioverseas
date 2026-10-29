@@ -30,7 +30,8 @@ func btrMediaURL(_ host: String, file: String = "1-1-30080") -> String {
 func btrHosts(_ urls: [String]) -> [String] { urls.map { URLComponents(string: $0)?.host ?? "" } }
 
 /// Byte pattern of the fake file: byte i = i % 251.
-func btrPattern(_ start: Int64, _ length: Int) -> Data {
+func btrPattern<T: BinaryInteger>(_ startValue: T, _ length: Int) -> Data {
+    let start = Int64(startValue)
     var d = Data(count: length)
     d.withUnsafeMutableBytes { raw in
         let p = raw.bindMemory(to: UInt8.self)
@@ -80,6 +81,8 @@ final class FakeMediaClient: MediaHTTPClient, @unchecked Sendable {
     private var perHostCount: [String: Int] = [:]
     var defaultBehavior: Behavior = .ok
     var headDelayMs: Double = 0
+    /// Per-URL override (checked before the per-host behaviour).
+    var urlRule: ((URL) -> Behavior?)?
 
     init(total: Int64 = 8 * 1024 * 1024) { self.total = total }
 
@@ -103,16 +106,24 @@ final class FakeMediaClient: MediaHTTPClient, @unchecked Sendable {
         log.append(Request(host: host, url: url.absoluteString, range: range, at: SystemClock.shared.nowMs()))
         let n = (perHostCount[host] ?? 0) + 1
         perHostCount[host] = n
-        var behavior = behaviors[host] ?? defaultBehavior
-        if case let .failFirst(count, status) = behavior { behavior = n <= count ? .status(status) : .ok }
+        var chosen = urlRule?(url) ?? behaviors[host] ?? defaultBehavior
+        if case let .failFirst(count, status) = chosen { chosen = n <= count ? .status(status) : .ok }
         lock.unlock()
+        let behavior = chosen
         let total = self.total
         let headDelay = headDelayMs
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let length = Int(range.end - range.start + 1)
-                    let cr = ["content-range": "bytes \(range.start)-\(range.end)/\(total)"]
+                    // Like a real CDN: a range past the end is clipped to the file.
+                    if range.start >= total {
+                        continuation.yield(.head(status: 416, headers: ["content-range": "bytes */\(total)"]))
+                        continuation.finish()
+                        return
+                    }
+                    let end = min(range.end, total - 1)
+                    let length = Int(end - range.start + 1)
+                    let cr = ["content-range": "bytes \(range.start)-\(end)/\(total)"]
                     if headDelay > 0 { try await Task.sleep(nanoseconds: UInt64(headDelay * 1_000_000)) }
                     switch behavior {
                     case .ok, .failFirst:
@@ -133,7 +144,7 @@ final class FakeMediaClient: MediaHTTPClient, @unchecked Sendable {
                         continuation.yield(.head(status: 200, headers: ["content-length": "\(total)"]))
                         continuation.yield(.data(btrPattern(0, min(Int(total), 256 * 1024))))
                     case .wrongRange:
-                        continuation.yield(.head(status: 206, headers: ["content-range": "bytes \(range.start + 1)-\(range.end)/\(total)"]))
+                        continuation.yield(.head(status: 206, headers: ["content-range": "bytes \(range.start + 1)-\(end)/\(total)"]))
                         continuation.yield(.data(btrPattern(range.start + 1, length - 1)))
                     case let .truncated(bytes):
                         continuation.yield(.head(status: 206, headers: cr))
@@ -143,7 +154,7 @@ final class FakeMediaClient: MediaHTTPClient, @unchecked Sendable {
                         continuation.yield(.head(status: 206, headers: cr))
                         continuation.yield(.data(btrPattern(range.start, length + 100)))
                     case .otherTotal:
-                        continuation.yield(.head(status: 206, headers: ["content-range": "bytes \(range.start)-\(range.end)/\(total + 1)"]))
+                        continuation.yield(.head(status: 206, headers: ["content-range": "bytes \(range.start)-\(end)/\(total + 1)"]))
                         continuation.yield(.data(btrPattern(range.start, length)))
                     case let .slowHead(ms):
                         try await Task.sleep(nanoseconds: UInt64(ms * 1_000_000))

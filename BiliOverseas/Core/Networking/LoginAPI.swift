@@ -191,7 +191,7 @@ enum LoginAPI {
             out.removeAll { $0.name == n }
             out.append((n, v))
         }
-        for line in s.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+        for line in s.split(whereSeparator: { $0.isNewline }) {
             let l = String(line)
             if !l.contains("="), l.contains("\t") {
                 let cols = l.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)

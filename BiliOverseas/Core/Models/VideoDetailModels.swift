@@ -171,7 +171,7 @@ struct UgcSeason: Hashable, Identifiable {
 }
 
 /// Full UGC detail.
-struct VideoDetail: Identifiable {
+struct VideoDetail: Identifiable, Hashable {
     struct Staff: Hashable, Identifiable {
         var id: Int64 { user.mid }
         var user: UserBrief
@@ -398,7 +398,7 @@ struct FavFolderState: Hashable, Identifiable {
 
 // MARK: - Player side data (`/x/player/wbi/v2`)
 
-struct PlayerExtraInfo {
+struct PlayerExtraInfo: Hashable {
     /// Sorted: Chinese first, human-made before AI.
     var subtitles: [SubtitleTrack] = []
     /// Only filled when the server marks them as chapters (`view_points[0].type == 2`).
@@ -565,7 +565,7 @@ struct PGCSection: Hashable, Identifiable {
 }
 
 /// `/pgc/view/web/season` → result.
-struct PGCSeason: Identifiable {
+struct PGCSeason: Identifiable, Hashable {
     struct Stat: Hashable {
         var views: Int64 = 0
         var danmakus: Int64 = 0

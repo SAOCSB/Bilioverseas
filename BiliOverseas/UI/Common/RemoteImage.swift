@@ -102,6 +102,9 @@ struct RemoteImage: View {
             guard let img = await ImagePipeline.shared.image(for: u), !Task.isCancelled else { return }
             loaded = Loaded(url: u, image: img)
         }
+        // Lazy stacks keep off-screen rows alive; without this every row ever shown would pin its
+        // decoded bitmap. Coming back on screen it renders from the memory cache in the first frame.
+        .onDisappear { loaded = nil }
     }
 }
 

@@ -7,6 +7,8 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
     @Published private(set) var items: [Item] = []
     @Published private(set) var isLoading = false
     @Published private(set) var hasMore = true
+    /// A page has arrived since the last `replace` (tells "not loaded yet" from "loaded, nothing to show").
+    @Published private(set) var didLoad = false
     @Published var errorMessage: String?
 
     private var next: String?
@@ -32,8 +34,10 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
         await load(reset: true)
     }
 
+    /// First load only: a list that already loaded (even empty, e.g. everything filtered) is not
+    /// re-requested every time it reappears; a failed first load is retried.
     func loadIfNeeded() async {
-        if items.isEmpty && !isLoading { await load(reset: false) }
+        if items.isEmpty && !isLoading && !didLoad { await load(reset: false) }
     }
 
     func loadMore() async {
@@ -60,6 +64,7 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
         seen = Set(newItems.map(\.id))
         next = nil
         hasMore = true
+        didLoad = !newItems.isEmpty
         isLoading = false
         errorMessage = nil
     }
@@ -86,6 +91,7 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
                 items.append(contentsOf: fresh)
                 next = page.next
                 hasMore = page.hasMore
+                didLoad = true
                 // A fully filtered page should not stall infinite scroll.
                 if fresh.isEmpty && page.hasMore && emptyStreak < 3 {
                     emptyStreak += 1
@@ -122,7 +128,7 @@ struct ListFooter: View {
                 }
             } else if isLoading {
                 ProgressView()
-            } else if isEmpty {
+            } else if isEmpty && !(hasMore && retry != nil) {
                 Text(emptyText).font(.footnote).foregroundStyle(.secondary)
             } else if !hasMore {
                 Text("没有更多了").font(.caption).foregroundStyle(.tertiary)

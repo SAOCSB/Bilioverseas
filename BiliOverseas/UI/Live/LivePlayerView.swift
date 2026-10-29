@@ -378,6 +378,8 @@ enum LivePiPKeeper {
         for other in kept.values where other !== controller {
             other.yieldToOtherRoom()
         }
+        // A room is starting: the video player (inline on a covered page or in PiP) gives way too.
+        if controller != nil { PlayerNowPlayingCenter.shared.pauseForLive() }
     }
 }
 

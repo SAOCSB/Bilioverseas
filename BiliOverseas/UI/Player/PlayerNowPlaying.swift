@@ -32,9 +32,18 @@ final class PlayerNowPlayingCenter {
         }
         // A PiP window left over from a closed page ends (its controller then stops).
         PlayerPiPKeeper.stopOthers(than: controller)
+        // …and so does a live room still playing in its own PiP window.
+        LivePiPKeeper.yield(to: nil)
         setCommandsEnabled(true)
         refresh(controller)
         loadArtworkIfNeeded(controller)
+    }
+
+    /// A live room starts playing: the video that owns Now Playing pauses and leftover video PiP
+    /// windows close, so live and video never play over each other.
+    func pauseForLive() {
+        if let owner, owner.wantsToPlay { owner.pause() }
+        PlayerPiPKeeper.stopOthers(than: nil)
     }
 
     func release(_ controller: PlayerController) {

@@ -201,7 +201,7 @@ struct PlayerChromeView: View {
             PlayerPill {
                 HStack(spacing: 4) {
                     Image(systemName: "forward.fill").font(.system(size: 11))
-                    Text("\(PlayerFormat.rate(controller.boostRate))倍速中")
+                    Text("\(PlayerFormat.rate(Double(controller.playerRate)))倍速中")
                 }
             }
             .padding(.top, fullscreen ? 56 : 30)
@@ -529,7 +529,7 @@ struct PlayerChromeView: View {
     }
 
     private var speedTitle: String {
-        "\(PlayerFormat.rate(controller.effectiveRate))X"
+        "\(PlayerFormat.rate(Double(controller.playerRate)))X"
     }
 
     private var fullscreenSpeedTitle: String {

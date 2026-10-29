@@ -159,14 +159,36 @@ extension PlayerController {
                                                 duration: total, title: target.title, desc: target.desc,
                                                 chapters: target.chapters ?? info?.viewPoints,
                                                 subtitleTracks: tracks, subtitleLines: lines, danmaku: nil)
-            let segments = await SmartSkipAnalyzer.shared.analyze(context)
+            let settings = AppSettings.shared.smartSkip
+            async let merged = SmartSkipAnalyzer.shared.analyze(context, settings: settings)
+            if settings.localDetection && settings.sponsorBlockEnabled {
+                // Local detection does not wait for the 空降助手 lookup (a slow or unreachable server would let the
+                // first seconds' ads through): its segments apply first, the merged list replaces them later.
+                var localOnly = settings
+                localOnly.sponsorBlockEnabled = false
+                let local = await SmartSkipAnalyzer.shared.analyze(context, settings: localOnly)
+                guard gen == self.loadGeneration, !Task.isCancelled else { return }
+                self.applySmartSkipSegments(local)
+            }
+            let segments = await merged
             guard gen == self.loadGeneration, !Task.isCancelled else { return }
-            self.adSegments = segments
-            let s = AppSettings.shared.smartSkip
-            self.tracker = segments.isEmpty ? nil
-                : SmartSkipTracker(segments: segments, mode: s.mode, countdownSeconds: Double(s.countdownSeconds))
-            self.smartSkipTick(time: self.displayTime(), playing: self.isActuallyPlaying)
+            self.applySmartSkipSegments(segments)
         }
+    }
+
+    /// Installs analysed segments; a tracker that already exists keeps its skip history.
+    private func applySmartSkipSegments(_ segments: [AdSegment]) {
+        adSegments = segments
+        if segments.isEmpty {
+            tracker = nil
+            skipPrompt = nil
+        } else if let tracker {
+            tracker.replaceSegments(segments)
+        } else {
+            let s = AppSettings.shared.smartSkip
+            tracker = SmartSkipTracker(segments: segments, mode: s.mode, countdownSeconds: Double(s.countdownSeconds))
+        }
+        smartSkipTick(time: displayTime(), playing: isActuallyPlaying)
     }
 
     func smartSkipTick(time: Double, playing: Bool) {

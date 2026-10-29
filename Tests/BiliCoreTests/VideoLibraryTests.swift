@@ -110,7 +110,7 @@ final class UserRelationStateTests: XCTestCase {
         XCTAssertEqual(UserRelationState.blocked.label, "已拉黑")
         XCTAssertTrue(UserRelationState.whisper.isFollowing)
         XCTAssertFalse(UserRelationState.blocked.isFollowing)
-        XCTAssertEqual(UserRelationState.whisper.unfollowAction, .cancelWhisper)
+        XCTAssertEqual(UserRelationState.whisper.unfollowAction, .unfollow)
         XCTAssertEqual(UserRelationState.mutual.unfollowAction, .unfollow)
     }
 

@@ -97,8 +97,7 @@ enum UserRelationState: Hashable {
         }
     }
 
-    /// `/x/relation/modify` act that undoes this follow state (悄悄关注 has its own).
-    var unfollowAction: RelationAction {
-        self == .whisper ? .cancelWhisper : .unfollow
-    }
+    /// `/x/relation/modify` act that undoes this follow state. act 2 also ends a 悄悄关注 (PiliPlus unfollows every
+    /// state with it); the documented act 4 is unverified, and a rejected act would leave the user stuck followed.
+    var unfollowAction: RelationAction { .unfollow }
 }

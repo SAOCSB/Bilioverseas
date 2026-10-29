@@ -155,6 +155,8 @@ final class DanmakuOverlayView: UIView {
         backgroundColor = .clear
         clipsToBounds = true
         bitmapCache.countLimit = 500
+        // A 3× bitmap of a long danmaku is several hundred KB: bound the bytes, not only the count.
+        bitmapCache.totalCostLimit = DanmakuOverlayView.bitmapCacheBytes
         layer.opacity = Float(min(max(settings.opacity, 0), 1))
         rebuildFonts()
         isHidden = !(userVisible && settings.enabled)
@@ -532,7 +534,8 @@ final class DanmakuOverlayView: UIView {
         default: kind = .scroll
         }
         let width = itemWidth(for: item)
-        guard width > 0,
+        // Checked before `place`: an item whose bitmap cannot be rendered must not reserve a lane.
+        guard width > 0, width < DanmakuOverlayView.maxBitmapWidth,
               let placement = engine.place(kind: kind, width: Double(width), at: item.time, isSelf: item.isSelf),
               !placement.isExpired(at: now)
         else { return false }
@@ -712,6 +715,9 @@ final class DanmakuOverlayView: UIView {
     }
 
     private static let maxContentLength = 150
+    /// Widest bitmap rendered (points); wider items are dropped before they take a lane.
+    private static let maxBitmapWidth: CGFloat = 6000
+    private static let bitmapCacheBytes = 24 * 1024 * 1024
 
     private func shownContent(_ item: DanmakuItem) -> String {
         let flat = item.content.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
@@ -776,7 +782,7 @@ final class DanmakuOverlayView: UIView {
         let stroke = strokeWidth
         let fillText = attributedText(item) { [.font: $0, .foregroundColor: fill] }
         let size = itemSize(textSize: fillText.size(), isSelf: item.isSelf)
-        guard size.width >= 1, size.height >= 1, size.width < 6000 else { return nil }
+        guard size.width >= 1, size.height >= 1, size.width < DanmakuOverlayView.maxBitmapWidth else { return nil }
         let vip = settings.showVipColorful && item.isVipGradient
 
         let format = UIGraphicsImageRendererFormat()
@@ -812,7 +818,7 @@ final class DanmakuOverlayView: UIView {
         }
         guard let cgImage = image.cgImage else { return nil }
         let bitmap = DanmakuTextBitmap(image: cgImage, size: size)
-        bitmapCache.setObject(bitmap, forKey: key)
+        bitmapCache.setObject(bitmap, forKey: key, cost: cgImage.width * cgImage.height * 4)
         return bitmap
     }
 }

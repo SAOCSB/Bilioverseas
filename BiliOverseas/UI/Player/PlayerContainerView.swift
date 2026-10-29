@@ -1,0 +1,561 @@
+import SwiftUI
+import UIKit
+
+// MARK: - Contract view
+
+/// Inline player area with full controls, gestures, danmaku, SmartSkip prompts, subtitles and the stats overlay.
+/// Presents / handles fullscreen itself (the same surface moves into a fullscreen hosting controller).
+struct PlayerContainerView: View {
+    let controller: PlayerController
+
+    init(controller: PlayerController) {
+        self.controller = controller
+    }
+
+    var body: some View {
+        PlayerStageView(controller: controller, overlay: controller.overlay, role: .inline)
+            .onAppear { controller.containerDidAppear() }
+            .onDisappear { controller.containerDidDisappear() }
+    }
+}
+
+// MARK: - Stage (inline or fullscreen)
+
+struct PlayerStageView: View {
+    @ObservedObject var controller: PlayerController
+    @ObservedObject var overlay: PlayerOverlayModel
+    let role: PlayerStageRole
+
+    /// The surface and the chrome live in exactly one stage at a time.
+    private var isActive: Bool { (role == .fullscreen) == controller.isFullscreen }
+    private var ignoredEdges: Edge.Set { role == .fullscreen ? .all : [] }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black.ignoresSafeArea(edges: ignoredEdges)
+                PlayerSurfaceRepresentable(controller: controller, role: role)
+                    .ignoresSafeArea(edges: ignoredEdges)
+                if isActive {
+                    PlayerChromeView(controller: controller, overlay: overlay, size: geo.size,
+                                     fullscreen: role == .fullscreen)
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .sheet(item: sheetBinding) { sheet in
+            PlayerSheetHost(controller: controller, sheet: sheet)
+        }
+    }
+
+    private var sheetBinding: Binding<PlayerSheet?> {
+        Binding(get: { isActive ? overlay.sheet : nil },
+                set: { overlay.sheet = $0 })
+    }
+}
+
+struct PlayerSheetHost: View {
+    let controller: PlayerController
+    let sheet: PlayerSheet
+
+    var body: some View {
+        switch sheet {
+        case .danmakuSettings:
+            DanmakuQuickPanel()
+        case .danmakuSend:
+            if let item = controller.item {
+                DanmakuSendSheet(aid: item.aid, cid: item.cid,
+                                 currentTime: { controller.displayTime() },
+                                 isClosed: controller.surface.danmaku.isClosedByUploader,
+                                 onSent: { controller.surface.danmaku.insertLocal($0) })
+            } else {
+                StateMessageView(systemImage: "text.bubble", message: "视频加载中，请稍后再试")
+            }
+        case .playerSettings:
+            PlayerSettingsSheet()
+        case .menu(let panel):
+            PlayerMenuSheet(controller: controller, root: panel)
+        }
+    }
+}
+
+// MARK: - Chrome
+
+/// Everything drawn over the video of the active stage.
+struct PlayerChromeView: View {
+    @ObservedObject var controller: PlayerController
+    @ObservedObject var overlay: PlayerOverlayModel
+    @ObservedObject private var settings = AppSettings.shared
+    let size: CGSize
+    let fullscreen: Bool
+
+    private var compact: Bool { size.width < 520 }
+    private var landscape: Bool { size.width > size.height }
+    private var bottomBarHeight: CGFloat { fullscreen ? 88 : 44 }
+
+    var body: some View {
+        ZStack {
+            coverLayer
+            subtitleLayer
+            centerLayer
+            hudLayer
+            promptLayer
+            controlsLayer
+            statsLayer
+            panelLayer
+        }
+        .frame(width: size.width, height: size.height)
+        .animation(.easeInOut(duration: 0.2), value: overlay.controlsVisible)
+        .animation(.easeInOut(duration: 0.15), value: controller.isBoosting)
+        .animation(.easeInOut(duration: 0.25), value: overlay.panel)
+        .animation(.easeInOut(duration: 0.25), value: controller.skipPrompt?.segment.id)
+    }
+
+    private func act(_ action: () -> Void) {
+        overlay.poke()
+        action()
+    }
+
+    private func open(_ panel: PlayerPanel) {
+        overlay.poke()
+        overlay.open(panel, fullscreen: fullscreen)
+    }
+
+    // MARK: Layers
+
+    @ViewBuilder
+    private var coverLayer: some View {
+        if !controller.hasFirstFrame, let cover = controller.item?.cover, !cover.isEmpty {
+            RemoteImage(url: cover, width: 640, contentMode: .fill)
+                .frame(width: size.width, height: size.height)
+                .clipped()
+                .overlay(Color.black.opacity(0.25))
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        }
+    }
+
+    @ViewBuilder
+    private var subtitleLayer: some View {
+        if let text = controller.subtitleText {
+            Text(text)
+                .font(.system(size: fullscreen ? 20 : 14, weight: .semibold))
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.black.opacity(0.67), in: RoundedRectangle(cornerRadius: 4))
+                .padding(.horizontal, 24)
+                .padding(.bottom, overlay.controlsVisible ? bottomBarHeight + 6 : (fullscreen ? 24 : 10))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private var centerLayer: some View {
+        switch controller.status {
+        case .failed(let message):
+            PlayerErrorView(message: message) { controller.retry() }
+        case .ended:
+            if !overlay.isLocked { replayButton }
+        case .loading, .buffering:
+            if controller.status == .loading || controller.wantsToPlay {
+                PlayerBufferingView(text: bufferingText)
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    private var bufferingText: String {
+        if let message = controller.transientMessage { return message }
+        return controller.networkSpeed > 0 ? Fmt.speed(controller.networkSpeed) : "加载中..."
+    }
+
+    private var replayButton: some View {
+        Button {
+            controller.play()
+        } label: {
+            VStack(spacing: 6) {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.system(size: 22, weight: .semibold))
+                Text("重新播放")
+                    .font(.system(size: 12))
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var hudLayer: some View {
+        if let hint = overlay.doubleTapHint {
+            PlayerDoubleTapIndicator(hint: hint, size: size)
+                .transition(.opacity)
+        }
+        if controller.isBoosting {
+            PlayerPill {
+                HStack(spacing: 4) {
+                    Image(systemName: "forward.fill").font(.system(size: 11))
+                    Text("\(PlayerFormat.rate(controller.boostRate))倍速中")
+                }
+            }
+            .padding(.top, fullscreen ? 56 : 30)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .allowsHitTesting(false)
+            .transition(.opacity)
+        }
+        if let preview = overlay.seekPreview {
+            seekPreviewView(preview)
+        }
+        if let hud = overlay.levelHUD {
+            PlayerLevelPill(hud: hud)
+        }
+        if let hint = overlay.hint {
+            PlayerPill { Text(hint) }
+                .padding(.top, fullscreen ? 96 : 56)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func seekPreviewView(_ preview: PlayerSeekPreview) -> some View {
+        VStack(spacing: 8) {
+            if let shot = controller.videoShot, !preview.cancelled {
+                PlayerSeekThumbnail(shot: shot, time: preview.target, height: thumbnailHeight)
+            }
+            PlayerPill {
+                Text("\(PlayerFormat.time(preview.target))/\(PlayerFormat.time(preview.duration))")
+                    .monospacedDigit()
+            }
+            .opacity(preview.cancelled ? 0.5 : 1)
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// 81 pt (portrait / vertical) or 108 pt (landscape fullscreen), capped at height − 140 when that is > 50.
+    private var thumbnailHeight: CGFloat {
+        let base: CGFloat = fullscreen && landscape ? 108 : 81
+        let cap = size.height - 140
+        return cap > 50 ? min(base, cap) : base
+    }
+
+    @ViewBuilder
+    private var promptLayer: some View {
+        let bottom = (overlay.controlsVisible ? bottomBarHeight : 0) + size.height * 0.1
+        if !overlay.isLocked, let prompt = controller.skipPrompt {
+            SmartSkipPromptView(segment: prompt.segment, remaining: prompt.remaining,
+                                total: Double(settings.smartSkip.countdownSeconds),
+                                onSkip: { controller.smartSkipTapped(prompt.segment) },
+                                onDismiss: { controller.smartSkipDismissed(prompt.segment) },
+                                onInteractionChanged: { controller.smartSkipInteraction($0) })
+                .padding(.trailing, 24)
+                .padding(.bottom, bottom)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+        } else if !overlay.isLocked, let clip = controller.clipPrompt {
+            PlayerClipSkipButton(title: PlayerController.clipTitle(clip),
+                                 onSkip: { controller.skipClip() },
+                                 onDismiss: { controller.dismissClip() })
+                .padding(.trailing, 24)
+                .padding(.bottom, bottom)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+        }
+        if !overlay.isLocked, let time = controller.resumeChipTime {
+            PlayerResumeChip(time: time,
+                             onRestart: { controller.restartFromBeginning() },
+                             onDismiss: { controller.dismissResumeChip() })
+                .padding(.leading, fullscreen ? 24 : 10)
+                .padding(.bottom, bottom)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .transition(.opacity)
+        }
+    }
+
+    @ViewBuilder
+    private var controlsLayer: some View {
+        if overlay.controlsVisible, !overlay.isLocked {
+            VStack(spacing: 0) {
+                topBar
+                Spacer(minLength: 0)
+                bottomBar
+            }
+            .transition(.opacity)
+        }
+        if fullscreen, (overlay.isLocked ? overlay.lockButtonVisible : overlay.controlsVisible) {
+            lockButton
+                .padding(.leading, 16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .transition(.opacity)
+        }
+        if !overlay.controlsVisible || overlay.isLocked {
+            PlayerThinProgress(timeline: controller.timeline)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+        }
+    }
+
+    @ViewBuilder
+    private var statsLayer: some View {
+        if let stats = controller.stats, !overlay.isLocked {
+            PlayerStatsOverlay(stats: stats, stream: controller.currentStreamDescription)
+                .padding(.top, overlay.controlsVisible ? (fullscreen ? 60 : 40) : 8)
+                .padding(.leading, fullscreen ? 64 : 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    @ViewBuilder
+    private var panelLayer: some View {
+        if fullscreen, let panel = overlay.panel {
+            ZStack(alignment: landscape ? .trailing : .bottom) {
+                Color.black.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .onTapGesture { overlay.panel = nil }
+                PlayerMenuPanel(controller: controller, overlay: overlay, panel: panel)
+                    .frame(width: landscape ? min(360, size.width * 0.42) : size.width,
+                           height: landscape ? size.height : size.height * 0.55)
+                    .background(Color.black.opacity(0.88).ignoresSafeArea())
+                    .transition(.move(edge: landscape ? .trailing : .bottom))
+            }
+        }
+    }
+
+    // MARK: Bars
+
+    private var topBar: some View {
+        HStack(spacing: 4) {
+            if fullscreen {
+                PlayerIconButton(systemName: "chevron.left", size: 18) { controller.fullscreenBack() }
+                titleBlock
+                Spacer(minLength: 8)
+                if !compact { PlayerFullscreenStatusView() }
+                PlayerIconButton(systemName: "slider.horizontal.3", size: 17) {
+                    act { overlay.sheet = .danmakuSettings }
+                }
+            } else {
+                Spacer(minLength: 0)
+            }
+            if controller.supportsPiP {
+                PlayerIconButton(systemName: controller.isPiPActive ? "pip.exit" : "pip.enter", size: 17) {
+                    act { controller.togglePiP() }
+                }
+            }
+            PlayerIconButton(systemName: "ellipsis", size: 18) { open(.more) }
+        }
+        .padding(.horizontal, fullscreen ? 12 : 6)
+        .padding(.top, fullscreen ? 6 : 2)
+        .padding(.bottom, 14)
+        .background(
+            LinearGradient(colors: [Color.black.opacity(0.75), .clear], startPoint: .top, endPoint: .bottom)
+                .allowsHitTesting(false)
+        )
+    }
+
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(controller.item?.title ?? "")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(.white)
+                .lineLimit(1)
+            let secondLine = [controller.item?.subtitle ?? "", controller.onlineCount ?? ""]
+                .filter { !$0.isEmpty }
+                .joined(separator: "  ")
+            if !secondLine.isEmpty {
+                Text(secondLine)
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.75))
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var bottomBar: some View {
+        if fullscreen {
+            fullscreenBottomBar
+        } else {
+            inlineBottomBar
+        }
+    }
+
+    private var inlineBottomBar: some View {
+        HStack(spacing: 4) {
+            playButton
+            progressBar
+            PlayerTimeText(timeline: controller.timeline, style: .combined, overrideTime: overlay.seekPreview?.target)
+            danmakuToggle
+            if !controller.subtitleTracks.isEmpty, size.width >= 400 {
+                subtitleIconButton
+            }
+            PlayerTextButton(title: speedTitle, highlighted: controller.isBoosting || controller.rate != 1,
+                             fontSize: 12) { open(.speed) }
+            PlayerIconButton(systemName: "arrow.up.left.and.arrow.down.right", size: 15, width: 32) {
+                act { controller.enterFullscreen() }
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.top, 14)
+        .background(
+            LinearGradient(colors: [.clear, Color.black.opacity(0.75)], startPoint: .top, endPoint: .bottom)
+                .allowsHitTesting(false)
+        )
+    }
+
+    private var fullscreenBottomBar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                PlayerTimeText(timeline: controller.timeline, style: .current, overrideTime: overlay.seekPreview?.target)
+                progressBar
+                PlayerTimeText(timeline: controller.timeline, style: .total)
+            }
+            HStack(spacing: compact ? 4 : 12) {
+                playButton
+                if controller.hasNext {
+                    PlayerIconButton(systemName: "forward.end.fill", size: 18) { act { controller.onNext?() } }
+                }
+                danmakuToggle
+                danmakuInput
+                Spacer(minLength: 4)
+                if !controller.subtitleTracks.isEmpty {
+                    PlayerTextButton(title: "字幕", highlighted: controller.selectedSubtitleId != nil) { open(.subtitle) }
+                }
+                PlayerTextButton(title: fullscreenSpeedTitle,
+                                 highlighted: controller.isBoosting || controller.rate != 1) { open(.speed) }
+                if let quality = currentQualityEntry {
+                    PlayerTextButton(title: quality.shortTitle) { open(.quality) }
+                }
+                PlayerIconButton(systemName: "arrow.down.right.and.arrow.up.left", size: 15) {
+                    act { controller.exitFullscreen() }
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 20)
+        .padding(.bottom, 2)
+        .background(
+            LinearGradient(colors: [.clear, Color.black.opacity(0.75)], startPoint: .top, endPoint: .bottom)
+                .allowsHitTesting(false)
+        )
+    }
+
+    // MARK: Controls
+
+    private var playIcon: String {
+        if controller.status == .ended { return "arrow.counterclockwise" }
+        return controller.wantsToPlay ? "pause.fill" : "play.fill"
+    }
+
+    private var playButton: some View {
+        PlayerIconButton(systemName: playIcon, size: fullscreen ? 22 : 18) { act { controller.togglePlay() } }
+    }
+
+    private var progressBar: some View {
+        PlayerProgressBar(timeline: controller.timeline, chapters: controller.chapters,
+                          segments: controller.adSegments, clips: controller.pgcClips,
+                          onScrubBegan: {
+                              overlay.beginHold()
+                              controller.ensureVideoShot()
+                          },
+                          onScrubChanged: { target in
+                              overlay.seekPreview = PlayerSeekPreview(target: target, duration: controller.duration,
+                                                                      delta: 0, cancelled: false)
+                          },
+                          onScrubEnded: { target in
+                              overlay.seekPreview = nil
+                              overlay.endHold()
+                              controller.seek(to: target)
+                          })
+    }
+
+    private var danmakuToggle: some View {
+        Button {
+            act { controller.toggleDanmaku() }
+        } label: {
+            PlayerDanmakuToggleIcon(enabled: settings.danmaku.enabled)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var danmakuInput: some View {
+        Button {
+            act { overlay.sheet = .danmakuSend }
+        } label: {
+            if compact {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 17))
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            } else {
+                Text("发个友善的弹幕见证当下")
+                    .font(.system(size: 13))
+                    .foregroundColor(.white.opacity(0.7))
+                    .lineLimit(1)
+                    .padding(.horizontal, 14)
+                    .frame(maxWidth: 260, minHeight: 30, maxHeight: 30, alignment: .leading)
+                    .background(Color.white.opacity(0.18), in: Capsule())
+                    .contentShape(Capsule())
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var subtitleIconButton: some View {
+        PlayerIconButton(systemName: controller.selectedSubtitleId == nil ? "captions.bubble" : "captions.bubble.fill",
+                         size: 16, width: 32) { open(.subtitle) }
+    }
+
+    private var speedTitle: String {
+        "\(PlayerFormat.rate(controller.effectiveRate))X"
+    }
+
+    private var fullscreenSpeedTitle: String {
+        controller.effectiveRate == 1 ? "倍速" : speedTitle
+    }
+
+    private var currentQualityEntry: PlayerQualityEntry? {
+        controller.qualityEntries.first { $0.qn == controller.currentQuality }
+    }
+
+    private var lockButton: some View {
+        Button {
+            overlay.toggleLock()
+        } label: {
+            Image(systemName: overlay.isLocked ? "lock.fill" : "lock.open.fill")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(.white)
+                .frame(width: 40, height: 40)
+                .background(Color.black.opacity(0.27), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(overlay.isLocked ? "解锁" : "锁定"))
+    }
+}
+
+/// Clock and battery in the fullscreen top bar.
+struct PlayerFullscreenStatusView: View {
+    var body: some View {
+        TimelineView(.periodic(from: Date(), by: 20)) { context in
+            HStack(spacing: 6) {
+                Text(PlayerFormat.clock.string(from: context.date))
+                if let level = PlayerFullscreenStatusView.batteryPercent() {
+                    Text("\(level)%")
+                }
+            }
+            .font(.system(size: 12, weight: .medium).monospacedDigit())
+            .foregroundColor(.white.opacity(0.9))
+            .padding(.trailing, 4)
+        }
+        .onAppear { UIDevice.current.isBatteryMonitoringEnabled = true }
+    }
+
+    static func batteryPercent() -> Int? {
+        let level = UIDevice.current.batteryLevel
+        return level >= 0 ? Int((level * 100).rounded()) : nil
+    }
+}

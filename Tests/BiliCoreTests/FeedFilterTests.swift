@@ -310,6 +310,8 @@ final class FeedFilterTests: XCTestCase {
             video("【已恰饭】耳机体验"),
             video("评测", desc: "本期视频由 XX 独家冠名"),
             video("【推广】新游戏试玩"),
+            video("开箱", desc: "感谢倍思充电宝对本期视频的赞助"),
+            video("充电宝评测", desc: "感谢金主爸爸"),
         ]
         for c in cases {
             XCTAssertNotNil(FeedPromotionDetector.evidence(for: c), "should block: \(c.title) / \(c.desc) / \(c.badge) / \(c.reason)")
@@ -351,6 +353,10 @@ final class FeedFilterTests: XCTestCase {
             video("【广告位招租】"),
             video("#推广普通话#"),
             video("[4K60帧] 广告太多了"),
+            // 充电 = fan tipping: thanking viewers is not a sponsorship.
+            video("日常vlog", desc: "感谢充电的金主爸爸们"),
+            video("日常vlog", desc: "感谢所有充电的小伙伴和金主爸爸！"),
+            video("游戏实况", desc: "感谢本期充电的各位金主！下期见"),
         ]
         for c in cases {
             XCTAssertNil(FeedPromotionDetector.evidence(for: c), "false positive: \(c.title) / \(c.desc)")

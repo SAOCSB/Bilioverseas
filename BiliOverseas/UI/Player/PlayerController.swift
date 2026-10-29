@@ -287,7 +287,7 @@ final class PlayerController: ObservableObject {
     private var forceDirect = false
     private var fallbackSteps: Set<PlayerFallbackStep> = []
     /// The user's play intent (survives rebuilds; AVPlayer's own state is paused during them).
-    private(set) var wantsToPlay = false
+    @Published private(set) var wantsToPlay = false
     private var itemReady = false
     private(set) var startupDone = false
     private(set) var isSeeking = false

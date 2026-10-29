@@ -229,6 +229,20 @@ final class SmartSkipDataLoaderTests: XCTestCase {
         XCTAssertEqual(pb, [SmartSkipDanmaku(time: 1, textContent: "pb")])
     }
 
+    func testCancelledDanmakuFetchDoesNotFallBackToXML() async {
+        let transport = SSFakeTransport { request in
+            if request.url.hasSuffix(".xml") { return Data("<i></i>".utf8) }
+            try await Task.sleep(nanoseconds: 10_000_000_000)   // cancelled long before
+            return SSFakeTransport.protobuf([])
+        }
+        let task = Task { await SmartSkipDataLoader(transport: transport).fetchDanmakuWithTime(cid: 9, duration: 300) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()                                          // the player switched video
+        let rows = await task.value
+        XCTAssertEqual(rows, [])
+        XCTAssertFalse(transport.requests.contains { $0.url.hasSuffix(".xml") }, "no XML download after cancellation")
+    }
+
     func testDanmakuXMLRejectsInvalidDocuments() {
         XCTAssertThrowsError(try SmartSkipDataLoader.parseDanmakuXML(Data("<root><d p=\"1\">x</d></root>".utf8)), "root must be <i>")
         XCTAssertThrowsError(try SmartSkipDataLoader.parseDanmakuXML(Data("<i><d p=\"1\">x</i>".utf8)), "parser error")

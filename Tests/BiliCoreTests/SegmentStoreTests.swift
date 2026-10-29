@@ -290,6 +290,40 @@ final class SegmentStoreTests: XCTestCase {
         } catch {}
     }
 
+    /// Regression: `SegmentFetch.append` used to yield to subscribers while holding the fetch lock. Yielding resumes a
+    /// reader suspended in `next()`, which waits for that task's runtime status lock; a concurrent `Task.cancel()` of
+    /// the same reader (AVPlayer dropping the socket) holds that lock while running `onTermination`, which takes the
+    /// fetch lock → deadlock (and then the store lock and the main thread's `updatePlayback`).
+    /// Synchronous test: producer and canceller run on their own threads, so a deadlock fails instead of hanging.
+    func testCancellingReaderWhileBytesArriveDoesNotDeadlock() {
+        let rounds = 300
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            for _ in 0..<rounds {
+                let fetch = SegmentFetch(key: SegmentKey(kind: .video, index: 0),
+                                         range: ByteRange(start: 0, end: 50_000_000))
+                let subscription = fetch.subscribe(onEnd: {})
+                let consumer = Task {
+                    for try await _ in subscription.stream {}
+                }
+                let producing = DispatchSemaphore(value: 0)
+                let stop = EngineStopFlag()
+                DispatchQueue.global().async {
+                    let chunk = Data(repeating: 7, count: 64)
+                    while !stop.isSet && fetch.append(chunk) {}
+                    producing.signal()
+                }
+                usleep(UInt32.random(in: 0..<300))
+                consumer.cancel()
+                stop.set()
+                producing.wait()
+                fetch.finish()
+            }
+            done.signal()
+        }
+        XCTAssertEqual(done.wait(timeout: .now() + 30), .success, "reader cancellation deadlocked with append")
+    }
+
     func testDefaultBudget() {
         let gb: UInt64 = 1 << 30
         XCTAssertEqual(SegmentStore.defaultBudgetBytes(physicalMemory: 2 * gb), 128 << 20)

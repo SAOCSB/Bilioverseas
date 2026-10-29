@@ -465,24 +465,28 @@ final class H1MediaClient: MediaHTTPClient {
         receive(on: c)
     }
 
+    // complete / fail / cancelExchange settle the connection BEFORE ending the stream, so a consumer woken by the
+    // end already sees the pool and `openConnectionCount` updated.
+
     private func complete(_ ex: Exchange, reusable: Bool) {
         guard !ex.finished else { return }
         ex.finished = true
-        ex.pipe.finish()
-        guard let c = detach(ex) else { return }
-        if reusable, c.state == .ready, case .ready = c.nw.state {
-            release(c)
-        } else {
-            close(c, force: false)
+        if let c = detach(ex) {
+            if reusable, c.state == .ready, case .ready = c.nw.state {
+                release(c)
+            } else {
+                close(c, force: false)
+            }
         }
+        ex.pipe.finish()
     }
 
     private func fail(_ ex: Exchange, _ error: MediaFetchError) {
         guard !ex.finished else { return }
         ex.finished = true
-        ex.pipe.finish(throwing: error)
         removeWaiter(ex)
         if let c = detach(ex) { close(c) }
+        ex.pipe.finish(throwing: error)
     }
 
     /// A pooled connection that dies before any response byte (server closed it while idle) is replaced once by a
@@ -507,9 +511,9 @@ final class H1MediaClient: MediaHTTPClient {
     private func cancelExchange(_ ex: Exchange) {
         guard !ex.finished else { return }
         ex.finished = true
-        ex.pipe.finish(throwing: MediaFetchError.cancelled)
         removeWaiter(ex)
         if let c = detach(ex) { close(c, force: true) }
+        ex.pipe.finish(throwing: MediaFetchError.cancelled)
     }
 
     private func removeWaiter(_ ex: Exchange) {

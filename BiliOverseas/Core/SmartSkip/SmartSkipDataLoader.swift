@@ -438,6 +438,8 @@ struct SmartSkipDataLoader {
             }
         }
         let danmaku = await pool.rows
+        // Cancelled (video switched): the result is discarded anyway — no XML download.
+        if Task.isCancelled { return [] }
         if !danmaku.isEmpty {
             SmartSkipUtils.log("danmaku fetched via protobuf: \(danmaku.count) (\(segmentCount) segments)")
             return SmartSkipJS.stableSorted(danmaku) { $0.time - $1.time }

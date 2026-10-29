@@ -63,8 +63,16 @@ enum DanmakuService {
     /// Legacy all-in-one XML (`x/v1/dm/list.so`), used when the protobuf endpoints fail.
     static func fetchLegacyXML(cid: Int64) async throws -> [DanmakuItem] {
         let (data, _) = try await BiliHTTP.shared.data(legacyXMLURL, query: ["oid": cid])
-        guard let items = DanmakuXMLDecoder.decode(data) else { throw BiliError.decoding("danmaku xml") }
-        return items
+        if let items = DanmakuXMLDecoder.decode(data) { return items }
+        #if canImport(Darwin)
+        // list.so is served raw-deflate (`Content-Encoding: deflate`); if the transport handed the
+        // body over still compressed, inflate it (NSData's `.zlib` is raw DEFLATE).
+        if let inflated = try? (data as NSData).decompressed(using: .zlib) as Data,
+           let items = DanmakuXMLDecoder.decode(inflated) {
+            return items
+        }
+        #endif
+        throw BiliError.decoding("danmaku xml")
     }
 
     /// Sends a danmaku (`POST x/v2/dm/post`). Returns the new dmid (0 if the server omitted it).

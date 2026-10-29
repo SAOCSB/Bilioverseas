@@ -324,6 +324,8 @@ enum FeedFilterRegexCache {
 ///   免谈 dd 滴滴 加v 戳 主页 简介 — "商单合作请私信", "商单勿扰", "商单dd", "商单报价", "这是恰饭吗";
 /// - noun compounds: 广告学/法/牌/词/片/位/业/人/史/公司/设计/创意/专业/招租/拦截/营销/推广 …,
 ///   推广普通话/大使/计划 …, 带货主播/乱象 … — "广告学专业解读", "推广普通话".
+/// - fan tipping: 金主 / 赞助 in a clause that mentions 「充电」 (Bilibili's tipping; not 充电宝/器 …)
+///   thank viewers, not a sponsor — "感谢充电的金主爸爸们", a common description footer.
 /// Bare 广告 / 推广 / 恰饭 (恰饭 also means 吃饭 in 湘方言: "长沙恰饭 vlog") are weak only.
 enum FeedPromotionDetector {
     static func evidence(for card: VideoCard) -> String? {
@@ -433,7 +435,10 @@ enum FeedPromotionDetector {
             for m in regex.matches(in: text, options: [], range: NSRange(location: 0, length: ns.length)) {
                 let gap = ns.substring(with: m.range(at: 1))
                 if gapNegators.contains(where: { gap.contains($0) }) { continue }
-                if let start = Range(m.range, in: text)?.lowerBound, isSuppressed(text, before: start) { continue }
+                if let r = Range(m.range, in: text) {
+                    if isSuppressed(text, before: r.lowerBound) { continue }
+                    if mentionsFanCharging(clause(of: text, around: r)) { continue }
+                }
                 return ns.substring(with: m.range)
             }
         }
@@ -449,9 +454,30 @@ enum FeedPromotionDetector {
             if isSuppressed(text, before: r.lowerBound) { continue }
             if isBoilerplate(text, after: r.upperBound) { continue }
             if let nouns = nounSuffixes[term], nouns.contains(where: { text[r.upperBound...].hasPrefix($0) }) { continue }
+            if sponsorWords.contains(where: { term.contains($0) }), mentionsFanCharging(clause(of: text, around: r)) { continue }
             return true
         }
         return false
+    }
+
+    /// Terms whose meaning flips to fan tipping next to 「充电」.
+    private static let sponsorWords = ["金主", "赞助"]
+
+    /// 「充电」 (fan tipping) not part of a product noun like 充电宝 / 充电器 / 充电头.
+    static func mentionsFanCharging<S: StringProtocol>(_ s: S) -> Bool {
+        var from = s.startIndex
+        while from < s.endIndex, let r = s.range(of: "充电", range: from..<s.endIndex) {
+            guard let next = s[r.upperBound...].first, "宝器头线桩站口".contains(next) else { return true }
+            from = r.upperBound
+        }
+        return false
+    }
+
+    /// The sentence (cut at sentence punctuation) that contains `r`.
+    private static func clause(of text: String, around r: Range<String.Index>) -> Substring {
+        let start = text[..<r.lowerBound].lastIndex(where: isSentenceBreak).map { text.index(after: $0) } ?? text.startIndex
+        let end = text[r.upperBound...].firstIndex(where: isSentenceBreak) ?? text.endIndex
+        return text[start..<end]
     }
 
     private static func isSuppressed(_ text: String, before index: String.Index) -> Bool {

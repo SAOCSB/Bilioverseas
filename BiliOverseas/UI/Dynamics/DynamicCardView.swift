@@ -541,7 +541,8 @@ struct DynamicSingleImage: View {
     }
 
     var body: some View {
-        let width: CGFloat = aspect >= 1 ? 300 : 220
+        // Fits a 320 pt screen even inside a forwarded box.
+        let width: CGFloat = aspect >= 1 ? 270 : 210
         ZStack {
             if let image {
                 Image(uiImage: image)

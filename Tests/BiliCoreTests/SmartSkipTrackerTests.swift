@@ -107,11 +107,11 @@ final class SmartSkipTrackerTests: XCTestCase {
     func testCountdownPausesWhilePausedAndKeepsPartialSeconds() {
         let tracker = SmartSkipTracker(segments: [M(100, 200)], mode: .manual)
         _ = tracker.update(time: 100, isPlaying: true, now: 0)
-        XCTAssertEqual(remaining(tracker.update(time: 100.5, isPlaying: true, now: 0.5)), 4.5)
-        XCTAssertEqual(remaining(tracker.update(time: 101.3, isPlaying: true, now: 1.3)), 3.7)
-        XCTAssertEqual(remaining(tracker.update(time: 101.3, isPlaying: false, now: 1.3)), 3.7, "pause reported")
-        XCTAssertEqual(remaining(tracker.update(time: 101.3, isPlaying: false, now: 30)), 3.7, "no progress while paused")
-        XCTAssertEqual(remaining(tracker.update(time: 101.3, isPlaying: true, now: 30)), 3.7, "resume does not restart")
+        XCTAssertEqual(remaining(tracker.update(time: 100.5, isPlaying: true, now: 0.5))!, 4.5, accuracy: 1e-9)
+        XCTAssertEqual(remaining(tracker.update(time: 101.3, isPlaying: true, now: 1.3))!, 3.7, accuracy: 1e-9)
+        XCTAssertEqual(remaining(tracker.update(time: 101.3, isPlaying: false, now: 1.3))!, 3.7, accuracy: 1e-9, "pause reported")
+        XCTAssertEqual(remaining(tracker.update(time: 101.3, isPlaying: false, now: 30))!, 3.7, accuracy: 1e-9, "no progress while paused")
+        XCTAssertEqual(remaining(tracker.update(time: 101.3, isPlaying: true, now: 30))!, 3.7, accuracy: 1e-9, "resume does not restart")
         XCTAssertEqual(remaining(tracker.update(time: 101.8, isPlaying: true, now: 30.5))!, 3.2, accuracy: 1e-9)
     }
 

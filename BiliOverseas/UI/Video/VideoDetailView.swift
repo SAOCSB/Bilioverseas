@@ -387,7 +387,11 @@ final class VideoDetailModel: ObservableObject {
     func attach(_ player: PlayerController) {
         self.player = player
         player.onEnded = { [weak self] in
-            Task { @MainActor in self?.playbackEnded() }
+            Task { @MainActor in self?.advance(manual: false) }
+        }
+        // Enables 「下一集」 in fullscreen and next-track on the lock screen.
+        player.onNext = { [weak self] in
+            Task { @MainActor in self?.advance(manual: true) }
         }
         if let item = pendingItem {
             pendingItem = nil
@@ -610,9 +614,10 @@ final class VideoDetailModel: ObservableObject {
         replace(with: VideoRef(seasonId: link.seasonId, title: link.title, cover: link.cover))
     }
 
-    /// Auto-next: next part → next 合集 episode → next PGC episode → first (filtered) related video.
-    private func playbackEnded() {
-        guard AppSettings.shared.player.autoNext else { return }
+    /// Next: next part → next 合集 episode → next PGC episode → first (filtered) related video.
+    /// Automatic advancing at the end honours 「自动连播」; the 下一集 button always advances.
+    private func advance(manual: Bool) {
+        guard manual || AppSettings.shared.player.autoNext else { return }
         if let s = season, let ep = currentEpisode {
             let list: [PGCEpisode]
             if s.episodes.contains(where: { $0.epId == ep.epId }) {

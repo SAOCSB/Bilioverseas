@@ -108,7 +108,8 @@ enum PlayerInstallReason {
 }
 
 enum PlayerFallbackStep: Hashable {
-    case avc, direct, lowerQuality
+    /// `noProxy`: the CDN's progressive MP4 played by AVPlayer itself (the local proxy could not serve).
+    case avc, direct, noProxy, lowerQuality
 }
 
 enum PlayerLoadError: LocalizedError {
@@ -285,6 +286,8 @@ final class PlayerController: ObservableObject {
     private var forceAVC = false
     private var forceNormalAudio = false
     private var forceDirect = false
+    /// Skip the local proxy entirely (see `installDirectProgressive`).
+    private var forceNoProxy = false
     private var fallbackSteps: Set<PlayerFallbackStep> = []
     /// The user's play intent (survives rebuilds; AVPlayer's own state is paused during them).
     @Published private(set) var wantsToPlay = false
@@ -532,6 +535,7 @@ final class PlayerController: ObservableObject {
         forceAVC = false
         forceNormalAudio = false
         forceDirect = false
+        forceNoProxy = false
         status = .loading
         rebuild(position: lastKnownPosition, reason: .retry)
     }
@@ -770,7 +774,7 @@ final class PlayerController: ObservableObject {
         let routeKey = PlayerStreamPicker.routeKey(aid: target.aid, bvid: target.bvid, cid: target.cid, epId: target.epId)
         var lastError: Error?
 
-        if info.isDash {
+        if info.isDash, !forceNoProxy {
             if let picked = PlayerStreamPicker.choose(info, constraints()) {
                 for accelerate in attempts {
                     do {
@@ -803,7 +807,7 @@ final class PlayerController: ObservableObject {
             }
         }
 
-        if let segment = info.durl.first {
+        if !forceNoProxy, let segment = info.durl.first {
             if info.durl.count > 1, reason == .initial {
                 ToastCenter.shared.show("该视频为分段视频，目前只能播放第一段")
             }
@@ -829,6 +833,17 @@ final class PlayerController: ObservableObject {
             }
         }
 
+        // No usable proxy session (or the proxy already failed this item): the CDN's MP4 without the proxy.
+        if target.epId == 0, forceNoProxy || reason != .switchStreams {
+            do {
+                if try await installDirectProgressive(target: target, position: position, generation: sgen,
+                                                      current: current) { return }
+            } catch {
+                guard current() else { return }
+                lastError = lastError ?? error
+            }
+        }
+
         guard current() else { return }
         rebuildPending = false
         if reason == .switchStreams, startupDone {
@@ -849,8 +864,37 @@ final class PlayerController: ObservableObject {
         fail(Self.describe(lastError ?? PlayerLoadError.noStream))
     }
 
+    /// Last resort without the local proxy: the html5 progressive MP4 straight from the CDN, with the Referer /
+    /// User-Agent the CDN checks. Not accelerated and at most 1080P, but it plays when the proxy cannot serve.
+    /// Returns true when the attempt is over for this caller (installed, or superseded meanwhile).
+    private func installDirectProgressive(target: PlaybackItem, position: Double?, generation sgen: Int,
+                                          current: () -> Bool) async throws -> Bool {
+        let qn = manualQuality ?? AppSettings.shared.player.preferredQuality
+        let info = try await VideoAPI.progressivePlayInfo(aid: target.aid, bvid: target.bvid, cid: target.cid, qn: qn)
+        guard current() else { return true }
+        guard let segment = info.durl.first, let url = URL(string: segment.url.biliHTTPS) else {
+            throw PlayerLoadError.noStream
+        }
+        // Announced when it replaces a proxy item (or there was none yet), not on every direct rebuild.
+        if session != nil || playerItem == nil { ToastCenter.shared.show("加速通道不可用，已改为直连播放") }
+        forceNoProxy = true
+        fallbackSteps.formUnion([.direct, .noProxy])
+        let headers = ["Referer": "https://www.bilibili.com/", "User-Agent": BiliHTTP.webUserAgent]
+        installItem(url: url, session: nil, assetOptions: ["AVURLAssetHTTPHeaderFieldsKey": headers], choice: nil,
+                    accelerated: false, progressive: true, position: position, generation: sgen)
+        return true
+    }
+
     private func install(_ newSession: PlaybackSession, choice picked: PlayerStreamChoice?, accelerated: Bool,
                          progressive: Bool, position: Double?, generation sgen: Int) {
+        installItem(url: newSession.url, session: newSession, assetOptions: nil, choice: picked,
+                    accelerated: accelerated, progressive: progressive, position: position, generation: sgen)
+    }
+
+    /// `session` nil: a URL AVPlayer loads itself (no proxy).
+    private func installItem(url: URL, session newSession: PlaybackSession?, assetOptions: [String: Any]?,
+                             choice picked: PlayerStreamChoice?, accelerated: Bool, progressive: Bool,
+                             position: Double?, generation sgen: Int) {
         let start = max(0, position ?? displayTime())
         let initial = !heartbeatStarted
         removeItemObservers()
@@ -885,12 +929,12 @@ final class PlayerController: ObservableObject {
             }
         }
 
-        let asset = AVURLAsset(url: newSession.url)
+        let asset = AVURLAsset(url: url, options: assetOptions)
         let newItem = AVPlayerItem(asset: asset)
         newItem.preferredForwardBufferDuration = forwardBufferSeconds
         newItem.preferredPeakBitRate = 0
         newItem.audioTimePitchAlgorithm = .timeDomain
-        if start > 0.5 { newSession.playerWillSeek(to: start, outsideBuffer: true) }
+        if start > 0.5 { newSession?.playerWillSeek(to: start, outsideBuffer: true) }
         playerItem = newItem
         // `play()` from the PiP window / headphones uses `defaultRate`: keep it within what this item can do.
         player.defaultRate = playerRate
@@ -960,6 +1004,7 @@ final class PlayerController: ObservableObject {
         forceAVC = false
         forceNormalAudio = false
         forceDirect = false
+        forceNoProxy = false
         fallbackSteps = []
         itemReady = false
         startupDone = false
@@ -1242,6 +1287,15 @@ final class PlayerController: ObservableObject {
         if !fallbackSteps.contains(.direct), isAccelerated {
             fallbackSteps.insert(.direct)
             forceDirect = true
+            beginFallback()
+            rebuild(position: position, reason: .fallback)
+            return
+        }
+        if !fallbackSteps.contains(.noProxy), session != nil, item?.epId == 0 {
+            // Even the proxy's unaccelerated item failed (e.g. the loopback connection itself breaks): play the
+            // CDN's MP4 without the proxy before trying lower qualities through it.
+            fallbackSteps.insert(.noProxy)
+            forceNoProxy = true
             beginFallback()
             rebuild(position: position, reason: .fallback)
             return

@@ -153,6 +153,26 @@ enum VideoAPI {
         return info
     }
 
+    /// Progressive MP4 (`fnval=1`, html5 platform: one file, ≤ 1080P) — the player's last resort, which AVPlayer
+    /// plays straight from the CDN when the local proxy cannot serve it.
+    static func progressivePlayInfo(aid: Int64, bvid: String, cid: Int64, qn: Int) async throws -> PlayInfo {
+        var q: [String: Any] = ["cid": cid, "qn": min(qn, 80), "fnval": 1, "fnver": 0, "platform": "html5",
+                                "high_quality": 1]
+        if !bvid.isEmpty { q["bvid"] = bvid }
+        if aid > 0 { q["avid"] = aid }
+        if !http.isLoggedIn { q["try_look"] = 1 }
+        let info: PlayInfo
+        do {
+            let data = try await http.api(api + "/x/player/wbi/playurl",
+                                          query: BiliRisk.merged(q, BiliRisk.playurlParams()), sign: .wbi)
+            info = parsePlayInfo(data)
+        } catch {
+            throw mapError(error)
+        }
+        guard !info.durl.isEmpty else { throw BiliError.other("视频资源不存在") }
+        return info
+    }
+
     static func ugcPlayQuery(aid: Int64, bvid: String, cid: Int64, qn: Int, epId: Int64 = 0, seasonId: Int64 = 0,
                              loggedIn: Bool) -> [String: Any] {
         var q: [String: Any] = ["cid": cid, "qn": qn, "fnval": dashFnval, "fnver": 0, "fourk": 1]

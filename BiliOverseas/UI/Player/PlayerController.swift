@@ -226,6 +226,12 @@ final class PlayerController: ObservableObject {
     @Published private(set) var currentTime: Double = 0
     @Published private(set) var duration: Double = 0
     @Published private(set) var isFullscreen = false
+    /// Which stage holds the video surface. It follows `isFullscreen` with the fullscreen controller on screen: the
+    /// video goes over as that controller is about to show, and comes back once the screen has turned back
+    /// (`PlayerFullscreenPresenter`). The danmaku take the size of the stage they are in.
+    @Published private(set) var surfaceInFullscreen = false {
+        didSet { surface.danmaku.isFullscreen = surfaceInFullscreen }
+    }
     /// Called when playback reaches the end (after SmartSkip etc.). The detail page decides auto-next.
     var onEnded: (() -> Void)?
     /// Asked at the end: the page would only replay this item (列表循环 with nothing else to play), so it loops
@@ -590,9 +596,12 @@ final class PlayerController: ObservableObject {
         overlay.unlock()
         fullscreenByRotation = false
         isFullscreen = false
-        surface.danmaku.isFullscreen = false
         overlay.fullscreenChanged()
-        fullscreenPresenter.dismiss()
+        fullscreenPresenter.dismiss { [weak self] in
+            // Back inline before the fade, also when fullscreen was entered again meanwhile: the page then shows
+            // the current picture until the new fullscreen controller takes it (`willPresent`).
+            self?.surfaceInFullscreen = false
+        }
     }
 
     /// Stop & release. While Picture in Picture runs the player keeps going (kept alive) and stops when PiP ends.
@@ -1955,32 +1964,32 @@ final class PlayerController: ObservableObject {
         autoExitTask?.cancel()
         let mask: UIInterfaceOrientationMask
         let orientation: UIInterfaceOrientation
-        let rotateTo: UIInterfaceOrientationMask
         if isVerticalVideo {
             mask = .portrait
             orientation = .portrait
-            rotateTo = .portrait
         } else {
             // Device landscapeRight (home button left) = interface landscapeLeft.
             let device = deviceOrientation ?? UIDevice.current.orientation
-            if device == .landscapeRight {
-                orientation = .landscapeLeft
-                rotateTo = .landscapeLeft
-            } else {
-                orientation = .landscapeRight
-                rotateTo = .landscapeRight
-            }
+            orientation = device == .landscapeRight ? .landscapeLeft : .landscapeRight
             mask = .landscape
         }
         fullscreenByRotation = byRotation
-        OrientationManager.shared.lock(mask, rotateTo: rotateTo)
         isFullscreen = true
-        surface.danmaku.isFullscreen = true
         overlay.fullscreenChanged()
-        if !fullscreenPresenter.present(self, mask: mask, orientation: orientation) {
+        // Out of the way while the player fades in and the screen turns (the presenter turns it once the player is
+        // on screen); back once it stands still.
+        overlay.hideControls()
+        let shown: () -> Void = { [weak self] in
+            guard let self, self.isFullscreen else { return }
+            self.overlay.showControls()
+        }
+        let takeSurface: () -> Void = { [weak self] in self?.surfaceInFullscreen = true }
+        let stage = PlayerStageView(controller: self, overlay: overlay, role: .fullscreen)
+        if !fullscreenPresenter.present(stage, mask: mask, orientation: orientation, willPresent: takeSurface,
+                                        onShown: shown) {
             isFullscreen = false
+            surfaceInFullscreen = false
             fullscreenByRotation = false
-            surface.danmaku.isFullscreen = false
             overlay.fullscreenChanged()
             OrientationManager.shared.restorePortrait()
         }
@@ -2065,7 +2074,9 @@ final class PlayerController: ObservableObject {
             // Not while a sheet is open over the fullscreen player (e.g. typing in 发弹幕): exiting would close it.
             if orientation == .portrait, fullscreenByRotation, !isVerticalVideo, overlay.sheet == nil { exitFullscreen() }
         } else if containerVisible, orientation.isLandscape, !isVerticalVideo, overlay.sheet == nil,
-                  !PlayerFullscreenPresenter.isModalPresented() {
+                  fullscreenPresenter.isLeaving || !PlayerFullscreenPresenter.isModalPresented() {
+            // Still leaving (turned back the other way meanwhile): shown again once that is done. Dropped, it
+            // would not come back, as the phone stays landscape.
             enterFullscreen(byRotation: true, deviceOrientation: orientation)
         }
     }

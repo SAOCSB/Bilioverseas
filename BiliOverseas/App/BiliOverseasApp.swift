@@ -90,14 +90,22 @@ final class OrientationManager {
     private(set) var mask: UIInterfaceOrientationMask =
         UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait
 
-    /// Restrict the app to `mask` and rotate to `preferred` if given.
-    func lock(_ mask: UIInterfaceOrientationMask, rotateTo preferred: UIInterfaceOrientationMask? = nil) {
+    /// Restrict the app to `mask` and rotate to `preferred` if given. `onRefused`: the system will not turn the
+    /// screen (an iPad sharing it with other apps, the app in the background).
+    func lock(_ mask: UIInterfaceOrientationMask, rotateTo preferred: UIInterfaceOrientationMask? = nil,
+              onRefused: (() -> Void)? = nil) {
         self.mask = mask
-        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return }
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else {
+            onRefused?()
+            return
+        }
         for window in scene.windows {
             window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         }
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: preferred ?? mask)) { _ in }
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: preferred ?? mask)) { _ in
+            guard let onRefused else { return }
+            DispatchQueue.main.async(execute: onRefused)
+        }
     }
 
     func enterLandscape() {

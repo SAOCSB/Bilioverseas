@@ -26,8 +26,11 @@ struct PlayerStageView: View {
     @ObservedObject var overlay: PlayerOverlayModel
     let role: PlayerStageRole
 
-    /// The surface and the chrome live in exactly one stage at a time.
+    /// The controls (and sheets) live in exactly one stage at a time: the fullscreen one while fullscreen.
     private var isActive: Bool { (role == .fullscreen) == controller.isFullscreen }
+    /// The video and what is drawn with it (cover, subtitles, loading / error) are in the stage holding the surface,
+    /// which is still the fullscreen one while it turns back after leaving fullscreen.
+    private var holdsSurface: Bool { (role == .fullscreen) == controller.surfaceInFullscreen }
     private var ignoredEdges: Edge.Set { role == .fullscreen ? .all : [] }
 
     var body: some View {
@@ -36,9 +39,10 @@ struct PlayerStageView: View {
                 Color.black.ignoresSafeArea(edges: ignoredEdges)
                 PlayerSurfaceRepresentable(controller: controller, role: role)
                     .ignoresSafeArea(edges: ignoredEdges)
-                if isActive {
+                if isActive || holdsSurface {
                     PlayerChromeView(controller: controller, overlay: overlay, size: geo.size,
-                                     fullscreen: role == .fullscreen)
+                                     fullscreen: role == .fullscreen, showsPicture: holdsSurface,
+                                     showsControls: isActive)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -89,13 +93,16 @@ struct PlayerSheetHost: View {
 
 // MARK: - Chrome
 
-/// Everything drawn over the video of the active stage.
+/// Everything drawn over the video: `showsPicture` the layers that go with the picture, `showsControls` the rest
+/// (both, except in the moment a stage holds the video without the controls, see `PlayerStageView`).
 struct PlayerChromeView: View {
     @ObservedObject var controller: PlayerController
     @ObservedObject var overlay: PlayerOverlayModel
     @ObservedObject private var settings = AppSettings.shared
     let size: CGSize
     let fullscreen: Bool
+    var showsPicture = true
+    var showsControls = true
 
     private var compact: Bool { size.width < 520 }
     private var landscape: Bool { size.width > size.height }
@@ -103,14 +110,18 @@ struct PlayerChromeView: View {
 
     var body: some View {
         ZStack {
-            coverLayer
-            subtitleLayer
-            centerLayer
-            hudLayer
-            promptLayer
-            controlsLayer
-            statsLayer
-            panelLayer
+            if showsPicture {
+                coverLayer
+                subtitleLayer
+                centerLayer
+            }
+            if showsControls {
+                hudLayer
+                promptLayer
+                controlsLayer
+                statsLayer
+                panelLayer
+            }
         }
         .frame(width: size.width, height: size.height)
         .animation(.easeInOut(duration: 0.2), value: overlay.controlsVisible)
@@ -160,7 +171,7 @@ struct PlayerChromeView: View {
         if let text = controller.subtitleText {
             // 「字幕设置」 style (PlayerSurfaceView.swift).
             PlayerSubtitleView(text: text, style: settings.player, fullscreen: fullscreen,
-                               minBottom: overlay.controlsVisible ? bottomBarHeight + 6 : 0)
+                               minBottom: showsControls && overlay.controlsVisible ? bottomBarHeight + 6 : 0)
         }
     }
 

@@ -2,13 +2,10 @@ import SwiftUI
 import UIKit
 import Combine
 
-/// 直播间: HLS player (CDN fallback, 清晰度 / 线路, mute, PiP, landscape fullscreen), room header
+/// 直播间: HLS player (CDN fallback, 清晰度 / 线路, mute, PiP, fullscreen), room header
 /// and the live danmaku chat (WebSocket) with an optional scrolling overlay.
 struct LiveRoomView: View {
     @StateObject private var model: LiveRoomModel
-    @State private var isFullscreen = false
-    @State private var controlsVisible = true
-    @State private var hideTask: Task<Void, Never>?
 
     init(roomId: Int64) {
         _model = StateObject(wrappedValue: LiveRoomModel(roomId: roomId))
@@ -17,39 +14,33 @@ struct LiveRoomView: View {
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
-                LiveRoomPlayerPanel(model: model, player: model.player, isFullscreen: isFullscreen,
-                                    isLandscape: geo.size.width > geo.size.height,
-                                    controlsVisible: controlsVisible,
-                                    onTap: toggleControls, onInteraction: scheduleHide,
-                                    onToggleFullscreen: toggleFullscreen)
-                    .frame(width: geo.size.width, height: isFullscreen ? geo.size.height : playerHeight(geo.size))
-                if !isFullscreen {
-                    LiveRoomInfoPanel(model: model)
-                    Divider()
-                    LiveRoomChatPanel(chat: model.chat, onRetry: { model.retryDanmaku() },
-                                      onSend: { await model.sendDanmaku($0) })
-                }
+                LiveRoomPlayerPanel(model: model, player: model.player, chrome: model.chrome, isFullscreen: false,
+                                    isLandscape: geo.size.width > geo.size.height)
+                    .frame(width: geo.size.width, height: playerHeight(geo.size))
+                LiveRoomInfoPanel(model: model)
+                Divider()
+                LiveRoomChatPanel(chat: model.chat, onRetry: { model.retryDanmaku() },
+                                  onSend: { await model.sendDanmaku($0) })
             }
         }
-        .background(isFullscreen ? Color.black : Color(.systemBackground))
-        .ignoresSafeArea(.container, edges: isFullscreen ? .all : [])
-        .navigationTitle(isFullscreen ? "" : model.navigationTitle)
+        .background(Color(.systemBackground))
+        .navigationTitle(model.navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(isFullscreen ? .hidden : .visible, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .statusBarHidden(isFullscreen)
-        .persistentSystemOverlays(isFullscreen ? .hidden : .automatic)
-        .task { await model.loadIfNeeded() }
+        // In a task of its own: the fullscreen player covering the page cancels the page's `.task`, and a load
+        // cancelled then would leave fullscreen without the stream.
+        .task { await Task { await model.loadIfNeeded() }.value }
         .onAppear {
+            model.chrome.isPageShown = true
             model.viewDidAppear()
-            scheduleHide()
+            model.chrome.scheduleHide()
         }
         .onDisappear {
-            if isFullscreen {
-                isFullscreen = false
-                OrientationManager.shared.restorePortrait()
-            }
-            hideTask?.cancel()
+            model.chrome.isPageShown = false
+            // The fullscreen presentation covers the page: not a real disappearance (`LiveRoomChrome.onPageGone`
+            // covers a page pushed under the fullscreen player meanwhile).
+            guard !model.chrome.isFullscreen else { return }
+            model.chrome.cancelHide()
             model.viewDidDisappear()
         }
     }
@@ -58,35 +49,102 @@ struct LiveRoomView: View {
         if model.playInfo?.isPortrait == true { return min(size.height * 0.55, size.width * 16 / 9) }
         return min(size.width * 9 / 16, size.height * 0.5)
     }
+}
 
-    private func toggleFullscreen() {
-        if isFullscreen {
-            isFullscreen = false
-            OrientationManager.shared.restorePortrait()
-        } else {
-            isFullscreen = true
-            // Portrait streams stay portrait (full height); others rotate to landscape.
-            if model.playInfo?.isPortrait != true { OrientationManager.shared.enterLandscape() }
+/// The player panel on its own while fullscreen (`LiveRoomChrome.enterFullscreen`), edge to edge.
+struct LiveRoomFullscreenView: View {
+    let model: LiveRoomModel
+
+    var body: some View {
+        GeometryReader { geo in
+            LiveRoomPlayerPanel(model: model, player: model.player, chrome: model.chrome, isFullscreen: true,
+                                isLandscape: geo.size.width > geo.size.height)
         }
-        scheduleHide()
+        .ignoresSafeArea()
     }
+}
 
-    private func toggleControls() {
+// MARK: - Controls & fullscreen
+
+/// The player controls' auto-hide and fullscreen, shared by the page's panel and the fullscreen one. Fullscreen shows
+/// the panel on its own (`PlayerFullscreenPresenter`, like the video player): it fades in the way the screen stands and
+/// then turns, and turns back before fading out (turning the page itself laid it out sideways while it turned).
+@MainActor
+final class LiveRoomChrome: ObservableObject {
+    @Published private(set) var isFullscreen = false
+    @Published private(set) var controlsVisible = true
+    /// The controls only hide by themselves while it plays.
+    weak var player: LivePlayerController?
+    /// The room page is on screen (between its onAppear and onDisappear).
+    var isPageShown = false
+    /// Fullscreen ended on another page (a link opened while fullscreen pushed it under the player): the room page
+    /// went away without its onDisappear doing anything.
+    var onPageGone: (() -> Void)?
+    private var hideTask: Task<Void, Never>?
+    private let presenter = PlayerFullscreenPresenter()
+
+    func toggleControls() {
         withAnimation(.easeInOut(duration: 0.2)) { controlsVisible.toggle() }
         if controlsVisible { scheduleHide() }
     }
 
     /// Shows the controls and hides them again after 4 s of playback without interaction.
-    private func scheduleHide() {
+    func scheduleHide() {
         if !controlsVisible {
             withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = true }
         }
         hideTask?.cancel()
-        hideTask = Task { @MainActor in
+        hideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard !Task.isCancelled, model.player.phase == .playing else { return }
-            withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = false }
+            guard let self, !Task.isCancelled, self.player?.phase == .playing else { return }
+            withAnimation(.easeInOut(duration: 0.2)) { self.controlsVisible = false }
         }
+    }
+
+    func cancelHide() {
+        hideTask?.cancel()
+    }
+
+    /// `portrait`: a portrait stream stays portrait (full height); others turn to landscape.
+    func enterFullscreen<Content: View>(_ content: Content, portrait: Bool) {
+        guard !isFullscreen else { return }
+        let mask: UIInterfaceOrientationMask
+        let orientation: UIInterfaceOrientation
+        if portrait {
+            mask = .portrait
+            orientation = .portrait
+        } else {
+            // Device landscapeRight (home button left) = interface landscapeLeft.
+            orientation = UIDevice.current.orientation == .landscapeRight ? .landscapeLeft : .landscapeRight
+            mask = .landscape
+        }
+        isFullscreen = true
+        // Out of the way while the panel fades in and the screen turns; back once it stands still.
+        hideTask?.cancel()
+        controlsVisible = false
+        let shown: () -> Void = { [weak self] in
+            guard let self, self.isFullscreen else { return }
+            self.scheduleHide()
+        }
+        if !presenter.present(content, mask: mask, orientation: orientation, onShown: shown) {
+            isFullscreen = false
+            OrientationManager.shared.restorePortrait()
+            scheduleHide()
+        }
+    }
+
+    func exitFullscreen() {
+        guard isFullscreen else { return }
+        isFullscreen = false
+        presenter.dismiss(releasingSurface: {}) { [weak self] in
+            // The page's onAppear comes with the fade back; give it a moment before taking it as gone.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, !self.isFullscreen, !self.isPageShown else { return }
+                self.cancelHide()
+                self.onPageGone?()
+            }
+        }
+        scheduleHide()
     }
 }
 
@@ -131,6 +189,7 @@ final class LiveChatStore: ObservableObject {
 final class LiveRoomModel: ObservableObject {
     let requestedRoomId: Int64
     let player = LivePlayerController()
+    let chrome = LiveRoomChrome()
     let chat = LiveChatStore()
     /// Messages for the scrolling overlay.
     let danmakuFeed = PassthroughSubject<LiveDanmakuMessage, Never>()
@@ -172,6 +231,8 @@ final class LiveRoomModel: ObservableObject {
         player.onPlaying = { [weak self] in self?.refetchBudget = 3 }
         player.onPiPStopped = { [weak self] in self?.pipDidStop() }
         player.owner = self
+        chrome.player = player
+        chrome.onPageGone = { [weak self] in self?.viewDidDisappear() }
         danmakuSettingsObserver = AppSettings.shared.$danmaku
             .receive(on: RunLoop.main)
             .sink { [weak self] settings in self?.danmakuFilter = LiveRoomModel.makeDanmakuFilter(settings) }
@@ -450,35 +511,50 @@ final class LiveRoomModel: ObservableObject {
 
 // MARK: - Player panel
 
+/// Video, cover, danmaku overlay and controls: on the page, and on its own while fullscreen (`LiveRoomFullscreenView`).
 struct LiveRoomPlayerPanel: View {
     @ObservedObject var model: LiveRoomModel
     @ObservedObject var player: LivePlayerController
+    @ObservedObject var chrome: LiveRoomChrome
+    /// The fullscreen presentation's panel (else the page's).
     let isFullscreen: Bool
     let isLandscape: Bool
-    let controlsVisible: Bool
-    let onTap: () -> Void
-    let onInteraction: () -> Void
-    let onToggleFullscreen: () -> Void
 
     var body: some View {
         ZStack {
             Color.black
-            LivePlayerSurface(controller: player)
+            LivePlayerSurface(controller: player, attachesPiP: isActive)
             if showsCover { cover }
-            if model.showsDanmakuOverlay && model.isLive {
+            if model.showsDanmakuOverlay && model.isLive && isActive {
                 LiveDanmakuOverlay(feed: model.danmakuFeed, isFullscreen: isFullscreen)
                     .allowsHitTesting(false)
                     .padding(.top, isFullscreen ? 12 : 4)
             }
             centerStatus
-            if controlsVisible {
+            if controlsShown {
                 controls
                     .transition(.opacity)
             }
         }
         .clipped()
         .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
+        .onTapGesture {
+            if isActive { chrome.toggleControls() }
+        }
+    }
+
+    /// This is the panel on screen: the page's, or the fullscreen one while fullscreen. Only that one has the controls,
+    /// the danmaku overlay and Picture in Picture (leaving fullscreen, the fullscreen one turns back without them).
+    private var isActive: Bool { isFullscreen == chrome.isFullscreen }
+
+    private var controlsShown: Bool { isActive && chrome.controlsVisible }
+
+    private func toggleFullscreen() {
+        if chrome.isFullscreen {
+            chrome.exitFullscreen()
+        } else {
+            chrome.enterFullscreen(LiveRoomFullscreenView(model: model), portrait: model.playInfo?.isPortrait == true)
+        }
     }
 
     private var showsCover: Bool {
@@ -523,7 +599,7 @@ struct LiveRoomPlayerPanel: View {
                     .foregroundColor(.white.opacity(0.9))
                     .multilineTextAlignment(.center)
                 Button {
-                    onInteraction()
+                    chrome.scheduleHide()
                     Task { await model.reload() }
                 } label: {
                     Text("重试")
@@ -541,7 +617,8 @@ struct LiveRoomPlayerPanel: View {
             ProgressView()
                 .tint(.white)
                 .controlSize(.large)
-        } else if model.isLive && !player.wantsPlay && !controlsVisible {
+        } else if isActive && model.isLive && !player.wantsPlay && !chrome.controlsVisible {
+            // Only on the panel on screen: the one being left has no controls, which is not "hidden".
             Image(systemName: "play.circle.fill")
                 .font(.system(size: 48))
                 .foregroundColor(.white.opacity(0.85))
@@ -552,7 +629,7 @@ struct LiveRoomPlayerPanel: View {
         VStack(spacing: 0) {
             if isFullscreen {
                 HStack(spacing: 12) {
-                    Button(action: onToggleFullscreen) {
+                    Button(action: toggleFullscreen) {
                         Image(systemName: "chevron.backward")
                             .font(.system(size: 18, weight: .semibold))
                             .frame(width: 36, height: 36)
@@ -609,7 +686,8 @@ struct LiveRoomPlayerPanel: View {
                     }
                     .disabled(!player.isPiPPossible && !player.isPiPActive)
                 }
-                Button { act(onToggleFullscreen) } label: {
+                // Not `act`: entering keeps the controls hidden until the screen has turned, leaving shows them.
+                Button(action: toggleFullscreen) {
                     Image(systemName: isFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                 }
             }
@@ -634,7 +712,7 @@ struct LiveRoomPlayerPanel: View {
             Section("清晰度") {
                 ForEach(model.qualities) { q in
                     Button {
-                        onInteraction()
+                        chrome.scheduleHide()
                         model.switchQuality(q.qn)
                     } label: {
                         if q.qn == model.playInfo?.currentQn {
@@ -649,7 +727,7 @@ struct LiveRoomPlayerPanel: View {
                 Section("线路") {
                     ForEach(Array(player.urls.indices), id: \.self) { i in
                         Button {
-                            onInteraction()
+                            chrome.scheduleHide()
                             player.switchLine(i)
                         } label: {
                             if i == player.urlIndex {
@@ -671,7 +749,7 @@ struct LiveRoomPlayerPanel: View {
 
     private func act(_ action: () -> Void) {
         action()
-        onInteraction()
+        chrome.scheduleHide()
     }
 }
 

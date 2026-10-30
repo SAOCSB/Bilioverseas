@@ -317,6 +317,8 @@ final class PlayerSurfaceHostView: UIView {
     let role: PlayerStageRole
     private weak var controller: PlayerController?
     private var cancellable: AnyCancellable?
+    /// The picture as it was when the other stage took the surface (`keepStill`).
+    private var still: UIView?
 
     init(controller: PlayerController, role: PlayerStageRole) {
         self.role = role
@@ -325,7 +327,7 @@ final class PlayerSurfaceHostView: UIView {
         backgroundColor = .black
         clipsToBounds = true
         // @Published emits in willSet: use the emitted value, not the property.
-        cancellable = controller.$isFullscreen.sink { [weak self] fullscreen in
+        cancellable = controller.$surfaceInFullscreen.sink { [weak self] fullscreen in
             self?.claim(isFullscreen: fullscreen)
         }
     }
@@ -336,17 +338,31 @@ final class PlayerSurfaceHostView: UIView {
 
     func claimIfActive() {
         guard let controller else { return }
-        claim(isFullscreen: controller.isFullscreen)
+        claim(isFullscreen: controller.surfaceInFullscreen)
     }
 
     private func claim(isFullscreen: Bool) {
         guard let controller, (isFullscreen ? PlayerStageRole.fullscreen : .inline) == role else { return }
         let surface = controller.surface
         guard surface.superview !== self else { return }
+        (surface.superview as? PlayerSurfaceHostView)?.keepStill(of: surface)
         surface.removeFromSuperview()
+        still?.removeFromSuperview()
+        still = nil
         surface.frame = bounds
         surface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         addSubview(surface)
+    }
+
+    /// The stage the surface leaves can still be on screen, fading out or in around fullscreen: it shows a still of
+    /// the picture until the surface comes back, instead of going black.
+    private func keepStill(of surface: UIView) {
+        still?.removeFromSuperview()
+        still = surface.snapshotView(afterScreenUpdates: false)
+        guard let still else { return }
+        still.frame = bounds
+        still.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(still)
     }
 
     override func didMoveToWindow() {

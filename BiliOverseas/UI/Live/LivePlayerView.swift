@@ -50,6 +50,8 @@ final class LivePlayerController: ObservableObject {
     private var isInBackground = false
     private var pip: AVPictureInPictureController?
     private weak var pipLayer: AVPlayerLayer?
+    /// The layer last attached (the one on screen); PiP moves there once a running PiP window has closed.
+    private weak var wantedPiPLayer: AVPlayerLayer?
     private let pipDelegate = LivePiPDelegate()
 
     static var supportsPiP: Bool { AVPictureInPictureController.isPictureInPictureSupported() }
@@ -304,9 +306,11 @@ final class LivePlayerController: ObservableObject {
 
     /// Called by `LivePlayerSurface` with its layer; (re)creates the PiP controller for it.
     func attach(layer: AVPlayerLayer) {
-        guard LivePlayerController.supportsPiP, layer !== pipLayer else { return }
+        guard LivePlayerController.supportsPiP else { return }
+        wantedPiPLayer = layer
+        guard layer !== pipLayer else { return }
         // Replacing an active controller would end its PiP window without a delegate callback
-        // (isPiPActive would stay true); re-attach once that window has closed.
+        // (isPiPActive would stay true); re-attach once that window has closed (`pipActiveChanged`).
         if pip?.isPictureInPictureActive == true { return }
         pipLayer = layer
         pipPossibleObservation = nil
@@ -343,6 +347,8 @@ final class LivePlayerController: ObservableObject {
             return
         }
         LivePiPKeeper.release(self)
+        // PiP ran from a layer that is no longer the one on screen (fullscreen entered or left meanwhile).
+        if let wanted = wantedPiPLayer, wanted !== pipLayer { attach(layer: wanted) }
         if owner == nil {
             // 关闭 / 还原 after the room was popped: nothing to show it in, so no more audio.
             stop()
@@ -412,9 +418,11 @@ final class LivePlayerLayerUIView: UIView {
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 }
 
-/// The `AVPlayerLayer` host.
+/// The `AVPlayerLayer` host. `attachesPiP`: Picture in Picture starts from this layer (the page's surface leaves it
+/// to the fullscreen one while that is shown).
 struct LivePlayerSurface: UIViewRepresentable {
     let controller: LivePlayerController
+    var attachesPiP = true
 
     func makeUIView(context: Context) -> LivePlayerLayerUIView {
         let view = LivePlayerLayerUIView()
@@ -423,13 +431,13 @@ struct LivePlayerSurface: UIViewRepresentable {
         view.isUserInteractionEnabled = false
         view.playerLayer.videoGravity = .resizeAspect
         view.playerLayer.player = controller.player
-        controller.attach(layer: view.playerLayer)
+        if attachesPiP { controller.attach(layer: view.playerLayer) }
         return view
     }
 
     func updateUIView(_ view: LivePlayerLayerUIView, context: Context) {
         if view.playerLayer.player !== controller.player { view.playerLayer.player = controller.player }
-        controller.attach(layer: view.playerLayer)
+        if attachesPiP { controller.attach(layer: view.playerLayer) }
     }
 }
 

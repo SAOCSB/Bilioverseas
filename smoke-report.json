@@ -1,0 +1,253 @@
+{
+  "buvid3" : true,
+  "bvid" : "BV1SVsd6MEGZ",
+  "danmaku.segment1" : {
+    "closed" : false,
+    "count" : 192,
+    "ms" : 411,
+    "ok" : true
+  },
+  "done" : true,
+  "engine.proxy" : {
+    "accelerated" : true,
+    "audio" : 30280,
+    "fallback" : false,
+    "masterLines" : 6,
+    "ms" : 2863,
+    "nodes" : [
+      "upos-sz-mirrorali.bilivideo.com healthy 176KB\/s",
+      "upos-sz-mirrorhw.bilivideo.com healthy 55KB\/s",
+      "upos-sz-mirrorbos.bilivideo.com healthy 57KB\/s",
+      "upos-sz-mirror08c.bilivideo.com blocked 0KB\/s",
+      "upos-sz-mirrorbd.bilivideo.com untested 0KB\/s",
+      "upos-sz-mirror14b.bilivideo.com untested 0KB\/s",
+      "upos-sz-estgoss.bilivideo.com untested 0KB\/s",
+      "upos-sz-mirrorcos.bilivideo.com untested 0KB\/s",
+      "upos-sz-mirrorcoso1.bilivideo.com untested 0KB\/s"
+    ],
+    "ok" : true,
+    "prepareMs" : 187,
+    "segmentBytes" : 919846,
+    "segmentMBps" : 0.33187662008611835,
+    "threads" : 16,
+    "variantSegments" : 46,
+    "video" : "64\/avc1.640033"
+  },
+  "engine.rawGet" : {
+    "head" : "HTTP\/1.1 200 OK",
+    "ms" : 14,
+    "ok" : true
+  },
+  "feed.popular" : {
+    "candidates" : [
+      "BV1SVsd6MEGZ",
+      "BV1QqxY6jEPY",
+      "BV1bnsZ6GEN3"
+    ],
+    "count" : 20,
+    "ms" : 233,
+    "ok" : true
+  },
+  "feed.recommend" : {
+    "ads" : 1,
+    "afterFilter" : 18,
+    "count" : 20,
+    "ms" : 352,
+    "ok" : true,
+    "titles" : [
+      "法国最近是怎么了...",
+      "这玩意凭什么能火1000年？！",
+      "人性、欲望与奇观，自驾拉斯维加斯，现实夜之城什么样？"
+    ]
+  },
+  "feed.story" : {
+    "ms" : 1323,
+    "ok" : true,
+    "page1" : 5,
+    "page2" : 5,
+    "portrait" : 4,
+    "titles" : [
+      "《此弟不宜久留》",
+      "抽象历史人物志——张作霖",
+      "“我本该命途齐天”【孙悟空＆新·与天齐】"
+    ],
+    "unique" : 10,
+    "withCid" : 10
+  },
+  "finishedAt" : "2026-10-30T21:17:27Z",
+  "loggedIn" : false,
+  "player.t15" : {
+    "accelerated" : true,
+    "cachedAhead" : 62.400467665000015,
+    "codec" : "hevc",
+    "currentTime" : 12.17176525,
+    "danmakuEnabled" : true,
+    "duration" : 220.887,
+    "fallback" : false,
+    "firstFrame" : true,
+    "hedgedMB" : 0.53247928619384766,
+    "MBps" : 0,
+    "nodes" : [
+      "upos-sz-mirrorali.bilivideo.com healthy",
+      "upos-sz-mirrorhw.bilivideo.com healthy",
+      "upos-sz-mirrorbos.bilivideo.com healthy",
+      "upos-sz-mirror08c.bilivideo.com banned",
+      "upos-sz-mirrorbd.bilivideo.com healthy",
+      "upos-sz-mirror14b.bilivideo.com healthy",
+      "upos-sz-estgoss.bilivideo.com healthy",
+      "upos-sz-mirrorcos.bilivideo.com healthy",
+      "upos-sz-mirrorcoso1.bilivideo.com healthy"
+    ],
+    "progressive" : false,
+    "quality" : 80,
+    "status" : "playing",
+    "threads" : 8,
+    "totalMB" : 7.0197973251342773
+  },
+  "player.t30" : {
+    "accelerated" : true,
+    "cachedAhead" : 62.167365457666705,
+    "codec" : "hevc",
+    "currentTime" : 27.129059751,
+    "danmakuEnabled" : true,
+    "duration" : 220.887,
+    "fallback" : false,
+    "firstFrame" : true,
+    "hedgedMB" : 0.73801517486572266,
+    "MBps" : 0,
+    "nodes" : [
+      "upos-sz-mirrorali.bilivideo.com healthy",
+      "upos-sz-mirrorhw.bilivideo.com healthy",
+      "upos-sz-mirrorbos.bilivideo.com healthy",
+      "upos-sz-mirror08c.bilivideo.com banned",
+      "upos-sz-mirrorbd.bilivideo.com healthy",
+      "upos-sz-mirror14b.bilivideo.com healthy",
+      "upos-sz-estgoss.bilivideo.com healthy",
+      "upos-sz-mirrorcos.bilivideo.com healthy",
+      "upos-sz-mirrorcoso1.bilivideo.com healthy"
+    ],
+    "progressive" : false,
+    "quality" : 80,
+    "status" : "playing",
+    "threads" : 8,
+    "totalMB" : 8.9226999282836914
+  },
+  "player.t45" : {
+    "accelerated" : true,
+    "cachedAhead" : 62.13928129100001,
+    "codec" : "hevc",
+    "currentTime" : 42.165731710000003,
+    "danmakuEnabled" : true,
+    "duration" : 220.887,
+    "fallback" : false,
+    "firstFrame" : true,
+    "hedgedMB" : 0.73801517486572266,
+    "MBps" : 0,
+    "nodes" : [
+      "upos-sz-mirrorali.bilivideo.com healthy",
+      "upos-sz-mirrorhw.bilivideo.com healthy",
+      "upos-sz-mirrorbos.bilivideo.com healthy",
+      "upos-sz-mirror08c.bilivideo.com banned",
+      "upos-sz-mirrorbd.bilivideo.com healthy",
+      "upos-sz-mirror14b.bilivideo.com healthy",
+      "upos-sz-estgoss.bilivideo.com healthy",
+      "upos-sz-mirrorcos.bilivideo.com healthy",
+      "upos-sz-mirrorcoso1.bilivideo.com healthy"
+    ],
+    "progressive" : false,
+    "quality" : 80,
+    "status" : "playing",
+    "threads" : 8,
+    "totalMB" : 11.268215179443359
+  },
+  "screen.home" : "2026-10-30T21:17:10Z",
+  "screen.live" : "2026-10-30T21:16:49Z",
+  "screen.mine" : "2026-10-30T21:17:18Z",
+  "screen.player-fullscreen" : "2026-10-30T21:15:08Z",
+  "screen.player-inline" : "2026-10-30T21:15:16Z",
+  "screen.popular-weekly" : "2026-10-30T21:16:40Z",
+  "screen.search" : "2026-10-30T21:15:49Z",
+  "screen.settings" : "2026-10-30T21:15:57Z",
+  "screen.settings-acceleration" : "2026-10-30T21:16:06Z",
+  "screen.settings-danmaku" : "2026-10-30T21:16:14Z",
+  "screen.settings-feedfilter" : "2026-10-30T21:16:31Z",
+  "screen.settings-smartskip" : "2026-10-30T21:16:23Z",
+  "screen.short-videos" : "2026-10-30T21:15:25Z",
+  "screen.short-videos-next" : "2026-10-30T21:15:39Z",
+  "search.hotWords" : {
+    "count" : 31,
+    "first" : "二十届五中全会公报",
+    "ms" : 198,
+    "ok" : true
+  },
+  "shortVideo.entry" : "BV1Xun96tEjo",
+  "shortVideo.next.t10" : {
+    "bvid" : "BV1KiJk67EQ9",
+    "duration" : 597.33399999999995,
+    "index" : 1,
+    "items" : 6,
+    "phase" : "ready",
+    "playing" : true,
+    "portrait" : false,
+    "position" : 9.7501379579999998
+  },
+  "shortVideo.t14" : {
+    "bvid" : "BV1Xun96tEjo",
+    "duration" : 169.167,
+    "index" : 0,
+    "items" : 6,
+    "phase" : "ready",
+    "playing" : true,
+    "portrait" : true,
+    "position" : 8.7500651190000003
+  },
+  "smartSkip.analyze" : {
+    "ms" : 411,
+    "ok" : true,
+    "segments" : [
+
+    ]
+  },
+  "startedAt" : "2026-10-30T21:14:13Z",
+  "video.detail.BV1SVsd6MEGZ" : {
+    "aid" : 117522032560859,
+    "cid" : 43141828207,
+    "duration" : 221,
+    "ms" : 220,
+    "ok" : true,
+    "pages" : 1,
+    "title" : "HONG KONG"
+  },
+  "video.playInfo" : {
+    "audios" : [
+      30280,
+      30232,
+      30216
+    ],
+    "dash" : true,
+    "duration" : 221,
+    "ms" : 225,
+    "ok" : true,
+    "qualities" : [
+      112,
+      80,
+      64,
+      32,
+      16
+    ],
+    "videos" : [
+      "80\/avc",
+      "80\/hevc",
+      "80\/av1",
+      "64\/avc",
+      "64\/hevc",
+      "64\/av1",
+      "32\/avc",
+      "32\/hevc",
+      "32\/av1",
+      "16\/hevc",
+      "16\/avc",
+      "16\/av1"
+    ]
+  }
+}

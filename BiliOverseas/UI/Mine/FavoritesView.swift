@@ -237,7 +237,7 @@ struct MineFavoritesContent: View {
             .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
-        .refreshable { await model.loadCreated(force: true) }
+        .pullToRefresh { await model.loadCreated(force: true) }
         .task { await model.loadCreated(force: false) }
     }
 
@@ -274,7 +274,7 @@ struct MineCollectedFolderList: View {
             .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
-        .refreshable { await list.refresh() }
+        .pullToRefresh { await list.refresh() }
         .task { await list.loadIfNeeded() }
     }
 }

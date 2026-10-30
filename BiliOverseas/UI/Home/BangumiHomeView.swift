@@ -107,7 +107,7 @@ struct BangumiHomeView: View {
                     .padding(.vertical, 12)
                 }
             }
-            .refreshable { await model.reload() }
+            .pullToRefresh { await model.reload() }
             .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
                 await model.reload()
             }

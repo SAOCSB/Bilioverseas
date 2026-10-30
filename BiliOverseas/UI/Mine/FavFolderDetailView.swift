@@ -291,7 +291,7 @@ struct MineFavDetailList: View {
             .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
-        .refreshable { await list.refresh() }
+        .pullToRefresh { await list.refresh() }
         .task { await list.loadIfNeeded() }
     }
 }

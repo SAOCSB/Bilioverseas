@@ -46,13 +46,13 @@ final class ListAPIParsingTests: XCTestCase {
 
     // MARK: - Web recommend
 
-    func testWebRecommendKindsAndAdSignals() {
+    func testWebRecommendKindsAndAdSignals() throws {
         let data = json(#"""
         {"item":[
           {"id":113000000000001,"bvid":"BV1av4y1A7xx","cid":5001,"goto":"av","uri":"https://www.bilibili.com/video/BV1av4y1A7xx",
            "pic":"http://i0.hdslb.com/bfs/archive/a.jpg","title":"普通视频","duration":615,"pubdate":1700000000,
            "owner":{"mid":123,"name":"UP主","face":"//i1.hdslb.com/face.jpg"},
-           "stat":{"view":10000,"like":500,"danmaku":30},"is_followed":1,
+           "stat":{"view":10000,"like":500,"danmaku":30},"is_followed":1,"track_id":"web_track_1",
            "rcmd_reason":{"reason_type":1,"content":"已关注"},"business_info":null},
           {"id":0,"bvid":"","goto":"ad","uri":"","pic":"","title":"","duration":0,
            "business_info":{"id":9988,"title":"广告标题","pic":"//i0.hdslb.com/ad.jpg","url":"https://ad.example/x","is_ad":true,"cm_mark":1}},
@@ -125,6 +125,45 @@ final class ListAPIParsingTests: XCTestCase {
         XCTAssertTrue(other.adSignals.isEmpty)
 
         XCTAssertEqual(Set(page.items.map(\.id)).count, page.items.count, "ids unique")
+
+        // 不感兴趣 as bilibili.com offers it: videos and live rooms, never ads, 番剧 or other cards.
+        let avFeedback = try XCTUnwrap(av.feedback)
+        XCTAssertEqual(avFeedback.source, .web)
+        XCTAssertEqual(avFeedback.goto, "av")
+        XCTAssertEqual(avFeedback.param, 113000000000001)
+        XCTAssertEqual(avFeedback.mid, 123)
+        XCTAssertEqual(avFeedback.trackId, "web_track_1")
+        XCTAssertEqual(avFeedback.reasons.map(\.id), [1, 4])
+        XCTAssertEqual(avFeedback.reasons.map(\.name), ["内容不感兴趣", "不想看此UP主"])
+        XCTAssertFalse(avFeedback.reasons.contains(where: \.isFeedback))
+        let liveFeedback = try XCTUnwrap(live.feedback)
+        XCTAssertEqual(liveFeedback.goto, "live")
+        XCTAssertEqual(liveFeedback.param, 22334455)
+        XCTAssertEqual(liveFeedback.mid, 777)
+        XCTAssertEqual(liveFeedback.trackId, "", "a card without track_id sends an empty one, as the web does")
+        XCTAssertNil(ad.feedback)
+        XCTAssertNil(promo.feedback)
+        XCTAssertNil(ogv.feedback)
+        XCTAssertNil(other.feedback)
+    }
+
+    func testWebDislikeFormAndWhoCanReport() {
+        let web = FeedCardFeedback(goto: "av", param: 99, reasons: FeedAPI.webDislikeReasons, source: .web,
+                                   trackId: "tr", mid: 7)
+        let form = FeedAPI.webDislikeForm(web, reason: FeedAPI.webDislikeReasons[1])
+        XCTAssertEqual(form.mapValues { "\($0)" }, [
+            "app_id": "100", "platform": "5", "from_spmid": "", "spmid": "333.1007.0.0", "goto": "av",
+            "id": "99", "mid": "7", "track_id": "tr", "feedback_page": "1", "reason_id": "4",
+        ])
+        XCTAssertNil(form["csrf"], "BiliHTTP.post adds csrf from the cookies")
+
+        // Web-feed cards need the web login; app-feed cards the TV login.
+        XCTAssertTrue(FeedAPI.canReport(web, isLoggedIn: true, hasAppToken: false))
+        XCTAssertFalse(FeedAPI.canReport(web, isLoggedIn: false, hasAppToken: true))
+        let app = FeedCardFeedback(goto: "av", param: 99)
+        XCTAssertEqual(app.source, .app)
+        XCTAssertTrue(FeedAPI.canReport(app, isLoggedIn: false, hasAppToken: true))
+        XCTAssertFalse(FeedAPI.canReport(app, isLoggedIn: true, hasAppToken: false))
     }
 
     // MARK: - Popular / ranking

@@ -59,7 +59,7 @@ struct MessagesView: View {
                 }
             }
         }
-        .refreshable {
+        .pullToRefresh {
             async let counts: Void = store.refresh(force: true)
             await reloadSessions()
             await counts

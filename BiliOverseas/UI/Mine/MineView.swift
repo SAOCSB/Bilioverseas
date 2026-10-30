@@ -40,7 +40,7 @@ struct MineView: View {
                 .accessibilityLabel("设置")
             }
         }
-        .refreshable { await model.refresh(force: true) }
+        .pullToRefresh { await model.refresh(force: true) }
         .task { await model.refresh(force: false) }
         .onReceive(NotificationCenter.default.publisher(for: AuthService.loginStateDidChange)) { _ in
             model.loginStateChanged()

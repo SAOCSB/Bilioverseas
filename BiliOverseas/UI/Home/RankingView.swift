@@ -165,7 +165,7 @@ struct RankingView: View {
                                         HomeVideoRow(card: entry.card, rank: entry.rank, showReason: false)
                                     }
                                 }
-                                .videoCardMenu(entry.card) { predicate in model.remove(where: predicate) }
+                                .videoCardMenu(entry.card) { predicate, _ in model.remove(where: predicate) }
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
                             }
@@ -175,7 +175,7 @@ struct RankingView: View {
                         .padding(.top, 4)
                     }
                 }
-                .refreshable { await model.reload() }
+                .pullToRefresh { await model.reload() }
                 .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
                     await model.reload()
                 }

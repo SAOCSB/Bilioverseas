@@ -54,7 +54,7 @@ struct VideoCard: Identifiable, Hashable {
     var pageCount: Int = 0
     /// Zone / partition name (`tname`) when known.
     var zone: String = ""
-    /// App-feed 不感兴趣 menu (`three_point_v2`), nil for every other list.
+    /// 首页推荐 不感兴趣 menu (the app feed's `three_point_v2`, or the web feed's fixed reasons), nil for every other list.
     var feedback: FeedCardFeedback? = nil
     /// Display size of the video (rotation applied) when the list says (app feed), 0 otherwise.
     var width: Int = 0

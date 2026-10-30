@@ -309,7 +309,7 @@ struct DynamicsFeedList: View {
                     .padding(.bottom, 8)
                 }
             }
-            .refreshable { await model.reloadAll() }
+            .pullToRefresh { await model.reloadAll() }
             .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
                 await model.reloadAll()
             }

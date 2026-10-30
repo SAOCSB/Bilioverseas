@@ -143,7 +143,7 @@ struct MineWatchLaterContent: View {
         }
         .listStyle(.plain)
         .environment(\.editMode, $editMode)
-        .refreshable { await model.reload() }
+        .pullToRefresh { await model.reload() }
         .task { await model.loadIfNeeded() }
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {

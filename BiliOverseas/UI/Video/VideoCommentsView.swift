@@ -370,7 +370,7 @@ struct VideoCommentsListView: View {
                 }
             }
         }
-        .refreshable { await model.refresh() }
+        .pullToRefresh { await model.refresh() }
         .task { await model.loadIfNeeded() }
         .safeAreaInset(edge: .bottom) {
             if showsComposerBar { composerBar }
@@ -988,7 +988,7 @@ struct VideoCommentSubRepliesSheet: View {
                     }
                 }
             }
-            .refreshable { await model.refresh() }
+            .pullToRefresh { await model.refresh() }
             .task { await model.loadIfNeeded() }
             .safeAreaInset(edge: .bottom) { replyBar }
             .navigationTitle("评论详情")

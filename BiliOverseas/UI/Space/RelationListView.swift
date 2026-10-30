@@ -60,7 +60,7 @@ struct RelationListView: View {
         .background(Color(.systemBackground))
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
-        .refreshable {
+        .pullToRefresh {
             overrides = [:]
             await list.refresh()
         }

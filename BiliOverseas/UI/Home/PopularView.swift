@@ -44,7 +44,7 @@ struct PopularView: View {
                     }
                 }
             }
-            .refreshable { await model.refresh() }
+            .pullToRefresh { await model.refresh() }
             .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
                 await model.refresh()
             }
@@ -54,7 +54,7 @@ struct PopularView: View {
 
     private var removeCards: VideoCardActions.Remove {
         let model = model
-        return { predicate in model.remove(where: predicate) }
+        return { predicate, forGood in model.remove(where: predicate, forGood: forGood) }
     }
 }
 
@@ -208,7 +208,7 @@ struct PopularWeeklyView: View {
                     HomeRouteLink(card.route) {
                         HomeVideoRow(card: card)
                     }
-                    .videoCardMenu(card) { predicate in model.remove(where: predicate) }
+                    .videoCardMenu(card) { predicate, _ in model.remove(where: predicate) }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                 }
@@ -218,7 +218,7 @@ struct PopularWeeklyView: View {
                 }
             }
         }
-        .refreshable { await model.reload() }
+        .pullToRefresh { await model.reload() }
         .task { await model.loadIfNeeded() }
         .navigationTitle("每周必看")
         .navigationBarTitleDisplayMode(.inline)
@@ -274,7 +274,7 @@ struct PopularPreciousView: View {
                     HomeRouteLink(card.route) {
                         HomeVideoRow(card: card)
                     }
-                    .videoCardMenu(card) { predicate in model.remove(where: predicate) }
+                    .videoCardMenu(card) { predicate, forGood in model.remove(where: predicate, forGood: forGood) }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .onAppear { model.onItemAppear(card) }
@@ -286,7 +286,7 @@ struct PopularPreciousView: View {
             }
             .padding(.top, 6)
         }
-        .refreshable { await model.refresh() }
+        .pullToRefresh { await model.refresh() }
         .task { await model.loadIfNeeded() }
         .navigationTitle("入站必刷")
         .navigationBarTitleDisplayMode(.inline)

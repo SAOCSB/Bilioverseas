@@ -20,12 +20,19 @@ struct FeedDislikeReason: Identifiable, Hashable {
     var isFeedback: Bool = false
 }
 
-/// What 不感兴趣 tells the app feed about a card: its `card_goto` / `param` and the reasons it offers.
+/// What 不感兴趣 tells the feed about a card: its `goto` / id and the reasons it offers. App-feed cards
+/// (`card_goto` / `param`) are reported with the TV-login `access_key`, web-feed cards with the cookies.
 struct FeedCardFeedback: Hashable {
+    enum Source: Hashable { case app, web }
+
     var goto: String
     var param: Int64
     var reasons: [FeedDislikeReason] = []
     var feedbacks: [FeedDislikeReason] = []
+    var source: Source = .app
+    /// Web feed only: the card's `track_id` and its UP's mid, which bilibili.com sends back with it.
+    var trackId: String = ""
+    var mid: Int64 = 0
 
     var isEmpty: Bool { reasons.isEmpty && feedbacks.isEmpty }
 }
@@ -193,7 +200,39 @@ enum FeedAPI {
             }
         }
         if c.title.isEmpty && c.cover.isEmpty { return nil }
+        // 不感兴趣 as bilibili.com offers it on videos and live rooms (ads take another form).
+        let feedbackID = c.kind == .video ? c.aid : c.kind == .live ? c.roomId : 0
+        if feedbackID != 0 {
+            c.feedback = FeedCardFeedback(goto: c.kind == .live ? "live" : "av", param: feedbackID,
+                                          reasons: webDislikeReasons, source: .web,
+                                          trackId: item["track_id"].stringValue, mid: c.ownerMid)
+        }
         return c
+    }
+
+    /// The 不感兴趣 reasons bilibili.com's home page offers (fixed in the page, not sent by the server).
+    static let webDislikeReasons = [
+        FeedDislikeReason(id: 1, name: "内容不感兴趣", toast: "将减少此类内容推荐"),
+        FeedDislikeReason(id: 4, name: "不想看此UP主", toast: "将减少此类内容推荐"),
+    ]
+
+    /// The form bilibili.com's home page posts for 不感兴趣 and its 撤销 (`BiliHTTP.post` adds csrf).
+    static func webDislikeForm(_ feedback: FeedCardFeedback, reason: FeedDislikeReason) -> [String: Any] {
+        [
+            "app_id": 100, "platform": 5, "from_spmid": "", "spmid": "333.1007.0.0", "goto": feedback.goto,
+            "id": feedback.param, "mid": feedback.mid, "track_id": feedback.trackId, "feedback_page": 1,
+            "reason_id": reason.id,
+        ]
+    }
+
+    /// Whether 不感兴趣 can be reported for a card: web-feed cards need the web login (cookies),
+    /// app-feed cards the TV-login `access_key`. Otherwise the menu only hides the card here.
+    static func canReport(_ feedback: FeedCardFeedback, isLoggedIn: Bool, hasAppToken: Bool) -> Bool {
+        feedback.source == .web ? isLoggedIn : hasAppToken
+    }
+
+    static func canReport(_ feedback: FeedCardFeedback) -> Bool {
+        canReport(feedback, isLoggedIn: BiliHTTP.shared.isLoggedIn, hasAppToken: appAuth() != nil)
     }
 
     // MARK: - Recommend (app)
@@ -341,9 +380,15 @@ enum FeedAPI {
         return fb.isEmpty ? nil : fb
     }
 
-    /// 不感兴趣 / 反馈 for an app-feed card (`GET app.bilibili.com/x/feed/dislike`, `…/dislike/cancel`
-    /// with `undo`). Needs the TV-login `access_key`.
+    /// 不感兴趣 / 反馈 for a feed card, `undo` withdraws it. App-feed cards: `GET app.bilibili.com/x/feed/dislike`
+    /// (`…/dislike/cancel`) with the TV-login `access_key`. Web-feed cards: `POST api.bilibili.com/x/web-interface/
+    /// feedback/dislike` (`…/cancel`) with the cookies, WBI-signed like bilibili.com.
     static func dislike(_ feedback: FeedCardFeedback, reason: FeedDislikeReason, undo: Bool = false) async throws {
+        if feedback.source == .web {
+            let path = undo ? "/x/web-interface/feedback/dislike/cancel" : "/x/web-interface/feedback/dislike"
+            _ = try await BiliHTTP.shared.post(BiliHost.api + path, form: webDislikeForm(feedback, reason: reason), sign: .wbi)
+            return
+        }
         guard let auth = appAuth() else { throw BiliError.other("提交反馈需要使用 TV 扫码登录") }
         var query: [String: Any] = [
             "goto": feedback.goto, "id": feedback.param, "build": 1, "mobi_app": "android", "access_key": auth.token,

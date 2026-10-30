@@ -158,11 +158,13 @@ struct CompactLabelStyle: LabelStyle {
 // MARK: - Card menu (稍后再看 / 不感兴趣 / 屏蔽UP主)
 
 /// Actions behind a video card's ⋮ button and long-press menu. `remove` drops cards from the list on
-/// screen (e.g. `{ model.remove(where: $0) }`); the 首页 lists also re-apply `FeedFilter` when the
-/// rules change, so a newly blocked UP disappears from them either way.
+/// screen (e.g. `{ model.remove(where: $0, forGood: $1) }`); the 首页 lists also re-apply `FeedFilter`
+/// when the rules change, so a newly blocked UP disappears from them either way.
 @MainActor
 enum VideoCardActions {
-    typealias Remove = @MainActor (_ predicate: (VideoCard) -> Bool) -> Void
+    /// `forGood`: the cards also stay out of the list's later pages and refreshes (不感兴趣 / 隐藏), not
+    /// just off the screen (屏蔽UP主, whose 撤销 lets them show again).
+    typealias Remove = @MainActor (_ predicate: (VideoCard) -> Bool, _ forGood: Bool) -> Void
 
     static func canWatchLater(_ card: VideoCard) -> Bool {
         card.kind == .video && (card.aid != 0 || !card.bvid.isEmpty)
@@ -205,7 +207,7 @@ enum VideoCardActions {
         let mid = card.ownerMid
         let lowerName = card.ownerName.lowercased()
         withAnimation(.easeInOut(duration: 0.2)) {
-            remove? { c in mid != 0 ? c.ownerMid == mid : (!c.ownerName.isEmpty && c.ownerName.lowercased() == lowerName) }
+            remove?({ c in mid != 0 ? c.ownerMid == mid : (!c.ownerName.isEmpty && c.ownerName.lowercased() == lowerName) }, false)
         }
         if added {
             ToastCenter.shared.show("已屏蔽UP主「\(name)」", duration: 3, actionTitle: "撤销") {
@@ -229,11 +231,12 @@ enum VideoCardActions {
         ToastCenter.shared.show("已取消屏蔽")
     }
 
-    /// 不感兴趣 with one of the app feed's reasons: hides the card and reports it (TV-login token).
+    /// 不感兴趣 with one of the feed's reasons: hides the card and reports it (TV login for app-feed cards,
+    /// the web login for web-feed cards).
     static func dislike(_ card: VideoCard, reason: FeedDislikeReason, remove: Remove?) {
         guard let feedback = card.feedback else { return }
         let id = card.id
-        withAnimation(.easeInOut(duration: 0.2)) { remove? { $0.id == id } }
+        withAnimation(.easeInOut(duration: 0.2)) { remove?({ $0.id == id }, true) }
         Task {
             do {
                 try await FeedAPI.dislike(feedback, reason: reason)
@@ -260,10 +263,10 @@ enum VideoCardActions {
         }
     }
 
-    /// 不感兴趣 without server reasons (web feed, or no TV-login token): hides the card in this list.
+    /// 不感兴趣 that cannot be reported (signed out, or an app-feed card without a TV login): hides the card here.
     static func hide(_ card: VideoCard, remove: Remove?) {
         let id = card.id
-        withAnimation(.easeInOut(duration: 0.2)) { remove? { $0.id == id } }
+        withAnimation(.easeInOut(duration: 0.2)) { remove?({ $0.id == id }, true) }
         ToastCenter.shared.show("已隐藏该视频")
     }
 }
@@ -302,7 +305,7 @@ struct VideoCardMenuItems: View {
     }
 
     @ViewBuilder private var dislikeItems: some View {
-        if let feedback = card.feedback, FeedAPI.appAuth() != nil {
+        if let feedback = card.feedback, FeedAPI.canReport(feedback) {
             Menu {
                 // Keyed by the whole reason: ids repeat (every 「频道:…」 is 3).
                 ForEach(feedback.reasons, id: \.self) { reason in
@@ -578,7 +581,7 @@ struct VideoCardGrid: View {
                     }
                 }
             }
-            .refreshable { await model.refresh() }
+            .pullToRefresh { await model.refresh() }
             .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
                 await model.refresh()
             }
@@ -606,7 +609,7 @@ struct VideoCardGrid: View {
 
     private var removeCards: VideoCardActions.Remove {
         let model = model
-        return { predicate in model.remove(where: predicate) }
+        return { predicate, forGood in model.remove(where: predicate, forGood: forGood) }
     }
 
     private func refreshFromDivider(_ proxy: ScrollViewProxy) {

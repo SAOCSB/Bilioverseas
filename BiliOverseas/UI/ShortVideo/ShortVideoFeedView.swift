@@ -160,8 +160,8 @@ struct ShortVideoFeedView: View {
                     Label("复制链接", systemImage: "link")
                 }
             }
-            // Like the feed cards' menu: the reasons are only sent with a TV QR login.
-            if let feedback = item.feedback, !feedback.reasons.isEmpty, FeedAPI.appAuth() != nil {
+            // Like the feed cards' menu: only offered when the card's feed can be told (`FeedAPI.canReport`).
+            if let feedback = item.feedback, !feedback.reasons.isEmpty, FeedAPI.canReport(feedback) {
                 Menu {
                     ForEach(feedback.reasons, id: \.self) { reason in
                         Button(reason.name) { actions.dislike(item, reason) }

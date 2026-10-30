@@ -287,7 +287,7 @@ private struct SearchPaneContainer<Item: Identifiable, Content: View>: View {
                     content
                 }
                 .scrollDismissesKeyboard(.immediately)
-                .refreshable { await list.refresh() }
+                .pullToRefresh { await list.refresh() }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -372,7 +372,7 @@ private struct SearchVideoPane: View {
                         HomeRouteLink(card.route) {
                             VideoRowCell(card: card)
                         }
-                        .videoCardMenu(card) { predicate in list.remove(where: predicate) }
+                        .videoCardMenu(card) { predicate, forGood in list.remove(where: predicate, forGood: forGood) }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .onAppear { list.onItemAppear(card) }

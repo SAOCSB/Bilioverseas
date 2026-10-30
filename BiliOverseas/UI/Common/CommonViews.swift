@@ -96,6 +96,16 @@ private struct ToastInteractiveFrameKey: PreferenceKey {
     }
 }
 
+extension View {
+    /// `.refreshable` whose work outlives the gesture. SwiftUI cancels the refresh action's task when the
+    /// view redraws during the refresh, which the refresh itself causes (it publishes `isLoading`); the
+    /// lists drop a cancelled request without a word, so a pull did nothing. The work runs in a task of
+    /// its own, and the spinner still waits for it.
+    func pullToRefresh(_ action: @escaping @MainActor () async -> Void) -> some View {
+        refreshable { await Task { @MainActor in await action() }.value }
+    }
+}
+
 struct SafariView: UIViewControllerRepresentable {
     let url: URL
     func makeUIViewController(context: Context) -> SFSafariViewController { SFSafariViewController(url: url) }

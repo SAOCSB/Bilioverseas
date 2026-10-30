@@ -58,7 +58,7 @@ struct MessageFeedView: View {
                 }
             }
         }
-        .refreshable {
+        .pullToRefresh {
             likeOverrides = [:]
             await list.refresh()
         }

@@ -13,6 +13,11 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
 
     private var next: String?
     private var seen = Set<Item.ID>()
+    /// Rows removed `forGood` (不感兴趣 / 隐藏 in the feeds): no later page or refresh brings them back.
+    private var removed = Set<Item.ID>()
+    /// The last rows came on screen while a page was loading; their `onAppear` will not fire again, so
+    /// the next page is loaded once that one is in.
+    private var wantsMore = false
     private var generation = 0
     private let fetch: (String?) async throws -> Page<Item>
     /// Optional post-filter (e.g. FeedFilter) applied to every page.
@@ -36,6 +41,7 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
         generation += 1
         errorMessage = nil
         isLoading = false
+        wantsMore = false
         await load(reset: true)
     }
 
@@ -52,12 +58,15 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
 
     /// Call from a row's `.onAppear`; loads more when one of the last items appears.
     func onItemAppear(_ item: Item) {
-        guard hasMore, !isLoading else { return }
-        let tail = items.suffix(4).map(\.id)
-        if tail.contains(item.id) { Task { await loadMore() } }
+        guard hasMore, items.suffix(4).contains(where: { $0.id == item.id }) else { return }
+        if isLoading { wantsMore = true } else { Task { await loadMore() } }
     }
 
-    func remove(where predicate: (Item) -> Bool) {
+    /// Drops rows from the list. `forGood`: they also stay out of later pages and refreshes until `replace`
+    /// (不感兴趣 / 隐藏 in the feeds). Otherwise a refresh shows them again while the server still has them,
+    /// which is how a failed delete is rolled back and how a taken-back filter rule shows its rows again.
+    func remove(where predicate: (Item) -> Bool, forGood: Bool = false) {
+        if forGood { for item in items where predicate(item) { removed.insert(item.id) } }
         items.removeAll(where: predicate)
     }
 
@@ -67,6 +76,8 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
         generation += 1
         items = newItems
         seen = Set(newItems.map(\.id))
+        removed = []
+        wantsMore = false
         lastSeenID = nil
         next = nil
         hasMore = true
@@ -79,10 +90,10 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
         isLoading = true
         let gen = generation
         var emptyStreak = 0
+        /// `keepOnRefresh`: where this refresh's rows go (above the kept ones).
+        var insertAt: Int?
         do {
             var cursor = reset ? nil : next
-            /// `keepOnRefresh`: where this refresh's rows go (above the kept ones).
-            var insertAt: Int?
             while true {
                 let page = try await fetch(cursor)
                 guard gen == generation else { return }
@@ -99,7 +110,7 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
                     }
                 }
                 var fresh: [Item] = []
-                for item in page.items where !seen.contains(item.id) {
+                for item in page.items where !seen.contains(item.id) && !removed.contains(item.id) {
                     if let filter, !filter(item) { continue }
                     seen.insert(item.id)
                     fresh.append(item)
@@ -122,12 +133,24 @@ final class PagedListModel<Item: Identifiable>: ObservableObject where Item.ID: 
                 break
             }
             errorMessage = nil
+            // A refresh that kept the rows and found nothing new would otherwise look like it did nothing.
+            if insertAt == 0 { ToastCenter.shared.show("暂时没有新的推荐，稍后再刷新试试") }
         } catch BiliError.cancelled {
         } catch is CancellationError {
         } catch {
-            if gen == generation { errorMessage = error.localizedDescription }
+            if gen == generation {
+                errorMessage = error.localizedDescription
+                // The rows shown stay; the footer with the error is out of sight below them.
+                if reset && !items.isEmpty { ToastCenter.shared.show("刷新失败：\(error.localizedDescription)") }
+            }
         }
-        if gen == generation { isLoading = false }
+        if gen == generation {
+            isLoading = false
+            if wantsMore {
+                wantsMore = false
+                if hasMore { Task { await loadMore() } }
+            }
+        }
     }
 }
 

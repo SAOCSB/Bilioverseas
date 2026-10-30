@@ -87,7 +87,7 @@ private struct BangumiIndexList: View {
             }
             .padding(.top, 4)
         }
-        .refreshable { await list.refresh() }
+        .pullToRefresh { await list.refresh() }
         .task { await list.loadIfNeeded() }
     }
 }

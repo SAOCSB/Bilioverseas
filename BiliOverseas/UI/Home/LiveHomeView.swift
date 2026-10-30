@@ -91,7 +91,7 @@ struct LiveHomeView: View {
                     }
                 }
             }
-            .refreshable { await model.refresh() }
+            .pullToRefresh { await model.refresh() }
             .feedReselect(reselect, proxy: proxy, tracker: topTracker, isRefreshing: $isReselectRefreshing) {
                 await model.refresh()
             }

@@ -159,7 +159,7 @@ enum AboutLicenseTexts {
         let url: URL?
     }
 
-    static let repositoryURL = URL(string: "https://github.com/SAOCSB/bilbil_ios")!
+    static let repositoryURL = URL(string: "https://github.com/SAOCSB/Bilioverseas")!
 
     static let disclaimer = "本应用为第三方非官方客户端，与哔哩哔哩无关；不会绕过会员、地区、版权或审核限制。所有内容版权归原作者及哔哩哔哩所有。"
 
@@ -215,10 +215,10 @@ enum AboutLicenseTexts {
               url: URL(string: "https://github.com/Predidit/canvas_danmaku")),
         Entry(id: "app",
               name: "B站海外加速版（本应用）",
-              author: "bilbil_ios contributors",
+              author: "Bilioverseas contributors",
               license: "GPL-2.0-or-later",
               usage: "本应用以 GNU 通用公共许可证第 2 版或（由你选择）任何更新版本发布，源代码见 GitHub。",
-              text: gplNotice(program: "B站海外加速版 (bilbil_ios)", copyright: "Copyright (C) 2026 bilbil_ios contributors", orLater: true),
+              text: gplNotice(program: "B站海外加速版 (Bilioverseas)", copyright: "Copyright (C) 2026 Bilioverseas contributors", orLater: true),
               url: repositoryURL),
     ]
 

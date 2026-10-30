@@ -1066,6 +1066,16 @@ final class VideoDetailModel: ObservableObject {
             }
         } catch {
             ToastCenter.shared.show(error: error)
+            // 65007 已踩过 / 65005 未点踩过: the shown state was wrong (relation not loaded, or 点踩 elsewhere).
+            if let code = (error as? BiliError)?.apiCode, code == 65007 || code == 65005, aid == interactionAid {
+                relationEdits += 1
+                relation.disliked = code == 65007
+                // A dislike excludes a like, as on success.
+                if code == 65007, relation.liked {
+                    relation.liked = false
+                    counts.like = max(0, counts.like - 1)
+                }
+            }
         }
     }
 

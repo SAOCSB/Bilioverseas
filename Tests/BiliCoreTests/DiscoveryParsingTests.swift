@@ -92,6 +92,17 @@ final class DiscoveryParsingTests: XCTestCase {
         XCTAssertNil(FeedAPI.appFeedback(json(#"[{"type":"dislike","reasons":[{"id":1,"name":"x"}]}]"#), goto: "av", param: 0))
     }
 
+    func testAppFeedbackDropsRepeatedReasons() throws {
+        let fb = try XCTUnwrap(FeedAPI.appFeedback(json(#"""
+        [{"type":"dislike","reasons":[{"id":4,"name":"UP主:甲"},{"id":3,"name":"频道:乙"},{"id":3,"name":"频道:乙"},
+                                       {"id":3,"name":"频道:丙"},{"id":1,"name":"这个内容"}]},
+         {"type":"feedback","reasons":[{"id":3,"name":"频道:乙"}]}]
+        """#), goto: "av", param: 9))
+        XCTAssertEqual(fb.reasons.map(\.name), ["UP主:甲", "频道:乙", "频道:丙", "这个内容"])
+        XCTAssertEqual(fb.feedbacks.map(\.name), ["频道:乙"])
+        XCTAssertEqual(Set(fb.reasons).count, fb.reasons.count)
+    }
+
     func testAppRecommendAdCreativeAndEmptySlot() {
         let data = json(#"""
         {"items":[

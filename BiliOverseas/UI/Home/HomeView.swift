@@ -200,6 +200,16 @@ struct HomeView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("搜索")
 
+            Button(action: openShortVideos) {
+                Image(systemName: "play.square.stack")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.primary)
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("短视频")
+
             HomeMessageBell()
         }
         .padding(.horizontal, 14)
@@ -217,6 +227,13 @@ struct HomeView: View {
                 .foregroundStyle(Color(.systemGray3))
                 .frame(width: 30, height: 30)
         }
+    }
+
+    /// 短视频 from a portrait video in 推荐 (a different one each time): the story feed follows its entry
+    /// video, and an entry-less feed starts out mostly landscape.
+    private func openShortVideos() {
+        let entry = models.recommend.items.filter { $0.kind == .video && $0.isPortraitVideo }.randomElement()
+        router.push(.shortVideos(start: entry.map(ShortVideoAPI.item(from:))))
     }
 
     private func avatarTapped() {

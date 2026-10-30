@@ -23,6 +23,8 @@ enum SmokeTest {
 
     /// Set by `PlayerController.load` while the smoke test runs, so the UI playback can be inspected.
     static weak var activePlayer: PlayerController?
+    /// Set by `ShortVideoFeedModel` while the smoke test runs (the 短视频 tour step swipes it).
+    static weak var activeShortVideoFeed: ShortVideoFeedModel?
 
     private static var report: [String: Any] = [:]
     private static var started = false
@@ -60,6 +62,14 @@ enum SmokeTest {
         await step("search.hotWords") {
             let words = try await SearchAPI.hotWords()
             return ["count": words.count, "first": words.first?.showName ?? ""]
+        }
+        await step("feed.story") {
+            let first = try await ShortVideoAPI.feed(start: nil, cursor: nil)
+            let second = try await ShortVideoAPI.feed(start: nil, cursor: first.next)
+            let all = first.items + second.items
+            return ["page1": first.items.count, "page2": second.items.count,
+                    "unique": Set(all.map(\.id)).count, "portrait": all.filter(\.isPortrait).count,
+                    "withCid": all.filter { $0.cid != 0 }.count, "titles": Array(all.prefix(3).map(\.title))]
         }
 
         var detail: VideoDetail?
@@ -114,6 +124,18 @@ enum SmokeTest {
         }
         await show("player-fullscreen") { activePlayer?.enterFullscreen() }
         await show("player-inline") { activePlayer?.exitFullscreen() }
+        // Entered from a portrait video, like a tapped 推荐 card or the 首页 button.
+        let entry = try? await ShortVideoAPI.feed(start: nil, cursor: nil).items.first(where: \.isPortrait)
+        record("shortVideo.entry", entry?.bvid ?? "")
+        await show("short-videos", seconds: 14) {
+            router.popToRoot()
+            router.push(.shortVideos(start: entry))
+        }
+        recordShortVideo(label: "shortVideo.t14")
+        await show("short-videos-next", seconds: 10) {
+            if let feed = activeShortVideoFeed, feed.index + 1 < feed.items.count { feed.index += 1 }
+        }
+        recordShortVideo(label: "shortVideo.next.t10")
         await show("search") {
             router.popToRoot()
             router.push(.search(keyword: "原神"))
@@ -265,6 +287,17 @@ enum SmokeTest {
         let (data, resp) = try await URLSession.shared.data(from: url)
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw BiliError.other("playlist fetch failed: \(url.lastPathComponent)") }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func recordShortVideo(label: String) {
+        guard let feed = activeShortVideoFeed, let item = feed.current else {
+            record(label, ["error": "no short-video feed", "loadError": activeShortVideoFeed?.errorText ?? ""])
+            return
+        }
+        let playback = feed.playback(for: item)
+        record(label, ["index": feed.index, "items": feed.items.count, "bvid": item.bvid, "portrait": item.isPortrait,
+                       "phase": "\(playback.phase)", "playing": playback.isPlaying, "position": playback.position,
+                       "duration": playback.duration])
     }
 
     private static func recordPlayer(label: String) {

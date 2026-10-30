@@ -456,5 +456,25 @@ final class MessageAPIParsingTests: XCTestCase {
         XCTAssertEqual(r.form["csrf_token"] as? String, "jct")
         let content = try XCTUnwrap(r.form["msg[content]"] as? String)
         XCTAssertEqual(try JSON(string: content)["content"].stringValue, "你好 \"世界\"")
+        XCTAssertEqual(r.form["msg[new_face_version]"] as? Int, 1)
+    }
+
+    func testSendTextKeepsSlashesUnescaped() throws {
+        let r = MessageAPI.sendTextRequest("看 https://b23.tv/x [doge]", sender: 9, receiver: 1001, deviceId: "DEV-1",
+                                           timestamp: 1_700_000_000, csrf: "jct")
+        let content = try XCTUnwrap(r.form["msg[content]"] as? String)
+        XCTAssertFalse(content.contains("\\/"), content)
+        XCTAssertEqual(try JSON(string: content)["content"].stringValue, "看 https://b23.tv/x [doge]")
+    }
+
+    func testEmoteURLFallsBackToURI() {
+        let data = (try? JSON(string: #"""
+        {"messages":[],"has_more":false,
+         "e_infos":[{"text":"[a]","uri":"http://i0.hdslb.com/emote/a.png"},
+                    {"text":"[b]","gif_url":"http://i0.hdslb.com/emote/b.gif"}]}
+        """#)) ?? .null
+        let page = MessageAPI.parseMessages(data)
+        XCTAssertEqual(page.emotes["[a]"], "https://i0.hdslb.com/emote/a.png")
+        XCTAssertEqual(page.emotes["[b]"], "https://i0.hdslb.com/emote/b.gif")
     }
 }

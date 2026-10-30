@@ -1,0 +1,343 @@
+import AVFoundation
+import Combine
+import SwiftUI
+
+/// The player of one 短视频 item: the html5 MP4 (one file, fast to start) served through the
+/// acceleration engine (`prepareProgressive`), retried without acceleration, then played straight
+/// from the CDN. It feeds the engine session the signals the main player does (see the wiring notes
+/// in AccelerationEngine.swift). The feed keeps the current item and its neighbours prepared so a
+/// swipe starts at once; the video loops like the official app's.
+@MainActor
+final class ShortVideoPlayback: ObservableObject {
+    enum Phase: Equatable {
+        case idle, loading, ready
+        case failed(String)
+    }
+
+    let item: ShortVideoItem
+    let player = AVPlayer()
+    @Published private(set) var phase: Phase = .idle
+    @Published private(set) var isPlaying = false
+    /// Waiting for data while it should be playing.
+    @Published private(set) var isBuffering = false
+    /// Seconds.
+    @Published private(set) var position: Double = 0
+    @Published private(set) var duration: Double
+    /// The long-press 倍速 is active.
+    @Published private(set) var isFastForward = false
+
+    private var session: PlaybackSession?
+    private var loadTask: Task<Void, Never>?
+    private var timeObserver: Any?
+    private var observers: Set<AnyCancellable> = []
+    /// Observers of the current AVPlayerItem, dropped with it.
+    private var itemObservers: Set<AnyCancellable> = []
+    /// Where a rebuilt item resumes.
+    private var resumeAt: Double?
+    private var wantsPlay = false
+    private var startedPlaying = false
+    private var seeking = false
+    /// Furthest position reached, for the watch-history heartbeat.
+    private var furthest: Double = 0
+    private var reportedHistory = false
+
+    init(item: ShortVideoItem) {
+        self.item = item
+        duration = Double(item.duration)
+        player.actionAtItemEnd = .none
+        player.automaticallyWaitsToMinimizeStalling = true
+        observePlayer()
+    }
+
+    // MARK: Control
+
+    /// Resolves the stream and installs the item, paused. Safe to call repeatedly.
+    func prepare() {
+        switch phase {
+        case .idle, .failed: break
+        case .loading, .ready: return
+        }
+        phase = .loading
+        loadTask = Task { [weak self] in await self?.load() }
+    }
+
+    func play() {
+        wantsPlay = true
+        reportedHistory = false
+        if rebuildIfEndpointLost() { return }
+        prepare()
+        if phase == .ready { player.playImmediately(atRate: isFastForward ? fastRate : 1) }
+    }
+
+    /// The engine dropped this session (it keeps four; another page took the slot) or its listener changed port
+    /// after the background: the item's URL is dead, so start over where it was. Only when it should play.
+    private func rebuildIfEndpointLost() -> Bool {
+        guard let session, !session.isEndpointValid else { return false }
+        resumeAt = position > 1 ? position : nil
+        teardown()
+        prepare()
+        return true
+    }
+
+    func pause() {
+        wantsPlay = false
+        player.pause()
+    }
+
+    func togglePlay() {
+        if wantsPlay { pause() } else { play() }
+    }
+
+    var isPaused: Bool { !wantsPlay }
+
+    func seek(to seconds: Double) {
+        let target = max(0, min(seconds, duration > 0 ? duration - 0.5 : seconds))
+        session?.playerWillSeek(to: target, outsideBuffer: !isBuffered(target))
+        seeking = true
+        position = target
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero,
+                    toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor in self?.seeking = false }
+        }
+    }
+
+    /// Long-press 倍速 (the player setting's speed, 2× by default).
+    func setFastForward(_ on: Bool) {
+        isFastForward = on
+        if wantsPlay, phase == .ready { player.rate = on ? fastRate : 1 }
+    }
+
+    private var fastRate: Float { Float(max(1.25, AppSettings.shared.player.longPressSpeed)) }
+
+    /// Stops everything and releases the stream; `prepare()` starts over.
+    func close() {
+        reportHistoryIfNeeded()
+        wantsPlay = false
+        resumeAt = nil
+        teardown()
+    }
+
+    private func teardown() {
+        loadTask?.cancel()
+        loadTask = nil
+        player.pause()
+        itemObservers.removeAll()
+        player.replaceCurrentItem(with: nil)
+        session?.close()
+        session = nil
+        startedPlaying = false
+        if phase != .idle { phase = .idle }
+    }
+
+    /// Records how far this video was watched (when 「记录观看历史」 is on), once per viewing.
+    func reportHistoryIfNeeded() {
+        guard !reportedHistory, furthest >= 1, AppSettings.shared.general.reportHistory, BiliHTTP.shared.isLoggedIn,
+              let cid = resolvedCid else { return }
+        reportedHistory = true
+        let played = Int(furthest.rounded())
+        let (aid, bvid) = (item.aid, item.bvid)
+        Task.detached { try? await VideoAPI.heartbeat(aid: aid, bvid: bvid, cid: cid, playedTime: played) }
+    }
+
+    // MARK: Loading
+
+    private var resolvedCid: Int64?
+
+    private func load() async {
+        do {
+            var cid = item.cid
+            if cid == 0 {
+                cid = try await VideoAPI.detail(item.videoRef).cid
+            }
+            resolvedCid = cid
+            let (aid, bvid) = (item.aid, item.bvid)
+            let qn = min(AppSettings.shared.player.preferredQuality, VideoQuality.q1080.rawValue)
+            let info = try await VideoAPI.progressivePlayInfo(aid: aid, bvid: bvid, cid: cid, qn: qn)
+            try Task.checkCancellation()
+            guard let segment = info.durl.first else { throw BiliError.other("视频资源不存在") }
+            if info.duration > 0 { duration = info.duration }
+
+            let refresher = AccelerationEngine.progressiveRefresher(for: segment) {
+                try await VideoAPI.progressivePlayInfo(aid: aid, bvid: bvid, cid: cid, qn: qn).durl
+            }
+            let routeKey = (bvid.isEmpty ? "av\(aid)" : bvid) + ":short"
+            let attempts = AppSettings.shared.acceleration.enabled ? [true, false] : [false]
+            var made: PlaybackSession?
+            for accelerate in attempts {
+                made = try? await AccelerationEngine.shared.prepareProgressive(
+                    routeKey: routeKey, segment: segment, accelerate: accelerate, refreshURLs: refresher)
+                if made != nil || Task.isCancelled { break }
+            }
+            if Task.isCancelled {
+                made?.close()
+                return
+            }
+            let asset: AVURLAsset
+            if let made {
+                session = made
+                asset = AVURLAsset(url: made.url)
+            } else {
+                // The proxy cannot serve it: straight from the CDN, which checks Referer / User-Agent.
+                guard let url = URL(string: segment.url.biliHTTPS) else { throw BiliError.other("视频地址无效") }
+                let headers = ["Referer": "https://www.bilibili.com/", "User-Agent": BiliHTTP.webUserAgent]
+                asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+            }
+            install(AVPlayerItem(asset: asset))
+        } catch {
+            if Task.isCancelled || ListMapping.isCancellation(error) { return }
+            phase = .failed((error as? LocalizedError)?.errorDescription ?? "加载失败")
+        }
+    }
+
+    private func install(_ playerItem: AVPlayerItem) {
+        playerItem.preferredForwardBufferDuration = max(5, AppSettings.shared.acceleration.forwardBufferSeconds)
+        itemObservers.removeAll()
+        observeItem(playerItem)
+        player.replaceCurrentItem(with: playerItem)
+        phase = .ready
+        if let resumeAt {
+            self.resumeAt = nil
+            seek(to: resumeAt)
+        }
+        if wantsPlay { player.playImmediately(atRate: isFastForward ? fastRate : 1) }
+    }
+
+    // MARK: Observation
+
+    private func observePlayer() {
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 4), queue: .main) {
+            [weak self] time in
+            MainActor.assumeIsolated { self?.tick(time.seconds) }
+        }
+        player.publisher(for: \.timeControlStatus)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] status in self?.statusChanged(status) }
+            .store(in: &observers)
+        // A call or Siri pauses the player behind our back: show it as paused, so one tap resumes.
+        NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in
+                let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+                if raw == AVAudioSession.InterruptionType.began.rawValue { self?.wantsPlay = false }
+            }
+            .store(in: &observers)
+    }
+
+    private func observeItem(_ playerItem: AVPlayerItem) {
+        let center = NotificationCenter.default
+        center.publisher(for: .AVPlayerItemDidPlayToEndTime, object: playerItem)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.loop() }
+            .store(in: &itemObservers)
+        center.publisher(for: .AVPlayerItemPlaybackStalled, object: playerItem)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.session?.playerDidStall() }
+            .store(in: &itemObservers)
+        playerItem.publisher(for: \.status)
+            .receive(on: RunLoop.main)
+            .sink { [weak self, weak playerItem] status in
+                guard status == .failed, let self, playerItem === self.player.currentItem else { return }
+                self.phase = .failed(playerItem?.error?.localizedDescription ?? "播放失败")
+            }
+            .store(in: &itemObservers)
+        playerItem.publisher(for: \.duration)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] d in
+                if d.isNumeric, d.seconds > 0 { self?.duration = d.seconds }
+            }
+            .store(in: &itemObservers)
+    }
+
+    private func tick(_ seconds: Double) {
+        guard seconds.isFinite else { return }
+        if wantsPlay, rebuildIfEndpointLost() { return }
+        if !seeking { position = seconds }
+        if isPlaying { furthest = max(furthest, seconds) }
+        guard let session, let current = player.currentItem else { return }
+        let ahead = bufferedAhead(at: seconds, in: current)
+        session.update(time: seconds, rate: Double(player.rate), playing: isPlaying && !seeking,
+                       bufferedAhead: ahead, cacheFull: ahead >= current.preferredForwardBufferDuration - 1)
+    }
+
+    private func statusChanged(_ status: AVPlayer.TimeControlStatus) {
+        isPlaying = status == .playing
+        isBuffering = wantsPlay && status == .waitingToPlayAtSpecifiedRate
+        if status == .playing { startedPlaying = true }
+        if status == .waitingToPlayAtSpecifiedRate, startedPlaying, !seeking,
+           player.reasonForWaitingToPlay == .toMinimizeStalls {
+            session?.playerDidStall()
+        }
+    }
+
+    private func loop() {
+        reportHistoryIfNeeded()
+        reportedHistory = false
+        furthest = 0
+        session?.playerWillSeek(to: 0, outsideBuffer: !isBuffered(0))
+        player.seek(to: .zero) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.wantsPlay else { return }
+                self.player.playImmediately(atRate: self.isFastForward ? self.fastRate : 1)
+            }
+        }
+    }
+
+    private func bufferedAhead(at time: Double, in item: AVPlayerItem) -> Double {
+        for value in item.loadedTimeRanges {
+            let range = value.timeRangeValue
+            let start = range.start.seconds, end = (range.start + range.duration).seconds
+            if time >= start - 0.5, time <= end { return max(0, end - time) }
+        }
+        return 0
+    }
+
+    private func isBuffered(_ time: Double) -> Bool {
+        guard let current = player.currentItem else { return false }
+        return current.loadedTimeRanges.contains { value in
+            let r = value.timeRangeValue
+            return time >= r.start.seconds && time <= (r.start + r.duration).seconds
+        }
+    }
+
+    deinit {
+        if let timeObserver { player.removeTimeObserver(timeObserver) }
+    }
+}
+
+/// An `AVPlayerLayer` for SwiftUI that reports when the first frame is on screen (the cover is
+/// shown until then).
+struct ShortVideoSurface: UIViewRepresentable {
+    let player: AVPlayer
+    var fill: Bool
+    @Binding var readyForDisplay: Bool
+
+    func makeUIView(context: Context) -> PlayerLayerView {
+        let view = PlayerLayerView()
+        view.backgroundColor = .clear
+        view.onReadyChange = { ready in
+            DispatchQueue.main.async { readyForDisplay = ready }
+        }
+        return view
+    }
+
+    func updateUIView(_ view: PlayerLayerView, context: Context) {
+        if view.playerLayer.player !== player { view.playerLayer.player = player }
+        view.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+    }
+
+    final class PlayerLayerView: UIView {
+        override static var layerClass: AnyClass { AVPlayerLayer.self }
+        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+        var onReadyChange: ((Bool) -> Void)?
+        private var observation: NSKeyValueObservation?
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            observation = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
+                self?.onReadyChange?(layer.isReadyForDisplay)
+            }
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    }
+}

@@ -14,6 +14,12 @@ struct OfflineSource: Equatable {
     var qualityTitle: String = ""
 }
 
+/// A transfer that returned normally without delivering any byte of its range: a failed attempt (retried after a
+/// pause with fresh URLs, up to the attempt budget), unlike the local `OfflineDownloadError`s.
+struct OfflineNoProgressError: LocalizedError {
+    var errorDescription: String? { "下载没有进展，请稍后重试" }
+}
+
 enum OfflineDownloadError: LocalizedError, Equatable {
     /// No single-file stream for this video (e.g. a multi-segment or DRM response).
     case noSource
@@ -295,6 +301,8 @@ final class OfflineDownloadJob: @unchecked Sendable {
                 let fileTotal = try await transfer(range, kind: .ordinary, direct: direct, track: track, writer: writer)
                 try adopt(fileTotal: fileTotal, probing: false)
                 if fellBack { holdPlainPath() }
+                // Returning without a byte of the range would otherwise re-request at once, with no pause or limit.
+                if writtenBytes(in: chunk) == before { throw OfflineNoProgressError() }
             } catch {
                 failures = writtenBytes(in: chunk) > before ? 0 : failures + 1
                 if failures >= 2, !direct {

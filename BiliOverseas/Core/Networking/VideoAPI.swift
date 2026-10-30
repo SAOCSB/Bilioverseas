@@ -32,6 +32,8 @@ enum VideoAPI {
         case -111: return "登录状态校验失败，请重新登录"
         case 65004: return "取消点赞失败"
         case 65006: return "已经点过赞了"
+        case 65005: return "还没有点过踩"
+        case 65007: return "已经点过踩了"
         case 34002: return "不能给自己投币哦"
         case 34003: return "投币数量不正确"
         case 34004: return "投币间隔太短，请稍后再试"
@@ -684,6 +686,10 @@ enum VideoAPI {
             _ = try await http.api(BiliHost.app + "/x/v2/view/dislike", method: "POST",
                                    form: dislikeForm(aid: aid, dislike: dislike, auth: auth.params), sign: .app(auth.key))
         } catch {
+            if AuthService.isRejectedAppToken(error), let token = auth.params["access_key"] {
+                AuthService.shared.dropAppToken(ifToken: token)
+                throw BiliError.other(AuthService.appTokenRejectedMessage)
+            }
             throw mapError(error)
         }
     }

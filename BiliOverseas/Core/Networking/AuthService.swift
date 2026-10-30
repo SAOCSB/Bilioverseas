@@ -103,6 +103,35 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         return (["access_key": token], key)
     }
 
+    /// The server rejected the TV-login `access_key` `sent` with a request (revoked or expired early): forget it,
+    /// so TV-only features say a new TV QR login is needed instead of failing with 账号未登录 while the web session
+    /// is fine. A token replaced since (a new login) is kept.
+    func dropAppToken(ifToken sent: String) {
+        let dropped: Bool = locked {
+            guard tokens.accessKey == sent else { return false }
+            tokens.accessKey = nil
+            tokens.accessKeyAppKey = nil
+            tokens.appRefreshToken = nil
+            tokens.accessKeyExpiresAt = nil
+            return true
+        }
+        guard dropped else { return }
+        persistNow()
+        DispatchQueue.main.async { self.objectWillChange.send() }
+    }
+
+    /// Codes app endpoints answer for a bad `access_key`: -101 账号未登录, -2 invalid token, -663 token minted
+    /// for another appkey. (Not -400: that is any malformed request.)
+    static let rejectedAppTokenCodes: Set<Int> = [-101, -2, -663]
+
+    static let appTokenRejectedMessage = "TV 登录已失效，请重新使用 TV 扫码登录"
+
+    /// Whether the error is the server rejecting the TV-login `access_key` a request carried.
+    static func isRejectedAppToken(_ error: Error) -> Bool {
+        guard let code = (error as? BiliError)?.apiCode else { return false }
+        return rejectedAppTokenCodes.contains(code)
+    }
+
     /// Whether a web `refresh_token` (ac_time_value) is stored, i.e. cookie refresh is possible.
     var canRefreshCookies: Bool { !(locked { tokens.refreshToken } ?? "").isEmpty }
 

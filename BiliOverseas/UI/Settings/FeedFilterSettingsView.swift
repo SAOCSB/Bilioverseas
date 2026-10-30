@@ -100,10 +100,12 @@ struct FeedFilterSettingsView: View {
                 Toggle("保留首页推荐刷新", isOn: $settings.general.keepRecommendOnRefresh)
                 Toggle("显示上次看到位置提示", isOn: $settings.general.showLastSeenHint)
                     .disabled(!settings.general.keepRecommendOnRefresh)
+                Toggle("竖屏视频进入短视频", isOn: $settings.general.portraitOpensShortVideo)
+                    .disabled(!settings.general.useAppFeed)
             } header: {
                 Text("首页推荐")
             } footer: {
-                Text("app 端推荐提供分区信息和“不感兴趣”选项（提交反馈需使用 TV 扫码登录），获取失败时自动改用网页端推荐。保留刷新：下拉刷新时新内容插入顶部，之前的内容保留在下方。")
+                Text("app 端推荐提供分区信息和“不感兴趣”选项（提交反馈需使用 TV 扫码登录），获取失败时自动改用网页端推荐。保留刷新：下拉刷新时新内容插入顶部，之前的内容保留在下方。竖屏视频进入短视频：像官方客户端一样，点开 app 端推荐里的竖屏视频时进入上下滑动的短视频模式。")
             }
         }
         .navigationTitle("屏蔽设置")

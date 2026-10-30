@@ -235,6 +235,7 @@ enum FeedAPI {
             c.cid = playerArgs["cid"].int64Value
             let seconds = playerArgs["duration"].intValue
             c.duration = seconds > 0 ? seconds : ListMapping.duration(item["cover_right_text"])
+            (c.width, c.height) = appVideoSize(uri: c.uri)
         case "bangumi":
             guard param != 0 else { return nil }
             c.kind = .bangumi
@@ -257,17 +258,28 @@ enum FeedAPI {
         return c
     }
 
+    /// Video size from an app-feed card's `uri` (`player_width` / `player_height` / `player_rotate`,
+    /// rotation applied); (0, 0) when it has none.
+    static func appVideoSize(uri: String) -> (width: Int, height: Int) {
+        func value(_ name: String) -> Int { ListMapping.uriQueryValue(name, in: uri).flatMap { Int($0) } ?? 0 }
+        let (w, h) = (value("player_width"), value("player_height"))
+        guard w > 0, h > 0 else { return (0, 0) }
+        return value("player_rotate") == 1 ? (h, w) : (w, h)
+    }
+
     /// `three_point_v2[]` (`{type: dislike | feedback, reasons[{id, name, toast}]}`) → the card's
-    /// 不感兴趣 menu, nil when it offers none.
+    /// 不感兴趣 menu, nil when it offers none. Reasons can share an id (every 「频道:…」 is 3) and the
+    /// feed sometimes repeats one outright; the repeats are dropped.
     static func appFeedback(_ threePoint: JSON, goto: String, param: Int64) -> FeedCardFeedback? {
         guard !goto.isEmpty, param != 0 else { return nil }
         var fb = FeedCardFeedback(goto: goto, param: param)
+        var seen = Set<String>()
         for entry in threePoint.arrayValue {
             let type = entry["type"].stringValue
             guard type == "dislike" || type == "feedback" else { continue }
             let reasons: [FeedDislikeReason] = entry["reasons"].arrayValue.compactMap { r in
                 let name = r["name"].stringValue
-                guard let id = r["id"].int64, !name.isEmpty else { return nil }
+                guard let id = r["id"].int64, !name.isEmpty, seen.insert("\(type) \(id) \(name)").inserted else { return nil }
                 return FeedDislikeReason(id: id, name: name, toast: r["toast"].stringValue, isFeedback: type == "feedback")
             }
             if type == "dislike" { fb.reasons += reasons } else { fb.feedbacks += reasons }
@@ -283,8 +295,16 @@ enum FeedAPI {
             "goto": feedback.goto, "id": feedback.param, "build": 1, "mobi_app": "android", "access_key": auth.token,
         ]
         query[reason.isFeedback ? "feedback_id" : "reason_id"] = reason.id
-        _ = try await BiliHTTP.shared.api(BiliHost.app + (undo ? "/x/feed/dislike/cancel" : "/x/feed/dislike"),
-                                          query: query, sign: .app(auth.key), headers: appFeedHeaders())
+        do {
+            _ = try await BiliHTTP.shared.api(BiliHost.app + (undo ? "/x/feed/dislike/cancel" : "/x/feed/dislike"),
+                                              query: query, sign: .app(auth.key), headers: appFeedHeaders())
+        } catch {
+            if AuthService.isRejectedAppToken(error) {
+                AuthService.shared.dropAppToken(ifToken: auth.token)
+                throw BiliError.other(AuthService.appTokenRejectedMessage)
+            }
+            throw error
+        }
     }
 
     /// The TV-login `access_key` and the appkey it must be signed with; nil without one.

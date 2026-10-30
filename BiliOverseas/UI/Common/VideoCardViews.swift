@@ -237,10 +237,25 @@ enum VideoCardActions {
         Task {
             do {
                 try await FeedAPI.dislike(feedback, reason: reason)
-                let fallback = reason.isFeedback ? "感谢反馈" : "将减少相似内容推荐"
-                ToastCenter.shared.show(reason.toast.isEmpty ? fallback : reason.toast)
+                showDisliked(feedback, reason: reason)
             } catch {
                 if !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
+            }
+        }
+    }
+
+    /// The toast after a 不感兴趣 / 反馈 went through. 「撤销」 withdraws it on the server
+    /// (`/x/feed/dislike/cancel`); the card stays hidden until the list reloads.
+    static func showDisliked(_ feedback: FeedCardFeedback, reason: FeedDislikeReason) {
+        let fallback = reason.isFeedback ? "感谢反馈" : "将减少相似内容推荐"
+        ToastCenter.shared.show(reason.toast.isEmpty ? fallback : reason.toast, duration: 3, actionTitle: "撤销") {
+            Task { @MainActor in
+                do {
+                    try await FeedAPI.dislike(feedback, reason: reason, undo: true)
+                    ToastCenter.shared.show("已撤销")
+                } catch {
+                    if !ListMapping.isCancellation(error) { ToastCenter.shared.show(error: error) }
+                }
             }
         }
     }
@@ -289,12 +304,13 @@ struct VideoCardMenuItems: View {
     @ViewBuilder private var dislikeItems: some View {
         if let feedback = card.feedback, FeedAPI.appAuth() != nil {
             Menu {
-                ForEach(feedback.reasons) { reason in
+                // Keyed by the whole reason: ids repeat (every 「频道:…」 is 3).
+                ForEach(feedback.reasons, id: \.self) { reason in
                     Button(reason.name) { VideoCardActions.dislike(card, reason: reason, remove: remove) }
                 }
                 if !feedback.feedbacks.isEmpty {
                     Section("反馈") {
-                        ForEach(feedback.feedbacks) { reason in
+                        ForEach(feedback.feedbacks, id: \.self) { reason in
                             Button(reason.name) { VideoCardActions.dislike(card, reason: reason, remove: remove) }
                         }
                     }

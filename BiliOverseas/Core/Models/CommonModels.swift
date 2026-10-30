@@ -56,8 +56,14 @@ struct VideoCard: Identifiable, Hashable {
     var zone: String = ""
     /// App-feed 不感兴趣 menu (`three_point_v2`), nil for every other list.
     var feedback: FeedCardFeedback? = nil
+    /// Display size of the video (rotation applied) when the list says (app feed), 0 otherwise.
+    var width: Int = 0
+    var height: Int = 0
 
     init(id: String) { self.id = id }
+
+    /// A known portrait (vertical) video; unknown sizes are not.
+    var isPortraitVideo: Bool { width > 0 && height > width }
 
     var videoRef: VideoRef {
         VideoRef(aid: aid, bvid: bvid, cid: cid, epId: epId, seasonId: seasonId,

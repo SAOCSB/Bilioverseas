@@ -403,6 +403,23 @@ final class OfflineJobTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(source.count, 2, "fresh URLs were fetched before the retry")
     }
 
+    func testATransferThatDeliversNothingFailsInsteadOfLooping() async throws {
+        let client = FakeMediaClient(total: MiB)
+        let real = BTRDownloader(config: { offlineBTRConfig() }, client: client, auto: nil, tuning: offlineTuning(),
+                                 bans: BTRBanRegistry())
+        let stalling = StallingDownloader(real: real, total: client.total)
+        var config = offlineJobConfig()
+        config.attemptsPerChunk = 3
+        let job = OfflineDownloadJob(taskID: "BV1test_1", fileURL: root.appendingPathComponent("video.mp4.part"),
+                                     written: OfflineRangeSet(), total: 0, config: config, downloader: stalling,
+                                     wallClock: { Date().timeIntervalSince1970 },
+                                     resolve: { try OfflineSourceCounter().resolve() })
+        let outcome = await job.run()
+        guard case .failed(let error, _) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertTrue(error is OfflineNoProgressError, "\(error)")
+        XCTAssertLessThanOrEqual(stalling.emptyTransfers, 3 * config.lanes, "stops at the attempt budget")
+    }
+
     func testExpiringURLsAreRefreshedBeforeUse() async throws {
         let client = FakeMediaClient(total: MiB)
         let now = Date().timeIntervalSince1970
@@ -461,6 +478,44 @@ final class OfflineJobTests: XCTestCase {
 }
 
 /// Last progress report (written from the job's ticker task).
+/// Answers the head probe through a real downloader, then "succeeds" without a byte for every other range.
+private final class StallingDownloader: BTRDownloading, @unchecked Sendable {
+    let real: BTRDownloader
+    let total: Int64
+    private let lock = NSLock()
+    private var empty = 0
+
+    init(real: BTRDownloader, total: Int64) {
+        self.real = real
+        self.total = total
+    }
+
+    var emptyTransfers: Int { lock.withLock { empty } }
+
+    func makeTrack(kind: MediaKind, urls: [String], routeKey: String) -> BTRTrackHandle {
+        real.makeTrack(kind: kind, urls: urls, routeKey: routeKey)
+    }
+
+    func download(_ range: ByteRange, track: BTRTrackHandle, kind: BTRRangeKind, priority: Int,
+                  deadline: (() -> Double?)?, onBytes: @escaping (Data) async throws -> Void) async throws -> Int64 {
+        if kind == .meta {
+            return try await real.download(range, track: track, kind: kind, priority: priority, deadline: deadline,
+                                           onBytes: onBytes)
+        }
+        lock.withLock { empty += 1 }
+        return total
+    }
+
+    func downloadDirect(_ range: ByteRange, track: BTRTrackHandle,
+                        onBytes: @escaping (Data) async throws -> Void) async throws -> Int64 {
+        lock.withLock { empty += 1 }
+        return total
+    }
+
+    var stats: BTRStats { real.stats }
+    func cancelAll() { real.cancelAll() }
+}
+
 private final class OfflineProgressBox: @unchecked Sendable {
     private let lock = NSLock()
     private var last: OfflineJobProgress?

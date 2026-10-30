@@ -116,6 +116,16 @@ enum ListMapping {
     }
 
     /// First capture group of `pattern` in `text`.
+    /// One query value of an app `uri` (`bilibili://…?a=b&c=d`). iOS 16's URLComponents rejects some of these
+    /// strings (it was relaxed in iOS 17), so a plain match is the fallback.
+    static func uriQueryValue(_ name: String, in uri: String) -> String? {
+        if let items = URLComponents(string: uri)?.queryItems {
+            return items.first { $0.name == name }?.value
+        }
+        return firstCapture("[?&]" + NSRegularExpression.escapedPattern(for: name) + "=([^&#]*)", in: uri)
+            .map { $0.removingPercentEncoding ?? $0 }
+    }
+
     static func firstCapture(_ pattern: String, in text: String) -> String? {
         guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
         let ns = text as NSString

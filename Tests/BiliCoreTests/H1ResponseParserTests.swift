@@ -334,14 +334,8 @@ final class H1ResponseParserTests: XCTestCase {
     }
 
     func testHeaderCaseInsensitivityDuplicatesFoldingAndBareLF() throws {
-        let raw = Data(("HTTP/1.1 206 Partial Content\n" +
-            "CONTENT-LENGTH: 3\n" +
-            "X-Cache: HIT\n" +
-            "x-cache:   MISS  \n" +
-            "X-Folded: first\n" +
-            "\t second\n" +
-            "Content-Range:bytes 0-2/10\n" +
-            "\nabc").utf8)
+        // One literal: Xcode 27's type checker gives up on the equivalent chain of `+`.
+        let raw = Data("HTTP/1.1 206 Partial Content\nCONTENT-LENGTH: 3\nX-Cache: HIT\nx-cache:   MISS  \nX-Folded: first\n\t second\nContent-Range:bytes 0-2/10\n\nabc".utf8)
         let p = try parse(raw, cuts: bytewise(raw))
         XCTAssertEqual(p.head?.headers["content-length"], "3")
         XCTAssertEqual(p.head?["Content-Length"], "3")

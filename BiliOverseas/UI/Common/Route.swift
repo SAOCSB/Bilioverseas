@@ -41,14 +41,20 @@ enum Route: Hashable {
     case messages
     case messageFeed(MessageFeedKind)
     case whisper(WhisperPeer)
+    /// 短视频 (vertical swipe feed), entered from a video or from the feed's own pick.
+    case shortVideos(start: ShortVideoItem?)
 }
 
 extension VideoCard {
-    /// Where tapping this card goes.
+    /// Where tapping this card goes. Portrait videos open the 短视频 feed (「竖屏视频进入短视频」).
     var route: Route? {
         switch kind {
         case .video:
-            return (aid != 0 || !bvid.isEmpty) ? .video(videoRef) : nil
+            guard aid != 0 || !bvid.isEmpty else { return nil }
+            if isPortraitVideo, AppSettings.shared.general.portraitOpensShortVideo {
+                return .shortVideos(start: ShortVideoAPI.item(from: self))
+            }
+            return .video(videoRef)
         case .bangumi:
             return .video(videoRef)
         case .live:
@@ -147,6 +153,8 @@ struct RouteView: View {
             MessageFeedView(kind: kind)
         case .whisper(let peer):
             WhisperChatView(peer: peer)
+        case .shortVideos(let start):
+            ShortVideoFeedView(start: start)
         }
     }
 }

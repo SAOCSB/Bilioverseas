@@ -380,7 +380,8 @@ enum MessageAPI {
         page.maxSeqno = seqnos.max() ?? data["max_seqno"].int64Value
         for e in data["e_infos"].arrayValue {
             let token = e["text"].stringValue
-            let url = ListMapping.image(e["url"].exists ? e["url"] : e["gif_url"])
+            // The doc's field table says `uri`, its examples `url`.
+            let url = ListMapping.image(e["url"].exists ? e["url"] : (e["uri"].exists ? e["uri"] : e["gif_url"]))
             if !token.isEmpty, !url.isEmpty { page.emotes[token] = url }
         }
         return page
@@ -589,7 +590,9 @@ enum MessageAPI {
 
     static func sendTextRequest(_ text: String, sender: Int64, receiver: Int64, deviceId: String, timestamp: Int64,
                                 csrf: String) -> (query: [String: Any], form: [String: Any]) {
-        let content = JSON.object(["content": .string(text)]).rawData().flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        // Like the web page: `/` unescaped.
+        let content = (try? JSONSerialization.data(withJSONObject: ["content": text], options: [.withoutEscapingSlashes]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
         let query: [String: Any] = ["w_sender_uid": sender, "w_receiver_id": receiver, "w_dev_id": deviceId]
         let form: [String: Any] = [
             "msg[sender_uid]": sender,
@@ -599,7 +602,8 @@ enum MessageAPI {
             "msg[msg_status]": 0,
             "msg[content]": content,
             "msg[timestamp]": timestamp,
-            "msg[new_face_version]": 0,
+            // 1 = current emote names (0 makes the server rewrite e.g. [doge] to an old one), as the web page sends.
+            "msg[new_face_version]": 1,
             "msg[dev_id]": deviceId,
             "from_firework": 0,
             "build": 0,

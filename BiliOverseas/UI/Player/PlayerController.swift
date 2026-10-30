@@ -672,10 +672,11 @@ final class PlayerController: ObservableObject {
 
     // MARK: 听视频
 
-    /// Only DASH answers have a separate audio track, served by the proxy (not for local files).
+    /// Only DASH answers have a separate audio track, served by the proxy (not for local files). It must be
+    /// the normal AAC one `audioOnlyTrack` plays: a video with only Dolby / FLAC audio would fail to start.
     var supportsAudioOnly: Bool {
         guard item?.localFileURL == nil, !forceNoProxy, let info = playInfo else { return false }
-        return info.isDash && !PlayerStreamPicker.allAudios(info).isEmpty
+        return info.isDash && audioOnlyTrack(info) != nil
     }
 
     /// 「听视频」: rebuilds the item at the current position with only the audio track (saves the video bandwidth),

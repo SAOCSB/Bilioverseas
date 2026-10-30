@@ -27,13 +27,13 @@ struct LoginView: View {
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 32)
 
-                if model.mode == .tv {
-                    Text("TV 扫码登录可获得 access_key，用于点踩等仅 App 端提供的功能")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
-                }
+                Text(model.mode == .tv
+                     ? "TV 扫码登录同时获得 access_key：首页使用 App 端个性化推荐，并支持点踩、不感兴趣等仅 App 端提供的功能"
+                     : "网页扫码登录：只有网页登录时首页使用按账号个性化的网页端推荐；App 端推荐、点踩等功能需要 TV 扫码")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
 
                 qrCard
 

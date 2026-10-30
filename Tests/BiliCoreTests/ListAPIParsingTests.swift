@@ -707,11 +707,12 @@ final class ListAPIParsingTests: XCTestCase {
         let info = LiveAPI.parsePlayInfo(data)
         XCTAssertTrue(info.isLive)
         XCTAssertEqual(info.roomId, 22334455)
+        // fmp4 (any codec) before ts: the ts lines time out from outside China.
         XCTAssertEqual(info.urls, [
             "https://cn-a.bilivideo.com/live-bvc/live_1_fmp4/index.m3u8?expires=4&sign=a",
             "https://cn-b.bilivideo.com/live-bvc/live_1_fmp4/index.m3u8?expires=4&sign=b",
-            "https://cn-ts.bilivideo.com/live-bvc/live_1/index.m3u8?expires=2",
             "https://cn-hevc.bilivideo.com/live-bvc/live_1_hevc/index.m3u8?expires=3",
+            "https://cn-ts.bilivideo.com/live-bvc/live_1/index.m3u8?expires=2",
         ])
         XCTAssertFalse(info.urls.contains { $0.contains(".flv") })
         XCTAssertEqual(info.format, "fmp4")
@@ -774,6 +775,55 @@ final class ListAPIParsingTests: XCTestCase {
         let dm = LiveAPI.parseDanmuInfo(json(#"{"token":"tok","host_list":[{"host":"a.chat.bilibili.com","port":2243,"wss_port":443,"ws_port":2244}]}"#))
         XCTAssertEqual(dm.token, "tok")
         XCTAssertEqual(dm.hosts.first?.wssURL, "wss://a.chat.bilibili.com:443/sub")
+    }
+
+    func testWebLiveRecommendRealShape() {
+        // getUserRecommend (WBI) as served today: string-typed numbers, has_more 0 / 1.
+        let page = LiveAPI.parseWebRecommend(json(#"""
+        {"list":[
+          {"roomid":"7734200","uid":"50329118","title":"赛事直播","uname":"哔哩哔哩英雄联盟赛事","online":"2233369",
+           "user_cover":"https://i0.hdslb.com/bfs/live/new_room_cover/a.jpg","system_cover":"https://i0.hdslb.com/bfs/live-key-frame/k.jpg",
+           "face":"https://i2.hdslb.com/bfs/face/f.jpg","area_name":"游戏赛事","watched_show":{"num":2233369,"text_large":"223.3万人看过"}},
+          {"roomid":"7734200","title":"重复的房间"},
+          {"roomid":"21622811","uid":"1","title":"另一个","uname":"主播"}
+        ],"has_more":1,"cover_source":0}
+        """#), page: 1)
+        XCTAssertEqual(page.items.map(\.roomId), [7734200, 21622811])
+        XCTAssertTrue(page.hasMore)
+        XCTAssertEqual(page.next, "2")
+        XCTAssertEqual(page.items[0].uname, "哔哩哔哩英雄联盟赛事")
+        XCTAssertEqual(page.items[0].title, "赛事直播")
+        let last = LiveAPI.parseWebRecommend(json(#"{"list":[{"roomid":"1","title":"t"}],"has_more":0}"#), page: 3)
+        XCTAssertFalse(last.hasMore)
+        XCTAssertNil(last.next)
+    }
+
+    func testLiveRecommendCursorKeepsItsList() {
+        XCTAssertNil(LiveAPI.recommendCursor(nil).source)
+        XCTAssertEqual(LiveAPI.recommendCursor(nil).page, 1)
+        XCTAssertEqual(LiveAPI.recommendCursor("a2").source, .app)
+        XCTAssertEqual(LiveAPI.recommendCursor("a2").page, 2)
+        XCTAssertEqual(LiveAPI.recommendCursor("w3").source, .web)
+        XCTAssertEqual(LiveAPI.recommendCursor("w3").page, 3)
+        // A bare page number (an older cursor) is an app-feed page; garbage starts over.
+        XCTAssertEqual(LiveAPI.recommendCursor("2").source, .app)
+        XCTAssertEqual(LiveAPI.recommendCursor("2").page, 2)
+        XCTAssertNil(LiveAPI.recommendCursor("x5").source)
+        XCTAssertEqual(LiveAPI.recommendCursor("x5").page, 1)
+    }
+
+    func testLivePlayURLPutsAV1Last() {
+        let info = LiveAPI.parsePlayInfo(json(#"""
+        {"live_status":1,"playurl_info":{"playurl":{"stream":[{"protocol_name":"http_hls","format":[
+          {"format_name":"fmp4","codec":[
+            {"codec_name":"av1","base_url":"/av1.m3u8?","url_info":[{"host":"https://av1","extra":""}]},
+            {"codec_name":"hevc","base_url":"/hevc.m3u8?","url_info":[{"host":"https://hevc","extra":""}]}]},
+          {"format_name":"ts","codec":[
+            {"codec_name":"avc","base_url":"/ts.m3u8?","url_info":[{"host":"https://ts","extra":""}]}]}
+        ]}]}}}
+        """#))
+        XCTAssertEqual(info.urls, ["https://hevc/hevc.m3u8?", "https://ts/ts.m3u8?", "https://av1/av1.m3u8?"])
+        XCTAssertEqual(info.codec, "hevc")
     }
 
     // MARK: - Bangumi

@@ -16,10 +16,12 @@ enum ShortVideoAPI {
             var personal = query
             personal["access_key"] = auth.token
             do {
-                return parseStory(try await request(personal, key: auth.key), displayId: displayId, aid: aid, bvid: bvid)
-            } catch let error as BiliError where error.apiCode != nil {
-                // The personalised feed failed: the anonymous one still works.
-                if AuthService.isRejectedAppToken(error) { AuthService.shared.dropAppToken(ifToken: auth.token) }
+                let page = parseStory(try await request(personal, key: auth.key), displayId: displayId, aid: aid, bvid: bvid)
+                if !page.items.isEmpty { return page }
+            } catch {
+                // The personalised feed failed or came back empty: the anonymous one still works. A
+                // read-only feed never signs anyone out; only actions that need the login drop a token.
+                if ListMapping.isCancellation(error) { throw error }
             }
         }
         return parseStory(try await request(query, key: ListMapping.appKey), displayId: displayId, aid: aid, bvid: bvid)

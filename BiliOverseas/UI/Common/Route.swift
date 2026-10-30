@@ -41,7 +41,7 @@ enum Route: Hashable {
     case messages
     case messageFeed(MessageFeedKind)
     case whisper(WhisperPeer)
-    /// 短视频 (vertical swipe feed), entered from a video or from the feed's own pick.
+    /// 短视频 (vertical swipe feed), entered by opening a portrait video, as in the official app.
     case shortVideos(start: ShortVideoItem?)
 }
 

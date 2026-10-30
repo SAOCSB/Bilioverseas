@@ -5,6 +5,41 @@ import FoundationNetworking
 @testable import BiliCore
 
 final class AuthParsingTests: XCTestCase {
+    func testSameAccountKeepsItsTVAuthorisationOnAWebLogin() {
+        var tv = StoredSession()
+        tv.accessKey = "tok"
+        tv.accessKeyAppKey = AppKey.tv.key
+        tv.accessKeyMid = 42
+        tv.appRefreshToken = "app-refresh"
+        tv.accessKeyExpiresAt = 2_000_000_000
+        tv.refreshToken = "old-web-refresh"
+        let web: (inout StoredSession) -> Void = { $0.refreshToken = "web-refresh" }
+
+        let same = AuthService.session(after: tv, newMid: 42, update: web)
+        XCTAssertEqual(same.accessKey, "tok")
+        XCTAssertEqual(same.accessKeyAppKey, AppKey.tv.key)
+        XCTAssertEqual(same.accessKeyMid, 42)
+        XCTAssertEqual(same.appRefreshToken, "app-refresh")
+        XCTAssertEqual(same.accessKeyExpiresAt, 2_000_000_000)
+        XCTAssertEqual(same.refreshToken, "web-refresh")
+
+        // 切换账号 by web QR: the jar already holds the new account, but the token's owner is recorded.
+        let other = AuthService.session(after: tv, newMid: 7, update: web)
+        XCTAssertNil(other.accessKey, "another account must not inherit the TV login")
+        XCTAssertNil(other.accessKeyMid)
+        XCTAssertNil(other.appRefreshToken)
+        XCTAssertNil(AuthService.session(after: tv, newMid: nil, update: web).accessKey)
+
+        var legacy = tv
+        legacy.accessKeyMid = nil
+        XCTAssertNil(AuthService.session(after: legacy, newMid: 42, update: web).accessKey,
+                     "a token saved before its owner was recorded is not carried over")
+
+        let newTV = AuthService.session(after: tv, newMid: 42) { $0.accessKey = "new"; $0.accessKeyMid = 42 }
+        XCTAssertEqual(newTV.accessKey, "new", "a login that brings its own access_key wins")
+        XCTAssertNil(newTV.refreshToken)
+    }
+
     /// A throwaway cookie jar. Darwin: the process' shared storage (tests use unique cookie names
     /// and clean up); Linux: an isolated group storage.
     private func scratchCookieStorage() -> HTTPCookieStorage {

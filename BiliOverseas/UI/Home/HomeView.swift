@@ -45,8 +45,10 @@ final class HomeTabModels: ObservableObject {
     @Published private(set) var reselects: [HomeTopTab: FeedReselectSignal] = [:]
 
     private var cancellables: Set<AnyCancellable> = []
-    /// Account 推荐 was loaded for (0 = logged out).
+    /// Account 推荐 was loaded for (0 = logged out), and whether it had a TV login: together they decide
+    /// which feed 推荐 shows (`FeedAPI.prefersAppFeed`).
     private var accountMid: Int64
+    private var accountHasAppToken: Bool
 
     init() {
         recommend = PagedListModel<VideoCard>(filter: FeedFilter.liveFilter(scope: .recommend)) { cursor in
@@ -59,20 +61,36 @@ final class HomeTabModels: ObservableObject {
         bangumi = BangumiHomeModel()
         live = LiveHomeModel()
         accountMid = BiliHTTP.shared.mid ?? 0
+        accountHasAppToken = FeedAPI.appAuth() != nil
         observe()
     }
 
-    /// 推荐: the app feed (「首页使用app端推荐」), falling back to the web feed when it fails or comes
-    /// back empty; otherwise the web feed. Both count pages from 0, so the cursor works for either.
+    /// 推荐: with 「首页使用app端推荐」 the app feed when it can be personalised (TV login) or nobody is
+    /// signed in, else the cookie-personalised web feed, each falling back to the other when it fails or
+    /// comes back empty; without it the web feed. Both count pages from 0, so the cursor works for
+    /// either. Cards without a size get one, so portrait videos open 短视频 from either feed.
     static func fetchRecommend(cursor: String?, useAppFeed: Bool) async throws -> Page<VideoCard> {
-        guard useAppFeed else { return try await FeedAPI.recommend(cursor: cursor) }
+        let appFirst = FeedAPI.prefersAppFeed(useAppFeed: useAppFeed, hasAppToken: FeedAPI.appAuth() != nil,
+                                              isLoggedIn: BiliHTTP.shared.isLoggedIn)
+        var page = try await recommendPage(cursor: cursor, appFirst: appFirst, fallback: useAppFeed)
+        if AppSettings.shared.general.portraitOpensShortVideo {
+            page.items = await FeedAPI.fillVideoSizes(page.items)
+        }
+        return page
+    }
+
+    private static func recommendPage(cursor: String?, appFirst: Bool, fallback: Bool) async throws -> Page<VideoCard> {
+        func fetch(app: Bool) async throws -> Page<VideoCard> {
+            app ? try await FeedAPI.appRecommend(cursor: cursor) : try await FeedAPI.recommend(cursor: cursor)
+        }
+        guard fallback else { return try await fetch(app: appFirst) }
         do {
-            let page = try await FeedAPI.appRecommend(cursor: cursor)
+            let page = try await fetch(app: appFirst)
             if !page.items.isEmpty { return page }
         } catch {
             if ListMapping.isCancellation(error) { throw error }
         }
-        return try await FeedAPI.recommend(cursor: cursor)
+        return try await fetch(app: !appFirst)
     }
 
     func reselect(for tab: HomeTopTab) -> FeedReselectSignal {
@@ -110,6 +128,7 @@ final class HomeTabModels: ObservableObject {
             .sink { [weak self] _ in self?.reapplyFilters() }
             .store(in: &cancellables)
         NotificationCenter.default.publisher(for: AuthService.loginStateDidChange)
+            .merge(with: NotificationCenter.default.publisher(for: AuthService.appTokenDidChange))
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.accountMayHaveChanged() }
             .store(in: &cancellables)
@@ -126,9 +145,11 @@ final class HomeTabModels: ObservableObject {
 
     private func accountMayHaveChanged() {
         let mid = BiliHTTP.shared.mid ?? 0
-        guard mid != accountMid else { return }
-        accountMid = mid
-        reloadRecommend()
+        let hasAppToken = FeedAPI.appAuth() != nil
+        defer { (accountMid, accountHasAppToken) = (mid, hasAppToken) }
+        // Another account, or a TV login just added: start 推荐 over. A TV login lost while scrolling (a
+        // rejected token) leaves the rows alone; the next pages and refreshes already ask the web feed.
+        if mid != accountMid || (hasAppToken && !accountHasAppToken) { reloadRecommend() }
     }
 
     /// Starts 推荐 over without keeping the old rows (another account's or another source's feed).
@@ -200,16 +221,6 @@ struct HomeView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("搜索")
 
-            Button(action: openShortVideos) {
-                Image(systemName: "play.square.stack")
-                    .font(.system(size: 20))
-                    .foregroundStyle(.primary)
-                    .frame(width: 30, height: 30)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("短视频")
-
             HomeMessageBell()
         }
         .padding(.horizontal, 14)
@@ -227,13 +238,6 @@ struct HomeView: View {
                 .foregroundStyle(Color(.systemGray3))
                 .frame(width: 30, height: 30)
         }
-    }
-
-    /// 短视频 from a portrait video in 推荐 (a different one each time): the story feed follows its entry
-    /// video, and an entry-less feed starts out mostly landscape.
-    private func openShortVideos() {
-        let entry = models.recommend.items.filter { $0.kind == .video && $0.isPortraitVideo }.randomElement()
-        router.push(.shortVideos(start: entry.map(ShortVideoAPI.item(from:))))
     }
 
     private func avatarTapped() {

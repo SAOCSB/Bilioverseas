@@ -58,6 +58,9 @@ final class AuthService: ObservableObject, @unchecked Sendable {
             CookiePersistence.restore(stored.cookies, into: http.cookieStorage)
             var t = stored
             t.cookies = []
+            // Saved before the token's owner was recorded: every login used to start a blank session,
+            // so a stored access_key comes from the last (TV) login, whose account the cookies name.
+            if t.accessKey != nil, t.accessKeyMid == nil { t.accessKeyMid = http.mid }
             tokens = t
         }
         let loggedIn = http.isLoggedIn
@@ -111,13 +114,39 @@ final class AuthService: ObservableObject, @unchecked Sendable {
             guard tokens.accessKey == sent else { return false }
             tokens.accessKey = nil
             tokens.accessKeyAppKey = nil
+            tokens.accessKeyMid = nil
             tokens.appRefreshToken = nil
             tokens.accessKeyExpiresAt = nil
             return true
         }
         guard dropped else { return }
         persistNow()
-        DispatchQueue.main.async { self.objectWillChange.send() }
+        DispatchQueue.main.async {
+            self.objectWillChange.send()
+            NotificationCenter.default.post(name: AuthService.appTokenDidChange, object: self)
+        }
+    }
+
+    /// Posted on the main thread when `dropAppToken` forgets the TV-login `access_key` (a new one
+    /// arrives with a login, which posts `loginStateDidChange`). 首页推荐 switches feeds on it.
+    static let appTokenDidChange = Notification.Name("AuthServiceAppTokenDidChange")
+
+    /// The session a login for account `newMid` stores. A TV authorisation recorded for that same
+    /// account (网页扫码 after TV 扫码, say) is kept unless the new login brings its own `access_key`;
+    /// any other account, or a token whose owner was never recorded, starts clean. The owner comes from
+    /// `accessKeyMid`, not the cookie jar: a web QR poll has already put the new account's cookies there.
+    static func session(after previous: StoredSession, newMid: Int64?,
+                        update: (inout StoredSession) -> Void) -> StoredSession {
+        var t = StoredSession()
+        if previous.accessKey != nil, let owner = previous.accessKeyMid, owner == newMid {
+            t.accessKey = previous.accessKey
+            t.accessKeyAppKey = previous.accessKeyAppKey
+            t.accessKeyMid = owner
+            t.accessKeyExpiresAt = previous.accessKeyExpiresAt
+            t.appRefreshToken = previous.appRefreshToken
+        }
+        update(&t)
+        return t
     }
 
     /// Codes app endpoints answer for a bad `access_key`: -101 账号未登录, -2 invalid token, -663 token minted
@@ -201,6 +230,7 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         await applyLogin(cookies: result.cookies, replaceExisting: true) { t in
             t.accessKey = result.accessToken
             t.accessKeyAppKey = AppKey.tv.key
+            t.accessKeyMid = result.mid != 0 ? result.mid : nil
             t.appRefreshToken = result.refreshToken.isEmpty ? nil : result.refreshToken
             t.accessKeyExpiresAt = result.expiresIn > 0 ? Date().timeIntervalSince1970 + Double(result.expiresIn) : nil
         }
@@ -415,10 +445,9 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         if replaceExisting { removeSessionCookies() }
         removeCookies(named: ["bili_ticket", "bili_ticket_expires"])
         for c in cookies { http.cookieStorage.setCookie(AuthService.normalized(c)) }
+        let newMid = http.mid
         locked {
-            var t = StoredSession()
-            update(&t)
-            tokens = t
+            tokens = AuthService.session(after: tokens, newMid: newMid, update: update)
         }
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: AuthService.lastRefreshCheckKey)
         UserDefaults.standard.removeObject(forKey: AuthService.profileCacheKey)

@@ -97,15 +97,15 @@ struct FeedFilterSettingsView: View {
 
             Section {
                 Toggle("首页使用app端推荐", isOn: $settings.general.useAppFeed)
+                LabeledContent("当前推荐来源", value: recommendSource)
                 Toggle("保留首页推荐刷新", isOn: $settings.general.keepRecommendOnRefresh)
                 Toggle("显示上次看到位置提示", isOn: $settings.general.showLastSeenHint)
                     .disabled(!settings.general.keepRecommendOnRefresh)
                 Toggle("竖屏视频进入短视频", isOn: $settings.general.portraitOpensShortVideo)
-                    .disabled(!settings.general.useAppFeed)
             } header: {
                 Text("首页推荐")
             } footer: {
-                Text("app 端推荐提供分区信息和“不感兴趣”选项（提交反馈需使用 TV 扫码登录），获取失败时自动改用网页端推荐。保留刷新：下拉刷新时新内容插入顶部，之前的内容保留在下方。竖屏视频进入短视频：像官方客户端一样，点开 app 端推荐里的竖屏视频时进入上下滑动的短视频模式。")
+                Text("app 端推荐按 TV 扫码登录的账号个性化，并提供分区信息和“不感兴趣”选项；只用网页扫码登录时首页改用按账号个性化的网页端推荐。获取失败时自动改用另一种推荐。保留刷新：下拉刷新时新内容插入顶部，之前的内容保留在下方。竖屏视频进入短视频：像官方客户端一样，在推荐里点开竖屏视频进入上下滑动的短视频模式，往下滑继续刷。")
             }
         }
         .navigationTitle("屏蔽设置")
@@ -118,6 +118,15 @@ struct FeedFilterSettingsView: View {
     }
 
     /// The account blacklist (拉黑) is synced from B 站, not edited here.
+    /// Which feed 推荐 shows now (`HomeTabModels.fetchRecommend`), and what personalises it.
+    private var recommendSource: String {
+        let hasAppToken = FeedAPI.appAuth() != nil
+        let app = FeedAPI.prefersAppFeed(useAppFeed: settings.general.useAppFeed, hasAppToken: hasAppToken,
+                                         isLoggedIn: auth.isLoggedIn)
+        if app { return hasAppToken ? "App 端 · 按 TV 登录个性化" : "App 端 · 未登录" }
+        return auth.isLoggedIn ? "网页端 · 按网页登录个性化" : "网页端 · 未登录"
+    }
+
     private var blacklistSection: some View {
         Section {
             HStack {

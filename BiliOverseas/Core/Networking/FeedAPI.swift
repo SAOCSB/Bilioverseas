@@ -50,6 +50,60 @@ enum FeedAPI {
         return parseRecommend(data, freshIdx: idx)
     }
 
+    /// Whether 推荐 asks the app feed first. It is personalised only by a TV-login `access_key`: with
+    /// just a web (cookie) login it would come back anonymous, so the cookie-personalised web feed goes
+    /// first then. Signed out, both are anonymous and the app feed offers more (sizes, 不感兴趣 reasons).
+    static func prefersAppFeed(useAppFeed: Bool, hasAppToken: Bool, isLoggedIn: Bool) -> Bool {
+        useAppFeed && (hasAppToken || !isLoggedIn)
+    }
+
+    // MARK: - Video sizes
+
+    /// Fills `width` / `height` of the video cards that came without them (web 推荐 carries no sizes),
+    /// so portrait videos open 短视频 from either feed: one `x/article/cards` request per 40 cards.
+    /// Best effort: cards the lookup misses come back unchanged.
+    static func fillVideoSizes(_ cards: [VideoCard]) async -> [VideoCard] {
+        let ids = Array(Set(cards.compactMap(sizeLookupID)))
+        guard !ids.isEmpty else { return cards }
+        var sizes: [String: (width: Int, height: Int)] = [:]
+        for start in stride(from: 0, to: ids.count, by: 40) {
+            let chunk = ids[start..<min(start + 40, ids.count)]
+            guard let data = try? await BiliHTTP.shared.api(BiliHost.api + "/x/article/cards",
+                                                         query: ["ids": chunk.joined(separator: ",")], timeout: 5)
+            else { continue }
+            sizes.merge(videoSizes(data)) { _, new in new }
+        }
+        return applyVideoSizes(sizes, to: cards)
+    }
+
+    /// The id `x/article/cards` takes for a video card that still needs its size; nil otherwise.
+    static func sizeLookupID(_ card: VideoCard) -> String? {
+        guard card.kind == .video, card.width == 0 || card.height == 0 else { return nil }
+        if !card.bvid.isEmpty { return card.bvid }
+        return card.aid != 0 ? "av\(card.aid)" : nil
+    }
+
+    /// `x/article/cards` `data` (keyed by the requested `BV…` / `av…` id) → display sizes, rotation applied.
+    static func videoSizes(_ data: JSON) -> [String: (width: Int, height: Int)] {
+        var out: [String: (width: Int, height: Int)] = [:]
+        for (id, card) in data.objectValue {
+            let w = card[path: "dimension.width"].intValue, h = card[path: "dimension.height"].intValue
+            guard w > 0, h > 0 else { continue }
+            out[id] = card[path: "dimension.rotate"].intValue == 1 ? (h, w) : (w, h)
+        }
+        return out
+    }
+
+    static func applyVideoSizes(_ sizes: [String: (width: Int, height: Int)], to cards: [VideoCard]) -> [VideoCard] {
+        cards.map { card in
+            guard let id = sizeLookupID(card), let size = sizes[id] else { return card }
+            var c = card
+            c.width = size.width
+            c.height = size.height
+            return c
+        }
+    }
+
     /// `data` of the web rcmd endpoint → cards. `next` = freshIdx + 1.
     static func parseRecommend(_ data: JSON, freshIdx: Int = 0) -> Page<VideoCard> {
         var cards: [VideoCard] = []

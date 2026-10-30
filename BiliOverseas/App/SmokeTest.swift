@@ -124,7 +124,7 @@ enum SmokeTest {
         }
         await show("player-fullscreen") { activePlayer?.enterFullscreen() }
         await show("player-inline") { activePlayer?.exitFullscreen() }
-        // Entered from a portrait video, like a tapped 推荐 card or the 首页 button.
+        // Entered from a portrait video, like a tapped 推荐 card.
         let entry = try? await ShortVideoAPI.feed(start: nil, cursor: nil).items.first(where: \.isPortrait)
         record("shortVideo.entry", entry?.bvid ?? "")
         await show("short-videos", seconds: 14) {
@@ -161,7 +161,7 @@ enum SmokeTest {
             router.popToRoot()
             router.push(.popularWeekly)
         }
-        if let room = try? await LiveAPI.recommendRooms().items.first {
+        if let room = try? await LiveAPI.recommendRooms(cursor: nil).items.first {
             await show("live", seconds: 20) {
                 router.popToRoot()
                 router.push(.live(roomId: room.roomId))

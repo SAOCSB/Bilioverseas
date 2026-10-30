@@ -59,6 +59,8 @@ struct StoredSession: Codable, Equatable {
     var accessKey: String?
     /// The appkey that minted `accessKey`; app calls made with it must be signed with the same key.
     var accessKeyAppKey: String?
+    /// The account (`DedeUserID`) `accessKey` belongs to; nil in sessions saved before it was recorded.
+    var accessKeyMid: Int64?
     /// Unix seconds.
     var accessKeyExpiresAt: Double?
     /// App/TV `refresh_token` (not usable for the web refresh flow).

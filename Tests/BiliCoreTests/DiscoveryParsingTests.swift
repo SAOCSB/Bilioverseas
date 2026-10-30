@@ -92,6 +92,46 @@ final class DiscoveryParsingTests: XCTestCase {
         XCTAssertNil(FeedAPI.appFeedback(json(#"[{"type":"dislike","reasons":[{"id":1,"name":"x"}]}]"#), goto: "av", param: 0))
     }
 
+    func testRecommendSourceFollowsTheLogin() {
+        // TV login: the app feed is personalised. Web login only: it would be anonymous, so web first.
+        XCTAssertTrue(FeedAPI.prefersAppFeed(useAppFeed: true, hasAppToken: true, isLoggedIn: true))
+        XCTAssertFalse(FeedAPI.prefersAppFeed(useAppFeed: true, hasAppToken: false, isLoggedIn: true))
+        XCTAssertTrue(FeedAPI.prefersAppFeed(useAppFeed: true, hasAppToken: false, isLoggedIn: false))
+        XCTAssertFalse(FeedAPI.prefersAppFeed(useAppFeed: false, hasAppToken: true, isLoggedIn: true))
+        XCTAssertFalse(FeedAPI.prefersAppFeed(useAppFeed: false, hasAppToken: false, isLoggedIn: false))
+    }
+
+    func testVideoSizesFromArticleCards() {
+        let sizes = FeedAPI.videoSizes(json(#"""
+        {"BV1MdpT6tENe":{"aid":117398434748032,"dimension":{"width":1440,"height":1920,"rotate":0}},
+         "av123":{"aid":123,"dimension":{"width":1920,"height":1080,"rotate":1}},
+         "BV1wHnP6TEi4":{"dimension":{"width":3840,"height":2160,"rotate":0}},
+         "BV1none":{"dimension":{"width":0,"height":0}}}
+        """#))
+        XCTAssertEqual(sizes["BV1MdpT6tENe"]?.width, 1440)
+        XCTAssertEqual(sizes["av123"]?.width, 1080, "rotate 1 swaps width and height")
+        XCTAssertEqual(sizes["av123"]?.height, 1920)
+        XCTAssertNil(sizes["BV1none"])
+
+        func card(_ id: String, aid: Int64 = 0, bvid: String = "", kind: CardKind = .video, width: Int = 0, height: Int = 0) -> VideoCard {
+            var c = VideoCard(id: id)
+            c.aid = aid
+            c.bvid = bvid
+            c.kind = kind
+            c.width = width
+            c.height = height
+            return c
+        }
+        let cards = [card("p", bvid: "BV1MdpT6tENe"), card("a", aid: 123), card("l", bvid: "BV1wHnP6TEi4"),
+                     card("known", bvid: "BV1known", width: 1080, height: 1920), card("live", bvid: "BV1live", kind: .live),
+                     card("missing", bvid: "BV1missing")]
+        XCTAssertEqual(cards.compactMap(FeedAPI.sizeLookupID), ["BV1MdpT6tENe", "av123", "BV1wHnP6TEi4", "BV1missing"])
+        let filled = FeedAPI.applyVideoSizes(sizes, to: cards)
+        XCTAssertEqual(filled.map(\.isPortraitVideo), [true, true, false, true, false, false])
+        XCTAssertEqual(filled[3].width, 1080, "a card that already has a size keeps it")
+        XCTAssertEqual(filled[5].width, 0, "a card the lookup missed stays unknown")
+    }
+
     func testAppFeedbackDropsRepeatedReasons() throws {
         let fb = try XCTUnwrap(FeedAPI.appFeedback(json(#"""
         [{"type":"dislike","reasons":[{"id":4,"name":"UP主:甲"},{"id":3,"name":"频道:乙"},{"id":3,"name":"频道:乙"},

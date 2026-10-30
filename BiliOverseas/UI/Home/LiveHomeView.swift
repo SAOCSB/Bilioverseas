@@ -13,7 +13,7 @@ final class LiveHomeModel: ObservableObject {
         // rules without the recommend-only "hide live cards" switch.
         let allows = FeedFilter.liveFilter(scope: .popular)
         rooms = PagedListModel<LiveRoom>(filter: { allows($0.card) }) { cursor in
-            try await LiveAPI.recommendRooms(page: ListCursor.page(cursor))
+            try await LiveAPI.recommendRooms(cursor: cursor)
         }
     }
 

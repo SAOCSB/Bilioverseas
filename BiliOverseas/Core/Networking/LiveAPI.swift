@@ -17,34 +17,83 @@ enum LiveAPI {
 
     // MARK: - Recommend
 
-    /// 推荐直播. App index feed (only `small_card_v1` cards), falling back to the web
-    /// `getUserRecommend` list. Pages start at 1.
-    static func recommendRooms(page: Int = 1) async throws -> Page<LiveRoom> {
+    /// The list 推荐直播 pages through: the app index feed (personalised by a TV-login `access_key`) or
+    /// the web `getUserRecommend` list (WBI; personalised by the cookies).
+    enum RecommendSource: String {
+        case app = "a", web = "w"
+    }
+
+    /// 推荐直播, paged by `cursor` (nil = page 1). Page 1 asks the app feed first unless only a web login
+    /// exists (the app feed would be anonymous then), and falls back to the other list when it fails or
+    /// comes back empty. Later pages stay on the list page 1 came from, as the two number pages
+    /// differently: cursors are `a2`, `w2` ….
+    static func recommendRooms(cursor: String?) async throws -> Page<LiveRoom> {
+        let (source, page) = recommendCursor(cursor)
+        if let source { return try await recommendRooms(source: source, page: page) }
+        let first: RecommendSource = FeedAPI.appAuth() == nil && BiliHTTP.shared.isLoggedIn ? .web : .app
         do {
-            var query = ListMapping.appParams()
-            query["actionKey"] = "appkey"
-            query["device"] = "android"
-            query["device_name"] = "android"
-            query["device_type"] = 0
-            query["fnval"] = 912
-            query["disable_rcmd"] = 0
-            query["https_url_req"] = 1
-            query["network"] = "wifi"
-            query["page"] = page
-            query["scale"] = 2
-            if page == 1 { query["module_select"] = 1 }
-            if BiliHTTP.shared.isLoggedIn { query["relation_page"] = 1 }
-            let data = try await BiliHTTP.shared.api(
-                BiliHost.live + "/xlive/app-interface/v2/index/feed", query: query,
-                sign: .app(ListMapping.appKey), headers: ListMapping.appHeaders(appKeyHeader: "android"))
-            let p = parseAppFeed(data, page: page)
-            if !p.items.isEmpty || page > 1 { return p }
+            let p = try await recommendRooms(source: first, page: 1)
+            if !p.items.isEmpty { return p }
         } catch {
             if ListMapping.isCancellation(error) { throw error }
         }
+        return try await recommendRooms(source: first == .app ? .web : .app, page: 1)
+    }
+
+    /// A `recommendRooms` cursor → its list and page; nil list for page 1 (choose one). A bare number
+    /// (an older cursor) is an app-feed page.
+    static func recommendCursor(_ cursor: String?) -> (source: RecommendSource?, page: Int) {
+        guard let cursor, !cursor.isEmpty else { return (nil, 1) }
+        if Int(cursor) != nil { return (.app, ListCursor.page(cursor)) }
+        guard let source = RecommendSource(rawValue: String(cursor.prefix(1))) else { return (nil, 1) }
+        return (source, ListCursor.page(String(cursor.dropFirst())))
+    }
+
+    static func recommendRooms(source: RecommendSource, page: Int) async throws -> Page<LiveRoom> {
+        var p = try await source == .app ? appFeedRooms(page: page) : webRecommendRooms(page: page)
+        p.next = p.next.map { source.rawValue + $0 }
+        return p
+    }
+
+    /// App index feed, only `small_card_v1` cards. No `module_select`: with it the feed returns only the
+    /// top modules (关注 / 分区 entrances) and no room list.
+    private static func appFeedRooms(page: Int) async throws -> Page<LiveRoom> {
+        var query = ListMapping.appParams()
+        query["actionKey"] = "appkey"
+        query["device"] = "android"
+        query["device_name"] = "android"
+        query["device_type"] = 0
+        query["fnval"] = 912
+        query["disable_rcmd"] = 0
+        query["https_url_req"] = 1
+        query["network"] = "wifi"
+        query["page"] = page
+        query["scale"] = 2
+        if BiliHTTP.shared.isLoggedIn { query["relation_page"] = 1 }
+        let url = BiliHost.live + "/xlive/app-interface/v2/index/feed"
+        let headers = ListMapping.appHeaders(appKeyHeader: "android")
+        if let auth = FeedAPI.appAuth() {
+            var personal = query
+            personal["access_key"] = auth.token
+            do {
+                let p = parseAppFeed(try await BiliHTTP.shared.api(url, query: personal, sign: .app(auth.key), headers: headers),
+                                     page: page)
+                if !p.items.isEmpty || page > 1 { return p }
+            } catch {
+                // The personalised list failed: the anonymous one still works (a list never signs anyone out).
+                if ListMapping.isCancellation(error) { throw error }
+            }
+        }
+        let data = try await BiliHTTP.shared.api(url, query: query, sign: .app(ListMapping.appKey), headers: headers)
+        return parseAppFeed(data, page: page)
+    }
+
+    /// Web 推荐直播. Unsigned it is always risk-controlled (-352); WBI plus the buvid3 cookie works.
+    private static func webRecommendRooms(page: Int) async throws -> Page<LiveRoom> {
         let data = try await BiliHTTP.shared.api(
             BiliHost.live + "/xlive/web-interface/v1/second/getUserRecommend",
-            query: ["page": page, "page_size": 30, "platform": "web"],
+            query: ["page": page, "page_size": 30, "platform": "web", "web_location": "444.253"],
+            sign: .wbi,
             headers: ["Origin": "https://live.bilibili.com", "Referer": "https://live.bilibili.com/"])
         return parseWebRecommend(data, page: page)
     }
@@ -60,7 +109,7 @@ enum LiveAPI {
         return Page(items: rooms, hasMore: hasMore, next: ListCursor.next(page: page, hasMore: hasMore))
     }
 
-    /// Web `getUserRecommend` `data` (`list[]`) [unverified shape].
+    /// Web `getUserRecommend` `data`: `list[]` rooms (string-typed numbers) and `has_more` 0 / 1.
     static func parseWebRecommend(_ data: JSON, page: Int) -> Page<LiveRoom> {
         var seen = Set<Int64>()
         let rooms = (data["list"].array ?? data.arrayValue).compactMap(roomCard).filter { seen.insert($0.roomId).inserted }
@@ -193,7 +242,10 @@ enum LiveAPI {
                 guard fname == "fmp4" || fname == "ts" else { continue }
                 for codec in format["codec"].arrayValue {
                     let cname = codec["codec_name"].stringValue
-                    let rank = (cname == "avc" ? 0 : 2) + (fname == "fmp4" ? 0 : 1)
+                    // fmp4 before ts: outside China the ts lines often time out (15 s each in the player's
+                    // watchdog). AVC before HEVC; AV1 last, since not every device decodes it.
+                    let codecRank = cname == "avc" ? 0 : cname == "hevc" ? 1 : 2
+                    let rank = codecRank == 2 ? 4 + (fname == "fmp4" ? 0 : 1) : (fname == "fmp4" ? 0 : 2) + codecRank
                     candidates.append(Candidate(format: fname, codec: codec, codecName: cname, rank: rank))
                 }
             }

@@ -114,6 +114,28 @@ enum PGCClipSkipType: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// 「底部细进度条」: the 2 pt progress line drawn while the player controls are hidden.
+enum ThinProgressMode: String, Codable, CaseIterable, Identifiable {
+    case always, hiddenInFullscreen, never
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .always: return "始终显示"
+        case .hiddenInFullscreen: return "全屏时隐藏"
+        case .never: return "不显示"
+        }
+    }
+
+    /// Whether the line is drawn (while the controls are hidden) in this presentation.
+    func shows(fullscreen: Bool) -> Bool {
+        switch self {
+        case .always: return true
+        case .hiddenInFullscreen: return !fullscreen
+        case .never: return false
+        }
+    }
+}
+
 struct PlayerSettings: SettingsGroup {
     /// Preferred `qn`; the highest available quality not above this is chosen.
     var preferredQuality: Int = VideoQuality.q1080.rawValue
@@ -150,6 +172,8 @@ struct PlayerSettings: SettingsGroup {
     var quickFavorite: Bool = false
     /// 「番剧片头/片尾跳过类型」 (default 跳过一次, features.md §11.1).
     var pgcSkipType: PGCClipSkipType = .skipOnce
+    /// 「底部细进度条」 while the controls are hidden; by default not over a fullscreen video.
+    var thinProgressMode: ThinProgressMode = .hiddenInFullscreen
     /// 「左右侧滑动调节亮度/音量」 (features.md §1.6).
     var slideVolumeBrightness: Bool = true
     /// 「中间滑动进入/退出全屏」 (features.md §1.6).

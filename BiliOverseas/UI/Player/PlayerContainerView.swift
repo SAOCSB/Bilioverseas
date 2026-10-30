@@ -330,7 +330,7 @@ struct PlayerChromeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 .transition(.opacity)
         }
-        if !overlay.controlsVisible || overlay.isLocked {
+        if !overlay.controlsVisible || overlay.isLocked, settings.player.thinProgressMode.shows(fullscreen: fullscreen) {
             PlayerThinProgress(timeline: controller.timeline, segments: visibleSegments, clips: visibleClips)
                 .frame(maxHeight: .infinity, alignment: .bottom)
         }

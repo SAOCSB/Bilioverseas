@@ -173,6 +173,12 @@ struct PlayerSettingsView: View {
             Toggle("默认显示字幕", isOn: $settings.player.showSubtitles)
             SettingsToggleRow(title: "横屏自动全屏", subtitle: "横屏视频旋转手机时自动进入全屏",
                               isOn: $settings.player.autoFullscreenOnRotate)
+            Picker("底部细进度条", selection: $settings.player.thinProgressMode) {
+                ForEach(ThinProgressMode.allCases) { mode in
+                    Text(verbatim: mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
             Picker("番剧片头/片尾", selection: $settings.player.pgcSkipType) {
                 ForEach(PGCClipSkipType.allCases) { type in
                     Text(verbatim: type.title).tag(type)
@@ -183,7 +189,8 @@ struct PlayerSettingsView: View {
             Text("播放")
         } footer: {
             Text("播放顺序：" + settings.player.playRepeat.explanation
-                 + "番剧片头/片尾：「跳过一次」每集只自动跳过一次，「手动跳过」显示跳过按钮，「仅显示」只在进度条上标出。")
+                 + "番剧片头/片尾：「跳过一次」每集只自动跳过一次，「手动跳过」显示跳过按钮，「仅显示」只在进度条上标出。"
+                 + "底部细进度条：控制栏隐藏时画面底部的细进度线。")
         }
     }
 

@@ -25,6 +25,18 @@ final class PlayerSettingsTests: XCTestCase {
         XCTAssertEqual(s.pgcSkipType, .skipOnce)
     }
 
+    func testThinProgressLineIsHiddenInFullscreenByDefault() throws {
+        // Saves from before the setting existed get the default too.
+        XCTAssertEqual(try load(["autoNext": true]).thinProgressMode, .hiddenInFullscreen)
+        XCTAssertEqual(try load(nil).thinProgressMode, .hiddenInFullscreen)
+        XCTAssertEqual(try load(["thinProgressMode": "always"]).thinProgressMode, .always)
+
+        XCTAssertTrue(ThinProgressMode.hiddenInFullscreen.shows(fullscreen: false))
+        XCTAssertFalse(ThinProgressMode.hiddenInFullscreen.shows(fullscreen: true))
+        XCTAssertTrue(ThinProgressMode.always.shows(fullscreen: true))
+        XCTAssertFalse(ThinProgressMode.never.shows(fullscreen: false))
+    }
+
     func testOlderSaveWithAutoNextOffMeansPauseAtTheEnd() throws {
         XCTAssertEqual(try load(["autoNext": false]).playRepeat, .pause)
         XCTAssertEqual(try load(["autoNext": true]).playRepeat, .autoPlayRelated)

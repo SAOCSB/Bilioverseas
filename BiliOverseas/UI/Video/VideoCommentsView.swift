@@ -330,6 +330,69 @@ final class VideoCommentsModel: ObservableObject, VideoCommentMutating {
 
 // MARK: - List view
 
+/// Where the comment list is scrolled to (the video page folds its player as the comments scroll).
+struct VideoCommentsScrollMetrics: Equatable {
+    /// Points scrolled past the top; negative while pulled down.
+    var offset: CGFloat
+    var contentHeight: CGFloat
+    var viewportHeight: CGFloat
+    /// The finger is on the list or it is still coasting from a flick (not a layout change).
+    var isUserScrolling: Bool
+}
+
+/// Reports the enclosing `UIScrollView`'s position as it scrolls; goes inside a `ScrollView`'s content. Geometry
+/// preferences from the comment list's content stop reaching it after the first layout (seen on iOS 27), and
+/// `onScrollGeometryChange` needs iOS 18.
+private struct ScrollPositionObserver: UIViewRepresentable {
+    let onChange: (VideoCommentsScrollMetrics) -> Void
+
+    func makeUIView(context: Context) -> ObserverView {
+        let view = ObserverView()
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ view: ObserverView, context: Context) {
+        view.onChange = onChange
+    }
+
+    final class ObserverView: UIView {
+        var onChange: ((VideoCommentsScrollMetrics) -> Void)?
+        private weak var scrollView: UIScrollView?
+        private var observations: [NSKeyValueObservation] = []
+        private var last: VideoCommentsScrollMetrics?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            // The nearest scroll view up the chain is the list's own (the page TabView's comes further up).
+            var ancestor = superview
+            while let view = ancestor, !(view is UIScrollView) { ancestor = view.superview }
+            guard let found = ancestor as? UIScrollView, found !== scrollView else { return }
+            scrollView = found
+            observations = [
+                found.observe(\.contentOffset) { [weak self] scrollView, _ in self?.report(scrollView) },
+                found.observe(\.contentSize) { [weak self] scrollView, _ in self?.report(scrollView) },
+                found.observe(\.bounds) { [weak self] scrollView, _ in self?.report(scrollView) },
+            ]
+            report(found)
+        }
+
+        private func report(_ scrollView: UIScrollView) {
+            let inset = scrollView.adjustedContentInset
+            let metrics = VideoCommentsScrollMetrics(
+                offset: scrollView.contentOffset.y + inset.top,
+                contentHeight: scrollView.contentSize.height,
+                viewportHeight: scrollView.bounds.height - inset.top - inset.bottom,
+                isUserScrolling: scrollView.isDragging || scrollView.isDecelerating)
+            guard metrics != last else { return }
+            last = metrics
+            // Outside UIKit's and SwiftUI's layout passes: the page changes its state in response.
+            DispatchQueue.main.async { [weak self] in self?.onChange?(metrics) }
+        }
+    }
+}
+
 /// The comment list (sort header, pinned items, infinite scroll, sheets). `hostsComposer == false` when an
 /// ancestor presents `VideoCommentComposerHost` for the same model (the video detail page does).
 struct VideoCommentsListView: View {
@@ -337,6 +400,8 @@ struct VideoCommentsListView: View {
     var hostsComposer: Bool = true
     var showsComposerBar: Bool = true
     var onSeek: ((Double) -> Void)? = nil
+    /// Called as the list scrolls (the video page's folding player); nil when nobody needs it.
+    var onScroll: ((VideoCommentsScrollMetrics) -> Void)? = nil
 
     @EnvironmentObject private var router: TabRouter
     @State private var viewer: VideoImageViewerItem?
@@ -368,6 +433,9 @@ struct VideoCommentsListView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.top, 40)
                 }
+            }
+            .background {
+                if let onScroll { ScrollPositionObserver(onChange: onScroll) }
             }
         }
         .pullToRefresh { await model.refresh() }

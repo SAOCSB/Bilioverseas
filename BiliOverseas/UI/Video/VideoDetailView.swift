@@ -20,6 +20,13 @@ struct VideoDetailView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var tab: VideoDetailTab = .intro
+    /// The player folded into the 「继续播放」 bar while the comments scroll, as in the official app: landscape
+    /// videos on the 评论 tab, never while the video plays. A tap on the bar unfolds it and plays.
+    @State private var playerCollapsed = false
+    /// Scroll reports are ignored until then, so the fold animation (which resizes the list) cannot bounce it.
+    @State private var collapseLockUntil = Date.distantPast
+    /// The comments' last offset (a plain object: scrolling never re-renders the page).
+    @State private var commentsScroll = CommentsScrollTracker()
     /// Navigation depth when this page first appeared (to tell "popped" from "covered").
     @State private var stackDepth: Int?
     /// Paused because another page was pushed on top / a full-screen cover appeared.
@@ -32,9 +39,10 @@ struct VideoDetailView: View {
     var body: some View {
         GeometryReader { geo in
             let fullHeight = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
+            let height = playerHeight(width: geo.size.width, fullHeight: fullHeight)
             VStack(spacing: 0) {
-                playerArea(width: geo.size.width, height: playerHeight(width: geo.size.width, fullHeight: fullHeight))
-                pageContent
+                playerArea(width: geo.size.width, height: height)
+                pageContent(foldDistance: height - Self.collapsedBarHeight)
             }
         }
         .background(Color(.systemBackground).ignoresSafeArea())
@@ -61,6 +69,13 @@ struct VideoDetailView: View {
                 player.play()
             }
         }
+        // Playing (from the bar, a comment's timestamp, the lock screen …), another tab, fullscreen, PiP or a
+        // vertical video: show the player again.
+        .onChange(of: player.wantsToPlay) { if $0 { setPlayerCollapsed(false) } }
+        .onChange(of: tab) { if $0 != .comments { setPlayerCollapsed(false) } }
+        .onChange(of: player.isFullscreen) { if $0 { playerCollapsed = false } }
+        .onChange(of: player.isPiPActive) { if $0 { playerCollapsed = false } }
+        .onChange(of: model.isVerticalVideo) { if $0 { playerCollapsed = false } }
         .onDisappear {
             // The player's own fullscreen presentation can hide this page; never touch playback then.
             if player.isFullscreen { return }
@@ -103,20 +118,126 @@ struct VideoDetailView: View {
         colorScheme == .dark ? .black : Color(.systemBackground)
     }
 
+    /// Height of the folded player's 「继续播放」 bar.
+    private static let collapsedBarHeight: CGFloat = 44
+
+    /// Folding only clips the player (it keeps its full size): unmounting `PlayerContainerView` would stop
+    /// playback handling and Picture in Picture, and resizing it would re-lay out the video and danmaku.
     private func playerArea(width: CGFloat, height: CGFloat) -> some View {
-        ZStack(alignment: .topLeading) {
+        let collapsed = playerCollapsed
+        return ZStack(alignment: .topLeading) {
             Color.black
             PlayerContainerView(controller: player)
             if player.item == nil {
                 playerPlaceholder
             }
-            if !player.isFullscreen {
+            if !player.isFullscreen && !collapsed {
                 backButton
             }
         }
         .frame(width: width, height: height)
+        .allowsHitTesting(!collapsed)
+        .accessibilityHidden(collapsed)
+        .frame(width: width, height: collapsed ? Self.collapsedBarHeight : height, alignment: .top)
+        .clipped()
+        .overlay(alignment: .top) {
+            if collapsed {
+                collapsedBar.transition(.opacity)
+            }
+        }
         .background(statusBarBackground.ignoresSafeArea(edges: .top))
         .animation(.easeInOut(duration: 0.25), value: model.isVerticalVideo)
+    }
+
+    /// The folded player: back, 「▶ 继续播放」 (立即播放 before the video started, 重新播放 after it ended) and ⋮
+    /// (the player's 更多设置). A tap anywhere else on it unfolds the player and plays.
+    private var collapsedBar: some View {
+        HStack(spacing: 0) {
+            Button { dismiss() } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 44, height: Self.collapsedBarHeight)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("返回")
+            Spacer(minLength: 8)
+            Button(action: expandAndPlay) {
+                HStack(spacing: 4) {
+                    Image(systemName: player.status == .ended ? "arrow.counterclockwise" : "play.fill")
+                    Text(collapsedPlayTitle)
+                }
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(.biliPink)
+                .frame(height: Self.collapsedBarHeight)
+                .contentShape(Rectangle())
+            }
+            Spacer(minLength: 8)
+            Button { player.overlay.open(.more, fullscreen: false) } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 17, weight: .semibold))
+                    .rotationEffect(.degrees(90))
+                    .frame(width: 44, height: Self.collapsedBarHeight)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("更多设置")
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(.primary)
+        .frame(maxWidth: .infinity)
+        .frame(height: Self.collapsedBarHeight)
+        .background(statusBarBackground)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: expandAndPlay)
+    }
+
+    private var collapsedPlayTitle: String {
+        if player.status == .ended { return "重新播放" }
+        return player.currentTime > 0.5 ? "继续播放" : "立即播放"
+    }
+
+    /// Landscape video on the 评论 tab, not playing, inline: the comments may fold the player away.
+    private var canCollapsePlayer: Bool {
+        guard case .loaded = model.phase else { return false }
+        return tab == .comments && !model.isVerticalVideo && !player.isFullscreen && !player.isPiPActive
+            && !player.wantsToPlay
+    }
+
+    /// Folds the player while the user scrolls the comments down past 40 pt (only when the list stays scrollable
+    /// with the player folded, so a short list never flickers) and unfolds it when they are back at the top. A
+    /// layout change alone never folds it: a video paused to look at a frame stays on screen.
+    private func commentsScrolled(_ metrics: VideoCommentsScrollMetrics, foldDistance: CGFloat) {
+        let scrolledDown = metrics.offset > commentsScroll.lastOffset
+        commentsScroll.lastOffset = metrics.offset
+        commentsScroll.lastMetrics = metrics
+        guard Date() >= collapseLockUntil else { return }
+        if playerCollapsed {
+            if metrics.offset <= 0 { setPlayerCollapsed(false) }
+        } else if canCollapsePlayer, metrics.isUserScrolling, scrolledDown, metrics.offset > 40,
+                  metrics.contentHeight > metrics.viewportHeight + foldDistance + 40 {
+            setPlayerCollapsed(true)
+        }
+    }
+
+    private func setPlayerCollapsed(_ collapsed: Bool) {
+        guard collapsed != playerCollapsed else { return }
+        collapseLockUntil = Date().addingTimeInterval(0.35)
+        if collapsed {
+            player.overlay.hideControls()
+            // A list brought back to the top during the lock reports nothing more once it rests there.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                if playerCollapsed, let metrics = commentsScroll.lastMetrics, metrics.offset <= 0 {
+                    setPlayerCollapsed(false)
+                }
+            }
+        }
+        withAnimation(.easeInOut(duration: 0.25)) { playerCollapsed = collapsed }
+    }
+
+    /// The bar's tap: like the official app, unfold and play (from the start once the video ended). The
+    /// comments keep their position.
+    private func expandAndPlay() {
+        setPlayerCollapsed(false)
+        player.play()
     }
 
     private var playerPlaceholder: some View {
@@ -160,7 +281,7 @@ struct VideoDetailView: View {
     // MARK: Content
 
     @ViewBuilder
-    private var pageContent: some View {
+    private func pageContent(foldDistance: CGFloat) -> some View {
         if case .failed(let message) = model.phase {
             VStack(spacing: 0) {
                 StateMessageView(
@@ -180,7 +301,8 @@ struct VideoDetailView: View {
                     VideoIntroView(model: model, onSeek: { player.seek(to: $0) })
                         .tag(VideoDetailTab.intro)
                     VideoCommentsListView(model: model.comments, hostsComposer: false, showsComposerBar: false,
-                                          onSeek: { player.seek(to: $0) })
+                                          onSeek: { player.seek(to: $0) },
+                                          onScroll: { commentsScrolled($0, foldDistance: foldDistance) })
                         .id(ObjectIdentifier(model.comments))
                         .tag(VideoDetailTab.comments)
                 }
@@ -202,6 +324,14 @@ struct VideoDetailView: View {
         withAnimation(.easeInOut(duration: 0.2)) { tab = .comments }
         model.comments.composerTarget = VideoCommentComposerTarget()
     }
+}
+
+/// Where the comment list was last scrolled to (tells scrolling down from up). A class, so updating it on every
+/// scroll step does not re-render the detail page.
+final class CommentsScrollTracker {
+    var lastOffset: CGFloat = 0
+    /// The latest report, also those that arrived while folding was locked.
+    var lastMetrics: VideoCommentsScrollMetrics?
 }
 
 /// 简介 | 评论 N strip with the 「发个友善的评论吧」 fake input on the right.

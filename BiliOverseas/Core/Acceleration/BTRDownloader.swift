@@ -137,6 +137,8 @@ final class BTRTrack: BTRTrackHandle, @unchecked Sendable {
     private let box: URLBox
     private let lock = NSLock()
     private var knownTotal: Int64?
+    private var answer: CDNFirstAnswer?
+    private var preferredDirectHost: String?
 
     init(kind: MediaKind, urls: [String], routeKey: String, bans: BTRBanList?, mode: @escaping () -> CDNMode,
          customHosts: @escaping () -> [String], clock: MonotonicClock) {
@@ -173,12 +175,58 @@ final class BTRTrack: BTRTrackHandle, @unchecked Sendable {
         return nil
     }
 
-    /// Plain single-connection order: Bilibili's own URLs (allowed ones first); the resolver's list if none is usable.
+    var firstAnswer: CDNFirstAnswer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return answer
+    }
+
+    func noteAnswer(url: String, headers: [String: String], elapsedMs: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        if answer == nil { answer = CDNFirstAnswer(url: url, headers: headers, elapsedMs: elapsedMs) }
+    }
+
+    /// That node then failed to deliver: another's answer counts.
+    func forgetAnswer(from url: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if answer?.url == url { answer = nil }
+    }
+
+    /// Whether plain downloads go to this node because of its answer.
+    func isPreferredDirect(_ url: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return preferredDirectHost == BTRCDN.hostOf(url)
+    }
+
+    func clearPreferredDirect() {
+        lock.lock()
+        defer { lock.unlock() }
+        preferredDirectHost = nil
+    }
+
+    /// By host: a refresh replaces the signed URLs.
+    func preferDirect(_ url: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        preferredDirectHost = BTRCDN.hostOf(url)
+    }
+
+    /// Plain single-connection order: the node that said it has the video, then Bilibili's own URLs (allowed ones
+    /// first); the resolver's list if none is usable.
     func directCandidates() -> [String] {
         let originals = urls.compactMap(BTRCDN.safeMediaURL).btrDeduped()
         guard !originals.isEmpty else { return resolver.urls() }
         let allowed = originals.filter(resolver.allows)
-        return allowed + originals.filter { !allowed.contains($0) }
+        let ordered = allowed + originals.filter { !allowed.contains($0) }
+        lock.lock()
+        let preferred = preferredDirectHost
+        lock.unlock()
+        guard let preferred else { return ordered }
+        let first = allowed.filter { BTRCDN.hostOf($0) == preferred }
+        return first + ordered.filter { !first.contains($0) }
     }
 }
 
@@ -978,6 +1026,7 @@ final class BTRDownloader: BTRDownloading, @unchecked Sendable {
                     let r = try await attempt(
                         url: url, track: track, priority: 150, queueClass: .startup, lane: .normal, deadline: nil,
                         isCopy: false, clip: false, attemptCap: false, autoOn: s.autoOn,
+                        slowFirstByteIsFailure: !track.isPreferredDirect(url),
                         begin: { (ByteRange(start: offset, end: range.end), 0) },
                         sink: { data, _ in
                             do { try await onBytes(data) } catch { throw BTRConsumerError(underlying: error) }
@@ -1312,6 +1361,7 @@ final class BTRDownloader: BTRDownloading, @unchecked Sendable {
     /// and cancels the HTTP stream on every exit.
     private func attempt(url: String, track: BTRTrack, priority: Double, queueClass: BTRQueueClass, lane: BTRSlotLane,
                          deadline: (() -> Double)?, isCopy: Bool, clip: Bool, attemptCap: Bool, autoOn: Bool,
+                         slowFirstByteIsFailure: Bool = true,
                          begin: () -> (part: ByteRange, base: Int),
                          sink: @escaping (Data, Int64) async throws -> Void,
                          onBegin: ((BTRAttemptContext) -> Void)? = nil,
@@ -1344,7 +1394,14 @@ final class BTRDownloader: BTRDownloading, @unchecked Sendable {
             if cancelled && received >= BTRConstants.speedSampleMinBytes {
                 resolver.sample(url, bps: Double(received) * 1000 / max(1, clock.nowMs() - ctx.startedAt))
             }
-            if !cancelled { resolver.failure(url, error: error, receivedBytes: received) }
+            if !cancelled {
+                // A plain track's node said it has the start of the file; a cold middle is no reason to ban it, and
+                // the store moves such a range on by itself when it is due.
+                if slowFirstByteIsFailure || !(error.btrIsTimeout && received == 0) {
+                    resolver.failure(url, error: error, receivedBytes: received)
+                }
+                track.forgetAnswer(from: url)
+            }
             if autoOn, let auto {
                 let status = error.btrStatus
                 if status == 412 || status == 429 {
@@ -1420,6 +1477,7 @@ final class BTRDownloader: BTRDownloading, @unchecked Sendable {
                     if let known = track.establishTotal(crTotal) {
                         throw BTRError.inconsistentTotal(expected: known, got: crTotal)
                     }
+                    track.noteAnswer(url: url.absoluteString, headers: headers, elapsedMs: now - ctx.startedAt)
                     total = crTotal
                     gotHead = true
                 case let .data(chunk):

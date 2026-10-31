@@ -55,7 +55,7 @@ struct AccelerationSettingsView: View {
                         }
                         Button("取消", role: .cancel) {}
                     } message: {
-                        Text("将恢复为大陆 CDN、自动线程数等默认值，自定义服务器列表会被清空。")
+                        Text("将恢复为自动 CDN、自动线程数等默认值，自定义服务器列表会被清空。")
                     }
             } footer: {
                 Text("隐私：本应用不上传任何数据。加速全部在本机完成，视频地址只发给 B 站自己的视频服务器（bilivideo.com、akamaized.net 等），不会发给其他网站，也不会携带你的登录信息。")
@@ -102,7 +102,7 @@ struct AccelerationSettingsView: View {
 
     private var contentSection: some View {
         Section {
-            SettingsToggleRow(title: "竖屏视频禁用加速", subtitle: "短视频和竖屏视频用单条连接直接播放，起播通常更快；经常卡顿时可以关闭",
+            SettingsToggleRow(title: "竖屏视频禁用加速", subtitle: "短视频和竖屏视频始终用单条连接直接播放，不走大陆节点；视频没有海外缓存时可能很慢",
                               isOn: $settings.acceleration.verticalVideosDirect)
             SettingsToggleRow(title: "剧集加速", subtitle: "加速番剧、电影、纪录片等剧集",
                               isOn: $settings.acceleration.accelerateBangumi)
@@ -127,6 +127,8 @@ struct AccelerationSettingsView: View {
 
     static func explanation(for mode: CDNMode) -> String {
         switch mode {
+        case .auto:
+            return "海外节点已缓存的视频直接连它，开播最快；没有缓存的走大陆节点。直连途中变慢时也会自动转到大陆节点。"
         case .mainland:
             return "直接从大陆节点下载。大陆节点存有全部视频，配合多线程弥补距离，海外看冷门视频也流畅。"
         case .overseas:
@@ -176,7 +178,7 @@ struct AccelerationAdviceTable: View {
     }
 
     private static let rows: [Advice] = [
-        Advice(id: 0, situation: "推荐", mode: "大陆 CDN", threads: "自动"),
+        Advice(id: 0, situation: "推荐", mode: "自动", threads: "自动"),
         Advice(id: 1, situation: "手动调优", mode: "大陆 CDN", threads: "8～32"),
         Advice(id: 2, situation: "设备性能弱", mode: "大陆 CDN", threads: "4～8"),
         Advice(id: 3, situation: "连大陆网络太差", mode: "海外 CDN", threads: "自动"),
@@ -208,7 +210,7 @@ struct AccelerationAdviceTable: View {
                     }
                 }
             }
-            Text("以上仅供参考，每个人的网络差别很大，以实际播放是否流畅为准。海外边缘节点通常只缓存热门视频，冷门视频要绕回国内获取，因此即使在海外也推荐大陆 CDN + 自动线程。")
+            Text("以上仅供参考，每个人的网络差别很大，以实际播放是否流畅为准。海外边缘节点通常只缓存热门视频，冷门视频要绕回国内获取，因此推荐「自动」：有海外缓存时直连，没有时走大陆节点。")
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.top, 4)

@@ -2,8 +2,8 @@ import AVFoundation
 import Combine
 import SwiftUI
 
-/// The player of one 短视频 item: the DASH streams through the local proxy, as in the main player, on a single
-/// connection unless 「竖屏视频禁用加速」 is off. They start faster than the html5 MP4, which is rarely watched and often has
+/// The player of one 短视频 item: the DASH streams through the local proxy, as in the main player, by the route the
+/// acceleration settings give. They start faster than the html5 MP4, which is rarely watched and often has
 /// to come from further away the first time. That MP4 remains the fallback, through the proxy and then straight from the
 /// CDN. It feeds the engine session the signals the main player does (see the wiring notes in AccelerationEngine.swift).
 /// The feed keeps the current item and its neighbours prepared so a swipe starts at once; the video loops like the
@@ -333,7 +333,7 @@ final class ShortVideoPlayback: ObservableObject {
     private func install(_ playerItem: AVPlayerItem) {
         playerItem.preferredForwardBufferDuration = forwardBuffer
         if isStandingBy { session?.limitPrefetch(toSeconds: PlayerStreamPreload.prefetchSeconds) }
-        PlaybackTrace.log("feed install \(item.id) accel=\(usesAcceleration) "
+        PlaybackTrace.log("feed install \(item.id) accel=\(usesAcceleration) route=[\(session?.routeDescription ?? "-")] "
             + (session == nil ? "mp4 without the proxy" : session?.isHLS == true ? "dash" : "mp4"))
         itemObservers.removeAll()
         observeItem(playerItem)
@@ -416,7 +416,7 @@ final class ShortVideoPlayback: ObservableObject {
         let ahead = bufferedAhead(at: seconds, in: current)
         timeline.update(time: position, duration: duration, buffered: seconds + ahead)
         guard let session else { return }
-        session.update(time: seconds, rate: Double(player.rate), playing: isPlaying && !seeking,
+        session.update(time: seconds, rate: seeking && player.rate == 0 ? 1 : Double(player.rate), playing: isPlaying && !seeking,
                        bufferedAhead: ahead, cacheFull: ahead >= current.preferredForwardBufferDuration - 1)
     }
 

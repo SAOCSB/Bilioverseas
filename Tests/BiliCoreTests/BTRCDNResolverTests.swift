@@ -309,6 +309,95 @@ final class BTRResolverTests: XCTestCase {
         XCTAssertTrue(resolver.rangeCandidates().contains(fresh), "not backing off for the old address's failure")
     }
 
+    func testFirstAnswerSaysWhetherTheNodeHasTheVideo() {
+        func answer(_ host: String, _ headers: [String: String], ms: Double) -> CDNFirstAnswer {
+            CDNFirstAnswer(url: "https://\(host)/x.m4s?sig=1", headers: headers, elapsedMs: ms)
+        }
+        let cosov = "upos-sz-mirrorcosov.bilivideo.com"
+        let akamai = "upos-hz-mirrorakam.akamaized.net"
+        XCTAssertTrue(answer(cosov, ["eo-cache-status": "HIT"], ms: 600).isCached, "slow, and still its own verdict")
+        XCTAssertFalse(answer(cosov, ["eo-cache-status": "MISS"], ms: 50).isCached)
+        XCTAssertFalse(answer(cosov, ["eo-cache-status": "BYPASS"], ms: 50).isCached)
+        XCTAssertFalse(answer(cosov, [:], ms: 50).isCached, "no word of it")
+
+        XCTAssertTrue(answer(akamai, ["sever-timing": "Miss from child, Miss from parent"], ms: 150).isCached,
+                      "an old fill's header on a quick answer")
+        XCTAssertTrue(answer(akamai, [:], ms: 150).isCached)
+        XCTAssertFalse(answer(akamai, ["sever-timing": "Miss from child, Miss from parent"], ms: 1200).isCached)
+        XCTAssertTrue(answer(akamai, ["sever-timing": "Miss from child, Hit from parent"], ms: 900).isCached)
+        XCTAssertTrue(answer(akamai, ["sever-timing": "Hit from child"], ms: 500).isCached)
+        XCTAssertFalse(answer(akamai, ["sever-timing": "Miss from child, Hit from parent"], ms: 2000).isCached,
+                       "it just took longer than its next range may")
+        XCTAssertFalse(answer(akamai, [:], ms: 500).isCached)
+
+        XCTAssertFalse(answer("upos-sz-mirrorali.bilivideo.com", [:], ms: 50).isCached, "a mainland node")
+
+        let summary = answer(cosov, ["eo-cache-status": "HIT"], ms: 320.4).summary
+        XCTAssertEqual(summary, "\(cosov) HIT 320ms")
+        XCTAssertFalse(summary.contains("sig="), "no URL in the log")
+    }
+
+    func testAutoModeDownloadsFromTheMainlandNodes() {
+        var settings = AccelerationSettings()
+        settings.cdnMode = .auto
+        XCTAssertEqual(BTRConfig(settings: settings, maxAutoThreads: 32).mode, .mainland)
+        settings.cdnMode = .original
+        XCTAssertEqual(BTRConfig(settings: settings, maxAutoThreads: 32).mode, .original)
+    }
+
+    func testPlainDownloadsStartWithThePreferredNodeAcrossARefresh() {
+        let cosov = "https://upos-sz-mirrorcosov.bilivideo.com/upgcxcode/1/2/3-1-30080.m4s?deadline=1&os=cosovbv&oi=1&upsig=a"
+        let akamai = "https://upos-hz-mirrorakam.akamaized.net/upgcxcode/1/2/3-1-30080.m4s?hdnts=exp=1~hmac=a"
+        let track = BTRTrack(kind: .video, urls: [akamai, cosov], routeKey: "r", bans: nil, mode: { .mainland },
+                             customHosts: { [] }, clock: BTRManualClock())
+        XCTAssertEqual(track.directCandidates().first, akamai, "playurl's order")
+        track.preferDirect(cosov)
+        XCTAssertEqual(track.directCandidates().first, cosov)
+        let fresh = cosov.replacingOccurrences(of: "upsig=a", with: "upsig=b")
+        track.updateURLs([akamai, fresh])
+        XCTAssertEqual(track.directCandidates().first, fresh, "the signature changed, the node did not")
+        XCTAssertTrue(track.isPreferredDirect(fresh))
+        XCTAssertFalse(track.isPreferredDirect(akamai))
+        track.clearPreferredDirect()
+        XCTAssertEqual(track.directCandidates().first, akamai, "back to playurl's order")
+        XCTAssertFalse(track.isPreferredDirect(fresh))
+    }
+
+    func testPlainDownloadsDoNotPutABannedPreferredNodeFirst() {
+        let cosov = "https://upos-sz-mirrorcosov.bilivideo.com/upgcxcode/1/2/3-1-30080.m4s?deadline=1&os=cosovbv&oi=1&upsig=a"
+        let akamai = "https://upos-hz-mirrorakam.akamaized.net/upgcxcode/1/2/3-1-30080.m4s?hdnts=exp=1~hmac=a"
+        let bans = BTRBanList(onBan: { _, _, _ in })
+        let track = BTRTrack(kind: .video, urls: [cosov, akamai], routeKey: "r", bans: bans, mode: { .mainland },
+                             customHosts: { [] }, clock: BTRManualClock())
+        track.preferDirect(akamai)
+        XCTAssertEqual(track.directCandidates().first, akamai)
+        for _ in 0..<2 { bans.record(akamai, receivedBytes: 0, error: BTRError.transport("no bytes")) }
+        XCTAssertFalse(bans.allows(akamai))
+        XCTAssertEqual(track.directCandidates(), [cosov, akamai], "allowed first, and the banned one only as a last resort")
+    }
+
+    func testAnAnswerFromANodeThatThenFailedDoesNotCount() {
+        let track = BTRTrack(kind: .video, urls: [], routeKey: "r", bans: nil, mode: { .mainland },
+                             customHosts: { [] }, clock: BTRManualClock())
+        track.noteAnswer(url: "https://a.example/x", headers: ["eo-cache-status": "HIT"], elapsedMs: 10)
+        track.forgetAnswer(from: "https://b.example/x")
+        XCTAssertEqual(track.firstAnswer?.url, "https://a.example/x", "another node failing changes nothing")
+        track.forgetAnswer(from: "https://a.example/x")
+        XCTAssertNil(track.firstAnswer)
+        track.noteAnswer(url: "https://b.example/x", headers: ["eo-cache-status": "MISS"], elapsedMs: 20)
+        XCTAssertEqual(track.firstAnswer?.url, "https://b.example/x")
+    }
+
+    func testOnlyTheFirstAnswerCounts() {
+        let track = BTRTrack(kind: .video, urls: [], routeKey: "r", bans: nil, mode: { .mainland },
+                             customHosts: { [] }, clock: BTRManualClock())
+        XCTAssertNil(track.firstAnswer)
+        track.noteAnswer(url: "https://a.example/x", headers: ["eo-cache-status": "HIT"], elapsedMs: 10)
+        track.noteAnswer(url: "https://b.example/x", headers: ["eo-cache-status": "MISS"], elapsedMs: 20)
+        XCTAssertEqual(track.firstAnswer?.url, "https://a.example/x")
+        XCTAssertEqual(track.firstAnswer?.isCached, true)
+    }
+
     func testRangeCandidatesWarmupAndModeChangesApplyLive() {
         let clock = BTRManualClock()
         var mode = CDNMode.mainland

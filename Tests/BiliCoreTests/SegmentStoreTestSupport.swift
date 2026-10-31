@@ -77,10 +77,18 @@ final class EngineFakeTrack: BTRTrackHandle, @unchecked Sendable {
     private var storedURLs: [String]
     private var storedTotal: Int64?
     private(set) var updateCount = 0
+    var firstAnswer: CDNFirstAnswer?
+    private(set) var preferredDirect: String?
 
     init(kind: MediaKind, urls: [String]) {
         self.kind = kind
         storedURLs = urls
+    }
+
+    func preferDirect(_ url: String) {
+        lock.lock()
+        preferredDirect = url
+        lock.unlock()
     }
 
     var urls: [String] {
@@ -144,6 +152,10 @@ final class EngineFakeDownloader: BTRDownloading, @unchecked Sendable {
     /// Calls matching this wait on `gate` before delivering bytes.
     var gate: EngineAsyncGate?
     var gated: ((Call) -> Bool)?
+    /// What each new track answers.
+    var answers: [MediaKind: CDNFirstAnswer] = [:]
+    /// Plain calls deliver this much, then hold until cancelled.
+    var plainStallAfterBytes: Int?
 
     init(files: [MediaKind: Data]) {
         self.files = files
@@ -176,6 +188,7 @@ final class EngineFakeDownloader: BTRDownloading, @unchecked Sendable {
     func makeTrack(kind: MediaKind, urls: [String], routeKey: String) -> BTRTrackHandle {
         let track = EngineFakeTrack(kind: kind, urls: urls)
         lock.lock()
+        track.firstAnswer = answers[kind]
         tracks.append(track)
         lock.unlock()
         return track
@@ -239,6 +252,9 @@ final class EngineFakeDownloader: BTRDownloading, @unchecked Sendable {
             while offset <= end {
                 try Task.checkCancellation()
                 if fail && delivered >= failAfter { throw EngineFakeError() }
+                if call.direct, let stall = plainStallAfterBytes, delivered >= stall {
+                    while true { try await Task.sleep(nanoseconds: 50_000_000) }
+                }
                 var n = min(Int64(size), end - offset + 1)
                 if fail { n = min(n, Int64(failAfter - delivered)) }
                 let chunk = file.subdata(in: Int(offset)..<Int(offset + n))

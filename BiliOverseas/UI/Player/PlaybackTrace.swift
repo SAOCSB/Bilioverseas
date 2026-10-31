@@ -34,6 +34,7 @@ enum PlaybackTrace {
     static func describe(_ choice: PlayerStreamChoice?) -> String {
         guard let choice else { return "no choice" }
         let host = URL(string: choice.video.baseURL)?.host ?? "?"
-        return "qn=\(choice.video.id) \(choice.video.codecFamily) \(choice.video.width)x\(choice.video.height) host=\(host)"
+        return "qn=\(choice.video.id) \(choice.video.codecFamily) \(choice.video.width)x\(choice.video.height) "
+            + "kbps=\(choice.video.bandwidth / 1000) audio=\(choice.audio?.id ?? 0) host=\(host)"
     }
 }

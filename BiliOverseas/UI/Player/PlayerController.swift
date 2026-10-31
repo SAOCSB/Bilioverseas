@@ -563,6 +563,7 @@ final class PlayerController: ObservableObject {
                 return
             }
         }
+        if let current = item, current != newItem { PlaybackTrace.log("left \(current.bvid)") }
         let swiped = isSwitchingBySwipe
         itemCameFromSwipe = swiped
         if !swiped { waitBegan = ProcessInfo.processInfo.systemUptime }
@@ -898,6 +899,7 @@ final class PlayerController: ObservableObject {
     }
 
     func performStop() {
+        if let current = item { PlaybackTrace.log("left \(current.bvid)") }
         stopAfterPiP = false
         autoExitTask?.cancel()
         if isFullscreen { exitFullscreen() }
@@ -1400,6 +1402,20 @@ final class PlayerController: ObservableObject {
         // 听视频 needs a DASH audio track and the proxy.
         if audioOnly, !info.isDash || forceNoProxy { audioOnly = false }
 
+        /// A re-take whose node now has the video, likely thanks to the item playing: nothing to gain by replacing that
+        /// item, which gets what the new session would have had, the way out when a range falls behind.
+        func keptPlayingItem(over made: PlaybackSession) -> Bool {
+            guard retake, !made.store.isAccelerating else { return false }
+            trace("re-take: the node has it, keeping the item")
+            made.close()
+            session?.store.watchPlainDownloads()
+            isAccelerated = true
+            forceDirect = false
+            fallbackSteps.remove(.direct)
+            keepCurrentItem()
+            return true
+        }
+
         /// A session prepared and is about to be installed.
         func prepared(accelerated: Bool) {
             if retake {
@@ -1427,6 +1443,7 @@ final class PlayerController: ObservableObject {
                             made.close()
                             return
                         }
+                        if keptPlayingItem(over: made) { return }
                         prepared(accelerated: accelerate)
                         install(made, choice: nil, audioOnly: audio, accelerated: accelerate, progressive: false,
                                 position: position, generation: sgen)
@@ -1477,6 +1494,7 @@ final class PlayerController: ObservableObject {
                             made.close()
                             return
                         }
+                        if keptPlayingItem(over: made) { return }
                         prepared(accelerated: accelerate)
                         install(made, choice: picked, accelerated: accelerate, progressive: false,
                                 position: position, generation: sgen)
@@ -1530,6 +1548,7 @@ final class PlayerController: ObservableObject {
                         made.close()
                         return
                     }
+                    if keptPlayingItem(over: made) { return }
                     prepared(accelerated: accelerate)
                     install(made, choice: nil, accelerated: accelerate, progressive: true, position: position,
                             generation: sgen)
@@ -1655,8 +1674,8 @@ final class PlayerController: ObservableObject {
             }
         }
 
-        trace("install accel=\(accelerated) progressive=\(progressive) proxy=\(newSession != nil) "
-            + PlaybackTrace.describe(picked))
+        trace("install accel=\(accelerated) progressive=\(progressive) proxy=\(newSession != nil) start=\(Int(start)) "
+            + "route=[\(newSession?.routeDescription ?? "-")] " + PlaybackTrace.describe(picked))
         let asset = AVURLAsset(url: url, options: assetOptions)
         let newItem = AVPlayerItem(asset: asset)
         newItem.preferredForwardBufferDuration = forwardBufferSeconds
@@ -1896,6 +1915,7 @@ final class PlayerController: ObservableObject {
     private func itemStalled(generation sgen: Int) {
         guard sgen == streamGeneration, startupDone, wantsToPlay, !isSeeking, !stallReported else { return }
         stallReported = true
+        trace("stalled")
         session?.playerDidStall()
     }
 
@@ -1983,6 +2003,7 @@ final class PlayerController: ObservableObject {
                 }
                 if player.reasonForWaitingToPlay == .toMinimizeStalls, wantsToPlay, !isSeeking, !stallReported {
                     stallReported = true
+                    if tracedPlaying { trace("stalled") }
                     session?.playerDidStall()
                 }
             case .paused:
@@ -2059,7 +2080,13 @@ final class PlayerController: ObservableObject {
             }
         }
         if !fallbackSteps.contains(.direct), isAccelerated {
-            noteDirectFallback()
+            if session?.store.hasAcceleratedTrack == true {
+                noteDirectFallback()
+            } else {
+                // Already on one connection: this step is the mainland route instead, at the same quality.
+                fallbackSteps.insert(.direct)
+                session?.noteAllCold()
+            }
             beginFallback()
             rebuild(position: position, reason: .fallback)
             return
@@ -2294,7 +2321,8 @@ final class PlayerController: ObservableObject {
                 }
             } else {
                 let forward = playerItem?.preferredForwardBufferDuration ?? forwardBufferSeconds
-                let r = player.rate > 0 ? Double(player.rate) : effectiveRate
+                // Rate 0 tells a pause from waiting to play. A seek while paused is waited for.
+                let r = !wantsToPlay && !isSeeking ? 0 : player.rate > 0 ? Double(player.rate) : effectiveRate
                 session.update(time: t, rate: r, playing: playing, bufferedAhead: ahead,
                                cacheFull: ahead >= forward - 1)
             }

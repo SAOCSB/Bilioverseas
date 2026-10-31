@@ -7,6 +7,7 @@ final class AccelerationEngineTests: XCTestCase {
         let downloader: EngineFakeDownloader
         let auto: EngineFakeAuto
         let server: EngineFakeServer
+        let clock: EngineTestClock
     }
 
     private final class WallClock: @unchecked Sendable {
@@ -28,13 +29,15 @@ final class AccelerationEngineTests: XCTestCase {
             auto: auto,
             settings: settingsProvider ?? { settings },
             settingsDidChange: settingsDidChange)
-        deps.clock = EngineTestClock()
+        let clock = EngineTestClock()
+        deps.clock = clock
         deps.wallClock = { wall.now }
         deps.cacheBudgetBytes = 64 << 20
         deps.metadataTimeout = 5
         deps.refreshCheckInterval = 3600
         deps.maxSessions = maxSessions
-        return Harness(engine: AccelerationEngine(dependencies: deps), downloader: downloader, auto: auto, server: server)
+        return Harness(engine: AccelerationEngine(dependencies: deps), downloader: downloader, auto: auto, server: server,
+                       clock: clock)
     }
 
     private func get(_ engine: AccelerationEngine, _ path: String, range: String? = nil,
@@ -69,6 +72,118 @@ final class AccelerationEngineTests: XCTestCase {
         let a: DashStream? = audio ?? EngineSyntheticMP4.stream(.audio, file: audioFile, bandwidth: 319_000)
         return PlaybackRequest(routeKey: "BV1xx411c7mD:p1", video: v, audio: a, duration: 5, accelerate: accelerate,
                                allowHDR: true, refreshURLs: refresh)
+    }
+
+    private func answer(_ host: String, _ headers: [String: String], ms: Double = 300) -> CDNFirstAnswer {
+        CDNFirstAnswer(url: "https://\(host)/v.m4s", headers: headers, elapsedMs: ms)
+    }
+
+    func testAutoRoutesEachTrackByItsFirstAnswer() async throws {
+        let h = makeHarness(files: [.video: videoFile.data, .audio: audioFile.data])
+        h.downloader.answers = [.video: answer("upos-sz-mirrorcosov.bilivideo.com", ["eo-cache-status": "HIT"]),
+                                .audio: answer("upos-sz-mirrorcosov.bilivideo.com", ["eo-cache-status": "MISS"])]
+        let session = try await h.engine.prepare(request())
+        XCTAssertTrue(session.store.isPlain(.video))
+        XCTAssertFalse(session.store.isPlain(.audio))
+        let video = try XCTUnwrap(h.downloader.madeTracks.first { $0.kind == .video })
+        let audio = try XCTUnwrap(h.downloader.madeTracks.first { $0.kind == .audio })
+        XCTAssertEqual(video.preferredDirect, "https://upos-sz-mirrorcosov.bilivideo.com/v.m4s")
+        XCTAssertNil(audio.preferredDirect)
+        XCTAssertTrue(session.store.isAccelerating, "the audio track still is")
+        XCTAssertTrue(session.routeDescription.contains("v=plain"), session.routeDescription)
+        XCTAssertTrue(session.routeDescription.contains("a=accel"), session.routeDescription)
+
+        let plain = videoFile.segments[0]
+        _ = try await body(await get(h.engine, "/\(token(session))/v.m4s", range: "bytes=\(plain.start)-\(plain.end)"))
+        XCTAssertTrue(h.downloader.calls.contains { $0.range == plain && $0.direct }, "a cached track stays on one connection")
+        let accelerated = audioFile.segments[0]
+        _ = try await body(await get(h.engine, "/\(token(session))/a.m4s", range: "bytes=\(accelerated.start)-\(accelerated.end)"))
+        XCTAssertTrue(h.downloader.calls.contains { $0.range == accelerated && !$0.direct })
+        session.close()
+    }
+
+    func testAutoStaysAcceleratedWithoutAnAnswerThatSaysCached() async throws {
+        let h = makeHarness(files: [.video: videoFile.data])
+        let session = try await h.engine.prepare(request(audio: .some(nil)))
+        XCTAssertFalse(session.store.isPlain(.video), "no answer at all")
+        session.close()
+
+        let i = makeHarness(files: [.video: videoFile.data])
+        i.downloader.answers = [.video: answer("upos-sz-mirrorali.bilivideo.com", [:], ms: 50)]
+        let second = try await i.engine.prepare(request(audio: .some(nil)))
+        XCTAssertFalse(second.store.isPlain(.video), "a mainland node won the race")
+        second.close()
+    }
+
+    func testATrackFoundColdStaysOffItsNodeForAWhile() async throws {
+        let h = makeHarness(files: [.video: videoFile.data])
+        let cosov = "upos-sz-mirrorcosov.bilivideo.com"
+        h.downloader.answers = [.video: answer(cosov, ["eo-cache-status": "MISS"])]
+        let first = try await h.engine.prepare(request(audio: .some(nil)))
+        XCTAssertFalse(first.store.isPlain(.video))
+        first.close()
+
+        h.downloader.answers = [.video: answer(cosov, ["eo-cache-status": "HIT"])]
+        let again = try await h.engine.prepare(request(audio: .some(nil)))
+        XCTAssertFalse(again.store.isPlain(.video), "that HIT is the init and sidx the last request left there")
+        again.close()
+
+        h.clock.advance(ms: 11 * 60 * 1000)
+        let later = try await h.engine.prepare(request(audio: .some(nil)))
+        XCTAssertTrue(later.store.isPlain(.video), "others may have watched it by now")
+        later.noteEscalated(.video, reason: "test")
+        later.close()
+        let afterEscalation = try await h.engine.prepare(request(audio: .some(nil)))
+        XCTAssertFalse(afterEscalation.store.isPlain(.video), "the middle turned out cold")
+        afterEscalation.close()
+
+        var otherQuality = EngineSyntheticMP4.stream(.video, file: videoFile)
+        otherQuality.baseURL = "https://upos-sz-mirrorcosov.bilivideo.com/upgcxcode/other-quality.m4s"
+        let other = try await h.engine.prepare(request(video: otherQuality, audio: .some(nil)))
+        XCTAssertTrue(other.store.isPlain(.video), "another file of the same video is another answer")
+        other.close()
+    }
+
+    func testKeptPlainSessionReportsItsMove() async throws {
+        let h = makeHarness(files: [.video: videoFile.data])
+        let session = try await h.engine.prepare(request(audio: .some(nil), accelerate: false))
+        XCTAssertEqual(session.routeDescription, "plain")
+        XCTAssertFalse(session.stats.accelerated)
+        session.store.watchPlainDownloads()
+        XCTAssertEqual(session.routeDescription, "plain")
+        session.close()
+    }
+
+    func testOtherModesIgnoreTheAnswer() async throws {
+        for mode in [CDNMode.mainland, .original, .overseas] {
+            var settings = AccelerationSettings()
+            settings.cdnMode = mode
+            let h = makeHarness(files: [.video: videoFile.data], settings: settings)
+            h.downloader.answers = [.video: answer("upos-sz-mirrorcosov.bilivideo.com", ["eo-cache-status": "HIT"])]
+            let session = try await h.engine.prepare(request(audio: .some(nil)))
+            XCTAssertFalse(session.store.isPlain(.video), "\(mode)")
+            session.close()
+        }
+    }
+
+    func testAPlainRequestHasNoRoute() async throws {
+        let h = makeHarness(files: [.video: videoFile.data])
+        h.downloader.answers = [.video: answer("upos-sz-mirrorcosov.bilivideo.com", ["eo-cache-status": "HIT"])]
+        let session = try await h.engine.prepare(request(audio: .some(nil), accelerate: false))
+        XCTAssertEqual(session.routeDescription, "plain")
+        XCTAssertTrue(session.store.isPlain(.video))
+        XCTAssertNil(h.downloader.madeTracks.first?.preferredDirect)
+        session.close()
+    }
+
+    func testEscalationRaisesThreadsLikeANewAcceleratedSession() async throws {
+        let h = makeHarness(files: [.video: videoFile.data])
+        h.downloader.answers = [.video: answer("upos-sz-mirrorcosov.bilivideo.com", ["eo-cache-status": "HIT"])]
+        let session = try await h.engine.prepare(request(audio: .some(nil)))
+        let before = h.auto.count("newSession")
+        session.noteEscalated(.video, reason: "test")
+        XCTAssertEqual(h.auto.count("newSession"), before + 1)
+        session.close()
     }
 
     func testPrepareBuildsHLSAndServesMedia() async throws {
@@ -400,10 +515,10 @@ final class AccelerationEngineTests: XCTestCase {
         let box = Box()
         let name = Notification.Name("AccelerationEngineTests.settings.\(UUID().uuidString)")
         let h = makeHarness(files: [.video: videoFile.data], settingsProvider: { box.value }, settingsDidChange: name)
-        XCTAssertEqual(h.engine.currentSettings.cdnMode, .mainland)
+        XCTAssertEqual(h.engine.currentSettings.cdnMode, .auto)
         box.value.cdnMode = .overseas
         box.value.enabled = false
-        XCTAssertEqual(h.engine.currentSettings.cdnMode, .mainland, "snapshot until told")
+        XCTAssertEqual(h.engine.currentSettings.cdnMode, .auto, "snapshot until told")
         NotificationCenter.default.post(name: name, object: nil)
         XCTAssertEqual(h.engine.currentSettings.cdnMode, .overseas)
         XCTAssertFalse(h.engine.currentSettings.enabled)

@@ -18,14 +18,17 @@ final class PlayerSettingsTests: XCTestCase {
         return SettingsStore.load(key: "settings.player")
     }
 
-    func testVerticalVideosSkipAccelerationByDefault() throws {
+    func testVerticalVideosFollowTheCacheRouteByDefault() throws {
         var s = AccelerationSettings()
-        XCTAssertTrue(s.verticalVideosDirect)
-        XCTAssertFalse(s.accelerates(pgc: false, vertical: true))
+        XCTAssertEqual(s.cdnMode, .auto)
+        XCTAssertFalse(s.verticalVideosDirect)
+        XCTAssertTrue(s.accelerates(pgc: false, vertical: true))
         XCTAssertTrue(s.accelerates(pgc: false, vertical: false))
         XCTAssertTrue(s.accelerates(pgc: true, vertical: false))
-        XCTAssertFalse(s.accelerates(pgc: true, vertical: true))
 
+        s.verticalVideosDirect = true
+        XCTAssertFalse(s.accelerates(pgc: false, vertical: true))
+        XCTAssertFalse(s.accelerates(pgc: true, vertical: true))
         s.verticalVideosDirect = false
         XCTAssertTrue(s.accelerates(pgc: false, vertical: true))
         s.accelerateBangumi = false
@@ -49,7 +52,56 @@ final class PlayerSettingsTests: XCTestCase {
                   forKey: "settings.acceleration")
         let s: AccelerationSettings = SettingsStore.load(key: "settings.acceleration")
         XCTAssertEqual(s.manualConcurrency, 8)
-        XCTAssertTrue(s.verticalVideosDirect)
+        XCTAssertFalse(s.verticalVideosDirect)
+        XCTAssertEqual(s.cdnMode, .auto)
+    }
+
+    func testCacheRouteIsAdoptedOnceOverOldDefaults() throws {
+        let suite = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        suite.removePersistentDomain(forName: suiteName)
+        let old = SettingsStore.defaults
+        SettingsStore.defaults = suite
+        defer {
+            SettingsStore.defaults = old
+            suite.removePersistentDomain(forName: suiteName)
+        }
+        suite.set(try JSONSerialization.data(withJSONObject: ["cdnMode": "mainland", "verticalVideosDirect": true,
+                                                              "manualConcurrency": 8]),
+                  forKey: "settings.acceleration")
+        let first = AppSettings()
+        XCTAssertEqual(first.acceleration.cdnMode, .auto)
+        XCTAssertFalse(first.acceleration.verticalVideosDirect)
+        XCTAssertEqual(first.acceleration.manualConcurrency, 8, "what was chosen stays")
+
+        // Choosing the old values afterwards sticks.
+        first.acceleration.cdnMode = .mainland
+        first.acceleration.verticalVideosDirect = true
+        let second = AppSettings()
+        XCTAssertEqual(second.acceleration.cdnMode, .mainland)
+        XCTAssertTrue(second.acceleration.verticalVideosDirect)
+    }
+
+    func testAdoptingTheCacheRouteKeepsAnotherChosenMode() {
+        var s = AccelerationSettings()
+        s.verticalVideosDirect = true
+        s.cdnMode = .original
+        XCTAssertEqual(s.adoptingCacheRoute().cdnMode, .original)
+        XCTAssertTrue(s.adoptingCacheRoute().verticalVideosDirect, "no cache route to replace it there")
+        s.cdnMode = .custom
+        XCTAssertEqual(s.adoptingCacheRoute().cdnMode, .custom)
+    }
+
+    func testFreshInstallIsNotRewrittenByTheAdoption() throws {
+        let suite = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        suite.removePersistentDomain(forName: suiteName)
+        let old = SettingsStore.defaults
+        SettingsStore.defaults = suite
+        defer {
+            SettingsStore.defaults = old
+            suite.removePersistentDomain(forName: suiteName)
+        }
+        _ = AppSettings()
+        XCTAssertNil(suite.data(forKey: "settings.acceleration"))
     }
 
     func testFreshInstallKeepsAutoPlayingNext() throws {

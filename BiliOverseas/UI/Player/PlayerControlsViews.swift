@@ -798,6 +798,7 @@ struct PlayerStatsOverlay: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             line(stats.accelerated ? "BTR 加速中" : "直连（未加速）")
+            if !stats.route.isEmpty { line(stats.route) }
             if !stream.isEmpty { line(stream) }
             line("线程 \(stats.threads) · 连接 \(stats.activeConnections) · \(Fmt.speed(stats.bytesPerSecond))")
             line("已缓存 \(String(format: "%.1f", stats.cachedAheadSeconds))s · 共 \(Fmt.bytes(Double(stats.totalBytes)))")

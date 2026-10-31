@@ -25,6 +25,349 @@ final class SegmentStoreTests: XCTestCase {
         d.calls.filter { $0.range == range }
     }
 
+    private func makeWatchedStore(_ file: EngineSyntheticMP4.File, downloader: EngineFakeDownloader, clock: EngineTestClock,
+                                  allowed: @escaping () -> Bool = { true },
+                                  onEscalate: @escaping (MediaKind, String) -> Void = { _, _ in },
+                                  routeActive: @escaping () -> Bool = { true }) throws -> SegmentStore {
+        let indexData = file.data.subdata(in: Int(file.indexRange.start)..<Int(file.indexRange.end + 1))
+        let sidx = try SidxParser.parse(indexData, absoluteStart: file.indexRange.start)
+        let meta = ByteRange(start: 0, end: file.indexRange.end)
+        let handle = downloader.makeTrack(kind: .video, urls: ["https://upos-sz-mirrorcosov.bilivideo.com/v.m4s"],
+                                          routeKey: "BVtest:p1")
+        let track = SegmentStoreTrack(kind: .video, handle: handle, total: Int64(file.data.count),
+                                      pinned: [PinnedBytes(range: meta, data: file.data.subdata(in: 0..<Int(meta.end + 1)))],
+                                      segments: sidx.segments, accelerate: false, canEscalate: true)
+        return SegmentStore(tracks: [track], downloader: downloader, clock: clock, budgetBytes: 1 << 30,
+                            forwardSeconds: { 1 }, accelerationAllowed: allowed, onEscalate: onEscalate,
+                            cacheRouteActive: routeActive)
+    }
+
+    func testPlainDownloadWithNoByteMovesToTheAcceleratedPath() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        downloader.gated = { $0.direct }
+        final class Notes: @unchecked Sendable { var kinds: [MediaKind] = [] }
+        let notes = Notes()
+        let store = try makeWatchedStore(file, downloader: downloader, clock: clock, onEscalate: { kind, _ in notes.kinds.append(kind) })
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let task = Task { try await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == seg && $0.direct } }
+        XCTAssertTrue(plain, "starts on one connection")
+        XCTAssertTrue(store.isPlain(.video))
+        XCTAssertFalse(store.isAccelerating)
+
+        clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
+        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == seg && !$0.direct } }
+        XCTAssertTrue(moved, "\(downloader.calls)")
+        let bytes = try await task.value
+        XCTAssertEqual(bytes, slice(file, seg))
+        XCTAssertFalse(store.isPlain(.video))
+        XCTAssertTrue(store.isAccelerating)
+        XCTAssertEqual(notes.kinds, [.video])
+
+        let next = file.segments[1]
+        let nextReader = try XCTUnwrap(store.reader(kind: .video, range: next))
+        _ = try await engineDrain(nextReader)
+        XCTAssertTrue(downloader.calls.contains { $0.range == next && !$0.direct }, "the track stays there")
+        XCTAssertFalse(downloader.calls.contains { $0.range == next && $0.direct })
+        XCTAssertEqual(notes.kinds, [.video], "told once")
+        store.close()
+    }
+
+    func testPlainDownloadThatStopsContinuesFromTheVerifiedBytes() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        downloader.chunkSize = 16 * 1024
+        downloader.plainStallAfterBytes = 32 * 1024
+        let clock = EngineTestClock()
+        let store = try makeWatchedStore(file, downloader: downloader, clock: clock)
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let task = Task { try await engineDrain(reader) }
+        let rest = ByteRange(start: seg.start + 32 * 1024, end: seg.end)
+        for _ in 0..<24 where !downloader.calls.contains(where: { $0.range == rest && !$0.direct }) {
+            clock.advance(ms: 300)
+            try await Task.sleep(nanoseconds: 260_000_000)
+        }
+        XCTAssertTrue(downloader.calls.contains { $0.range == rest && !$0.direct }, "\(downloader.calls)")
+        let bytes = try await task.value
+        XCTAssertEqual(bytes, slice(file, seg), "no byte twice, none lost")
+        store.close()
+    }
+
+    func testFailedPlainDownloadMovesToo() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        downloader.directFailures = 1
+        downloader.failAfterBytes = 16 * 1024
+        let store = try makeWatchedStore(file, downloader: downloader, clock: EngineTestClock())
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let bytes = try await engineDrain(reader)
+        XCTAssertEqual(bytes, slice(file, seg))
+        XCTAssertFalse(store.isPlain(.video))
+        store.close()
+    }
+
+    func testPlainDownloadKeepingUpIsLeftAlone() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let store = try makeWatchedStore(file, downloader: downloader, clock: EngineTestClock())
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let bytes = try await engineDrain(reader)
+        XCTAssertEqual(bytes, slice(file, seg))
+        XCTAssertTrue(store.isPlain(.video))
+        XCTAssertFalse(downloader.calls.contains { !$0.direct })
+        store.close()
+    }
+
+    func testRangeNotDueYetMayWaitForItsFirstByte() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [60_000, 60_000, 60_000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        downloader.gated = { $0.direct }
+        let store = try makeWatchedStore(file, downloader: downloader, clock: clock)
+        let far = file.segments[2]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: far))
+        let task = Task { try await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == far && $0.direct } }
+        XCTAssertTrue(plain)
+        clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertFalse(downloader.calls.contains { !$0.direct }, "due in two minutes")
+        gate.open()
+        _ = try await task.value
+        XCTAssertTrue(store.isPlain(.video))
+        store.close()
+    }
+
+    func testWhileWaitingToStartTheNextSegmentsAreDueToo() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [4000, 4000, 4000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        downloader.gated = { $0.direct }
+        let store = try makeWatchedStore(file, downloader: downloader, clock: clock)
+        store.updatePlayback(time: 0, rate: 1, playing: false, bufferedAhead: 0, cacheFull: false)
+        let second = file.segments[1]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: second))
+        let task = Task { try await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == second && $0.direct } }
+        XCTAssertTrue(plain)
+        clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
+        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == second && !$0.direct } }
+        XCTAssertTrue(moved, "4 s ahead of a playhead that is not moving: the player is waiting for it")
+        _ = try await task.value
+        store.close()
+    }
+
+    func testWhilePlayingANearbySegmentHasUntilItIsDue() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000, 60_000], durations: [4000, 4000, 4000, 4000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        downloader.gated = { $0.direct }
+        let store = try makeWatchedStore(file, downloader: downloader, clock: clock)
+        store.updatePlayback(time: 0, rate: 1, playing: true, bufferedAhead: 8, cacheFull: false)
+        let later = file.segments[2]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: later))
+        let task = Task { try await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == later && $0.direct } }
+        XCTAssertTrue(plain)
+        clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertFalse(downloader.calls.contains { !$0.direct }, "due in 7 s")
+        gate.open()
+        _ = try await task.value
+        store.close()
+    }
+
+    func testAPreloadWaitsUntilSomeoneNeedsIt() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        downloader.gated = { $0.direct }
+        let store = try makeWatchedStore(file, downloader: downloader, clock: clock)
+        store.setForwardLimit(8)
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let task = Task { try await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == seg && $0.direct } }
+        XCTAssertTrue(plain)
+        clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertFalse(downloader.calls.contains { !$0.direct }, "nobody is waiting")
+        store.setForwardLimit(nil)
+        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == seg && !$0.direct } }
+        XCTAssertTrue(moved, "taken over: it is late now")
+        _ = try await task.value
+        store.close()
+    }
+
+    func testAPausedPlayerIsNotWaiting() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        downloader.gated = { $0.direct }
+        let store = try makeWatchedStore(file, downloader: downloader, clock: clock)
+        store.updatePlayback(time: 0, rate: 0, playing: false, bufferedAhead: 0, cacheFull: false)
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let task = Task { try await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == seg && $0.direct } }
+        XCTAssertTrue(plain)
+        clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertFalse(downloader.calls.contains { !$0.direct }, "paused")
+        store.updatePlayback(time: 0, rate: 1, playing: false, bufferedAhead: 0, cacheFull: false)
+        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == seg && !$0.direct } }
+        XCTAssertTrue(moved, "play pressed: it is late now")
+        _ = try await task.value
+        store.close()
+    }
+
+    func testASeekWhilePausedIsWaitedFor() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [4000, 4000, 4000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        downloader.gated = { $0.direct }
+        let store = try makeWatchedStore(file, downloader: downloader, clock: clock)
+        store.updatePlayback(time: 0, rate: 0, playing: false, bufferedAhead: 0, cacheFull: false)
+        store.seek(to: 8, outsideBuffer: true)
+        let target = file.segments[2]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: target))
+        let task = Task { try await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == target && $0.direct } }
+        XCTAssertTrue(plain)
+        clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
+        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == target && !$0.direct } }
+        XCTAssertTrue(moved, "paused, but the picture at the new position is waiting for this range")
+        _ = try await task.value
+        store.close()
+    }
+
+    func testAKeptPlainItemCanGetItsWayOut() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let store = try makeStore(file, downloader: downloader, accelerate: false, clock: clock)
+        XCTAssertFalse(store.hasAcceleratedTrack)
+        store.watchPlainDownloads()
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        downloader.gated = { $0.direct }
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let task = Task { try await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == seg && $0.direct } }
+        XCTAssertTrue(plain)
+        clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
+        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == seg && !$0.direct } }
+        XCTAssertTrue(moved)
+        _ = try await task.value
+        XCTAssertTrue(store.hasAcceleratedTrack)
+        store.close()
+    }
+
+    func testASuspendedAppIsNotASlowConnection() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        downloader.gated = { $0.direct }
+        let store = try makeWatchedStore(file, downloader: downloader, clock: clock)
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let task = Task { try await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == seg && $0.direct } }
+        XCTAssertTrue(plain)
+        clock.advance(ms: 60_000)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertFalse(downloader.calls.contains { !$0.direct }, "a minute away, and the watcher starts over")
+        gate.open()
+        _ = try await task.value
+        XCTAssertTrue(store.isPlain(.video))
+        store.close()
+    }
+
+    func testAModeChosenDuringPlaybackAppliesToNewRanges() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        final class Flag: @unchecked Sendable { var active = true }
+        let flag = Flag()
+        let store = try makeWatchedStore(file, downloader: downloader, clock: EngineTestClock(), routeActive: { flag.active })
+        let first = try XCTUnwrap(store.reader(kind: .video, range: file.segments[0]))
+        _ = try await engineDrain(first)
+        XCTAssertTrue(downloader.calls.contains { $0.range == file.segments[0] && $0.direct })
+        XCTAssertTrue(store.isPlain(.video))
+        flag.active = false
+        XCTAssertFalse(store.isPlain(.video))
+        XCTAssertTrue(store.isAccelerating)
+        let second = try XCTUnwrap(store.reader(kind: .video, range: file.segments[1]))
+        _ = try await engineDrain(second)
+        XCTAssertTrue(downloader.calls.contains { $0.range == file.segments[1] && !$0.direct })
+        store.close()
+    }
+
+    func testAccelerationSwitchedOffKeepsTheTrackPlain() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let clock = EngineTestClock()
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        downloader.gated = { $0.direct }
+        let store = try makeWatchedStore(file, downloader: downloader, clock: clock, allowed: { false })
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let task = Task { try await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == seg && $0.direct } }
+        XCTAssertTrue(plain)
+        clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertFalse(downloader.calls.contains { !$0.direct })
+        gate.open()
+        _ = try await task.value
+        store.close()
+    }
+
+    func testAFailedPlainDownloadStaysPlainOnceAccelerationIsOff() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        downloader.directFailures = 1
+        downloader.failAfterBytes = 16 * 1024
+        final class Flag: @unchecked Sendable { var allowed = true }
+        let flag = Flag()
+        let store = try makeWatchedStore(file, downloader: downloader, clock: EngineTestClock(), allowed: { flag.allowed })
+        let gate = EngineAsyncGate()
+        downloader.gate = gate
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let task = Task { try? await engineDrain(reader) }
+        let plain = await engineEventually { downloader.calls.contains { $0.range == seg && $0.direct } }
+        XCTAssertTrue(plain)
+        flag.allowed = false
+        gate.open()
+        _ = await task.value
+        XCTAssertFalse(downloader.calls.contains { !$0.direct }, "no accelerated path after the switch went off")
+        store.close()
+    }
+
     func testJoinInFlightNeverDownloadsTwice() async throws {
         let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [2000, 2000, 2000])
         let downloader = EngineFakeDownloader(files: [.video: file.data])

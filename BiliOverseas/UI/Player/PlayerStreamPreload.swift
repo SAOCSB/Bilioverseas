@@ -81,7 +81,8 @@ final class PlayerStreamPreload {
             session = made
             choice = picked
             accelerated = accelerate
-            PlaybackTrace.log("preload \(item.bvid) ready \(elapsed())ms accel=\(accelerate) \(PlaybackTrace.describe(picked))")
+            PlaybackTrace.log("preload \(item.bvid) ready \(elapsed())ms accel=\(accelerate) "
+                + "route=[\(made.routeDescription)] \(PlaybackTrace.describe(picked))")
         } catch {
             if !closed { PlaybackTrace.log("preload \(item.bvid) session failed \(PlaybackTrace.describe(error))") }
         }

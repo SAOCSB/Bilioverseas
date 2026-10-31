@@ -215,6 +215,7 @@ struct SettingsView: View {
         guard a.enabled else { return "已关闭" }
         let mode: String
         switch a.cdnMode {
+        case .auto: mode = "自动"
         case .mainland: mode = "大陆 CDN"
         case .overseas: mode = "海外 CDN"
         case .custom: mode = a.customHosts.isEmpty ? "自定义（未选服务器）" : "自定义 \(a.customHosts.count) 个服务器"

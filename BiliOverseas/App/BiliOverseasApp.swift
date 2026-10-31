@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         // iPads have the thermal/battery headroom for BTR's full ladder; iPhones stop at 32 threads.
         AccelerationEngine.maxAutoThreads = UIDevice.current.userInterfaceIdiom == .pad ? 64 : 32
+        PlaybackSession.routeLog = { PlaybackTrace.log($0) }
         // Start the local BTR proxy early so the first video does not wait for the listener.
         AccelerationEngine.shared.startIfNeeded()
         // Downloads interrupted by the last exit resume right away instead of when 离线缓存 is first opened.

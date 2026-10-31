@@ -32,6 +32,8 @@ struct SegmentStoreTrack {
     var segments: [SidxSegment]
     /// false → every download is a single-connection `downloadDirect`.
     var accelerate: Bool
+    /// With `accelerate` false: a download that falls behind moves to the accelerated path, and the track with it.
+    var canEscalate = false
 }
 
 struct SegmentKey: Hashable {
@@ -233,6 +235,26 @@ final class SegmentStore {
     /// A track suspended after `failureLimit` accelerated failures sends one probe job through the accelerated
     /// path again this long after the suspension (or the last failed probe): BTR §11.6 re-take.
     static let retakeAfterMs: Double = 30_000
+    /// A watched plain download (`SegmentStoreTrack.canEscalate`) may go this long without a byte. In the UK 90% of
+    /// media ranges had their first byte within 0.4 s on cosov and 1.1 s on Akamai.
+    static let plainFirstByteMs: Double = 1500
+    /// Its speed is judged over this much of the latest transfer (up to the longest for a range due much later), and
+    /// not before this long after the first byte.
+    static let plainSpeedWindowMs: Double = 2000
+    static let plainLongestWindowMs: Double = 15_000
+    static let plainSettleMs: Double = 1000
+    /// It may finish this late, or as late as the accelerated path would, or as its segment is due, whichever is latest.
+    static let plainLatestEtaMs: Double = 2500
+    /// Bytes arriving this many times faster than the segment plays are enough, whatever the rest of the rule says.
+    static let plainEnoughSpeed: Double = 1.2
+    /// The accelerated path from a standing start, measured from the UK: 1 MB took 1.6 s, 5.4 MB 3.6 s, 14.5 MB 5.6 s.
+    static let acceleratedSetupMs: Double = 1500
+    static let acceleratedBytesPerMs: Double = 3000
+    /// A range handed over with less time than this races for its first bytes; a later one has no need to.
+    static let plainHandoverRaceMs: Double = 3000
+    /// While playback waits, media this close to the playhead is what it waits for.
+    static let plainStartupSeconds: Double = 10
+    static let plainWatchIntervalNs: UInt64 = 250_000_000
     static let warmThresholdBytes: Int64 = 64 * 1024
     static let readerStartupPriority = 120
     static let readerPriority = 70
@@ -262,8 +284,15 @@ final class SegmentStore {
         /// When acceleration was suspended (≥ `failureLimit` failures) or last probed while suspended.
         var suspendedAtMs: Double?
         var failedAtMs: [Int: Double] = [:]
-        init(_ spec: SegmentStoreTrack) { self.spec = spec }
+        var canEscalate: Bool
+        /// One connection fell behind (`canEscalate`).
+        var escalated = false
+        init(_ spec: SegmentStoreTrack) {
+            self.spec = spec
+            canEscalate = spec.canEscalate
+        }
         var segments: [SidxSegment] { spec.segments }
+        var accelerates: Bool { spec.accelerate || escalated }
     }
 
     private struct Inflight {
@@ -280,7 +309,10 @@ final class SegmentStore {
         let priority: Int
         let rangeKind: BTRRangeKind
         let accelerated: Bool
+        /// A plain download that moves to the accelerated path when it falls behind.
+        let watched: Bool
         let segmentStart: Double?
+        let segmentSeconds: Double?
         let total: Int64
     }
 
@@ -304,6 +336,8 @@ final class SegmentStore {
     private let forwardSeconds: () -> Double
     private let accelerationAllowed: () -> Bool
     private let onHardFailure: (() -> Void)?
+    private let onEscalate: (MediaKind, String) -> Void
+    private let cacheRouteActive: () -> Bool
     private let tracks: [MediaKind: TrackState]
     private let order: [MediaKind]
     private let lock = NSLock()
@@ -319,7 +353,8 @@ final class SegmentStore {
     init(tracks specs: [SegmentStoreTrack], downloader: BTRDownloading, clock: MonotonicClock = SystemClock.shared,
          budgetBytes: Int64 = SegmentStore.defaultBudgetBytes(), videoHeight: Int = 0,
          forwardSeconds: @escaping () -> Double, accelerationAllowed: @escaping () -> Bool = { true },
-         onHardFailure: (() -> Void)? = nil) {
+         onHardFailure: (() -> Void)? = nil, onEscalate: @escaping (MediaKind, String) -> Void = { _, _ in },
+         cacheRouteActive: @escaping () -> Bool = { true }) {
         var table: [MediaKind: TrackState] = [:]
         var order: [MediaKind] = []
         for spec in specs where table[spec.kind] == nil {
@@ -334,6 +369,8 @@ final class SegmentStore {
         self.forwardSeconds = forwardSeconds
         self.accelerationAllowed = accelerationAllowed
         self.onHardFailure = onHardFailure
+        self.onEscalate = onEscalate
+        self.cacheRouteActive = cacheRouteActive
         planner = PrefetchPlanner(videoHeight: videoHeight)
     }
 
@@ -349,7 +386,7 @@ final class SegmentStore {
     var fallbackActive: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return tracks.values.contains { $0.spec.accelerate && $0.consecutiveFailures >= Self.failureLimit }
+        return tracks.values.contains { acceleratesLocked($0) && $0.consecutiveFailures >= Self.failureLimit }
     }
 
     /// At least one track currently downloads through the accelerated path.
@@ -357,8 +394,38 @@ final class SegmentStore {
         lock.lock()
         defer { lock.unlock() }
         return tracks.values.contains {
-            $0.spec.accelerate && $0.consecutiveFailures < Self.failureLimit && accelerationAllowed()
+            acceleratesLocked($0) && $0.consecutiveFailures < Self.failureLimit && accelerationAllowed()
         }
+    }
+
+    /// The video downloads through the accelerated path, which is what the thread ladder is there for: audio's few
+    /// pieces beside a plain video say nothing about it.
+    var isVideoAccelerating: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let track = tracks[.video] ?? tracks.values.first else { return false }
+        return acceleratesLocked(track) && track.consecutiveFailures < Self.failureLimit && accelerationAllowed()
+    }
+
+    /// Some track downloads, or would again after a suspension, through the accelerated path.
+    var hasAcceleratedTrack: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return tracks.values.contains { acceleratesLocked($0) }
+    }
+
+    /// From now on new plain downloads move to the accelerated path when they fall behind.
+    func watchPlainDownloads() {
+        lock.lock()
+        defer { lock.unlock() }
+        for track in tracks.values where !track.spec.accelerate { track.canEscalate = true }
+    }
+
+    /// New downloads of this track stay on one connection.
+    func isPlain(_ kind: MediaKind) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return tracks[kind].map { !acceleratesLocked($0) } ?? true
     }
 
     var startupTargetSeconds: Double? {
@@ -400,6 +467,8 @@ final class SegmentStore {
         if outsideBuffer {
             playhead.bufferedAhead = 0
             playhead.cacheFull = false
+            // Paused or not, the picture at the new position is waited for (`plainDue`).
+            if playhead.rate == 0 { playhead.rate = 1 }
         }
         if outsideBuffer || !planner.isArmed {
             planner.reset(time: playhead.time, nowMs: now, tracks: segmentListsLocked())
@@ -593,7 +662,8 @@ final class SegmentStore {
         let job = FetchJob(fetch: fetch, kind: kind, handle: track.spec.handle,
                            priority: startup ? Self.readerStartupPriority : Self.readerPriority,
                            rangeKind: PrefetchPlanner.rangeKind(length: range.length, startup: startup),
-                           accelerated: useAcceleratedLocked(track), segmentStart: nil, total: track.spec.total)
+                           accelerated: useAcceleratedLocked(track), watched: watchedLocked(track),
+                           segmentStart: nil, segmentSeconds: nil, total: track.spec.total)
         let task = Task<Void, Never> { [weak self] in
             guard let self else { return }
             await self.run(job)
@@ -648,13 +718,22 @@ final class SegmentStore {
     /// Whether a new job of `track` takes the accelerated path. A suspended track (a transient outage: Wi-Fi to
     /// cellular, a tunnel) is not given up for good: every `retakeAfterMs` one job probes acceleration again; its
     /// success resumes the track (`noteAcceleratedOutcome`), its failure keeps it suspended for another period.
+    private func acceleratesLocked(_ track: TrackState) -> Bool {
+        // A CDN mode chosen during playback applies at once, as it does to an accelerated track.
+        track.accelerates || (track.canEscalate && !cacheRouteActive())
+    }
+
     private func useAcceleratedLocked(_ track: TrackState) -> Bool {
-        guard track.spec.accelerate, accelerationAllowed() else { return false }
+        guard acceleratesLocked(track), accelerationAllowed() else { return false }
         guard track.consecutiveFailures >= Self.failureLimit else { return true }
         let now = clock.nowMs()
         guard now - (track.suspendedAtMs ?? now) >= Self.retakeAfterMs else { return false }
         track.suspendedAtMs = now
         return true
+    }
+
+    private func watchedLocked(_ track: TrackState) -> Bool {
+        track.canEscalate && !acceleratesLocked(track) && accelerationAllowed()
     }
 
     /// Range kind + priority for a download a client request is waiting for.
@@ -682,7 +761,8 @@ final class SegmentStore {
         let fetch = SegmentFetch(key: key, range: segment.byteRange)
         let job = FetchJob(fetch: fetch, kind: key.kind, handle: track.spec.handle, priority: priority,
                            rangeKind: rangeKind, accelerated: useAcceleratedLocked(track),
-                           segmentStart: segment.startTime, total: track.spec.total)
+                           watched: watchedLocked(track), segmentStart: segment.startTime,
+                           segmentSeconds: segment.duration, total: track.spec.total)
         let task = Task<Void, Never> { [weak self] in
             guard let self else { return }
             await self.run(job)
@@ -792,23 +872,9 @@ final class SegmentStore {
         do {
             let total: Int64
             if job.accelerated {
-                do {
-                    total = try await downloader.download(fetch.range, track: job.handle, kind: job.rangeKind,
-                                                          priority: job.priority, deadline: deadline, onBytes: onBytes)
-                    noteAcceleratedOutcome(job.kind, success: true)
-                } catch {
-                    if Task.isCancelled || fetch.isCancelled || error is CancellationError { throw CancellationError() }
-                    noteAcceleratedOutcome(job.kind, success: false)
-                    // Per-request fallback: the plain single-connection path resumes after the verified prefix.
-                    let received = fetch.receivedCount
-                    if received >= fetch.range.length {
-                        total = job.total
-                    } else {
-                        total = try await downloader.downloadDirect(
-                            ByteRange(start: fetch.range.start + received, end: fetch.range.end),
-                            track: job.handle, onBytes: onBytes)
-                    }
-                }
+                total = try await downloadAccelerated(job, kind: job.rangeKind, deadline: deadline, onBytes: onBytes)
+            } else if job.watched {
+                total = try await downloadWatched(job, deadline: deadline, onBytes: onBytes)
             } else {
                 total = try await downloader.downloadDirect(fetch.range, track: job.handle, onBytes: onBytes)
             }
@@ -821,6 +887,161 @@ final class SegmentStore {
         } catch {
             failed(job, error: error)
         }
+    }
+
+    /// What has not arrived yet over the accelerated path, with the plain path as per-request fallback.
+    private func downloadAccelerated(_ job: FetchJob, kind: BTRRangeKind, deadline: (() -> Double?)?,
+                                     onBytes: @escaping (Data) async throws -> Void) async throws -> Int64 {
+        let fetch = job.fetch
+        do {
+            let total = try await downloader.download(
+                ByteRange(start: fetch.range.start + fetch.receivedCount, end: fetch.range.end), track: job.handle,
+                kind: kind, priority: job.priority, deadline: deadline, onBytes: onBytes)
+            noteAcceleratedOutcome(job.kind, success: true)
+            return total
+        } catch {
+            if Task.isCancelled || fetch.isCancelled || error is CancellationError { throw CancellationError() }
+            noteAcceleratedOutcome(job.kind, success: false)
+            // The plain single-connection path resumes after the verified prefix.
+            let received = fetch.receivedCount
+            if received >= fetch.range.length { return job.total }
+            return try await downloader.downloadDirect(
+                ByteRange(start: fetch.range.start + received, end: fetch.range.end), track: job.handle, onBytes: onBytes)
+        }
+    }
+
+    private struct FellBehind: Error {}
+
+    private struct PlainDue {
+        var inMs: Double
+        var idle: Bool
+        /// This track's downloads running at once, which share the line.
+        var ranges: Int
+        /// Close enough to the playhead to race for its first bytes on a handover.
+        var soon: Bool
+    }
+
+    /// One connection, handing over to the accelerated path when it falls behind or fails. A node's answer about the
+    /// start of a file says little about the middle: a cold range took up to 13 s to its first byte in the UK.
+    private func downloadWatched(_ job: FetchJob, deadline: (() -> Double?)?,
+                                 onBytes: @escaping (Data) async throws -> Void) async throws -> Int64 {
+        let fetch = job.fetch
+        do {
+            return try await withThrowingTaskGroup(of: Int64?.self) { group in
+                group.addTask { try await self.downloader.downloadDirect(fetch.range, track: job.handle, onBytes: onBytes) }
+                group.addTask {
+                    try await self.watchPlainDownload(job)
+                    return nil
+                }
+                // Leaving waits for both, so the accelerated path below is the only producer left.
+                defer { group.cancelAll() }
+                while let result = try await group.next() {
+                    if let result { return result }
+                }
+                throw CancellationError()
+            }
+        } catch {
+            if Task.isCancelled || fetch.isCancelled || error is CancellationError { throw CancellationError() }
+            // Everything arrived just as the watcher gave up on it.
+            if fetch.receivedCount >= fetch.range.length { return job.total }
+            // Switched off meanwhile: this range stays what it was, and fails as a plain range would.
+            guard accelerationAllowed() else {
+                guard error is FellBehind else { throw error }
+                return try await downloader.downloadDirect(
+                    ByteRange(start: fetch.range.start + fetch.receivedCount, end: fetch.range.end),
+                    track: job.handle, onBytes: onBytes)
+            }
+            escalate(job.kind, reason: error is FellBehind ? "one connection fell behind" : "plain download failed")
+            let soon = plainDue(job, now: clock.nowMs()).soon
+            return try await downloadAccelerated(job, kind: soon ? .startup : .ordinary, deadline: deadline, onBytes: onBytes)
+        }
+    }
+
+    /// Throws `FellBehind` once the range is unlikely to arrive in time, and returns only by cancellation.
+    private func watchPlainDownload(_ job: FetchJob) async throws {
+        let fetch = job.fetch
+        var lastTick = clock.nowMs()
+        var lastByteAt = lastTick
+        var lastReceived: Int64 = 0
+        var firstByteAt: Double?
+        var marks: [(at: Double, received: Int64)] = []
+        while true {
+            try await Task.sleep(nanoseconds: Self.plainWatchIntervalNs)
+            let now = clock.nowMs()
+            let received = fetch.receivedCount
+            // Ticks this far apart mean the app was suspended, which says nothing about the connection.
+            if now - lastTick > Self.plainSpeedWindowMs {
+                lastTick = now
+                lastByteAt = now
+                lastReceived = received
+                firstByteAt = nil
+                marks.removeAll()
+                continue
+            }
+            lastTick = now
+            if received != lastReceived {
+                lastReceived = received
+                lastByteAt = now
+            }
+            let due = plainDue(job, now: now)
+            if due.idle {
+                firstByteAt = nil
+                marks.removeAll()
+                continue
+            }
+            if now - lastByteAt >= max(Self.plainFirstByteMs, due.inMs) { throw FellBehind() }
+            guard received > 0 else { continue }
+            if firstByteAt == nil { firstByteAt = now }
+            marks.append((now, received))
+            let window = min(Self.plainLongestWindowMs, max(Self.plainSpeedWindowMs, due.inMs / 4))
+            while let first = marks.first, now - first.at > window { marks.removeFirst() }
+            guard let first = marks.first, let firstByteAt, now - firstByteAt >= max(Self.plainSettleMs, window / 2) else {
+                continue
+            }
+            let bytesPerMs = Double(received - first.received) / max(1, now - first.at)
+            guard bytesPerMs > 0 else { continue }
+            // Comfortably faster than it plays: no reason to leave, least of all when the line itself is the limit.
+            if let seconds = job.segmentSeconds, seconds > 0,
+               bytesPerMs * Double(due.ranges) >= Self.plainEnoughSpeed * Double(fetch.range.length) / (seconds * 1000) {
+                continue
+            }
+            let remaining = Double(fetch.range.length - received)
+            let acceleratedMs = Self.acceleratedSetupMs + remaining / Self.acceleratedBytesPerMs
+            if remaining / bytesPerMs > max(Self.plainLatestEtaMs, acceleratedMs, due.inMs) { throw FellBehind() }
+        }
+    }
+
+    /// When a plain range is needed. While playback waits (to start, or in a stall) the playhead stands still, so
+    /// `deadlineMs` would keep the next segments off for good, although the player is waiting for just those. `idle`:
+    /// nobody is waiting: a preload, a video swiped away, a paused player (which reports rate 0), a range behind the
+    /// playhead that nothing reads any more, or acceleration switched off, which leaves nothing to hand over to.
+    private func plainDue(_ job: FetchJob, now: Double) -> PlainDue {
+        lock.lock()
+        let head = playhead
+        let armed = planner.isArmed
+        let limited = forwardLimit != nil
+        let readers = job.fetch.key.flatMap { inflight[$0]?.readers } ?? 1
+        let ranges = max(1, inflight.keys.filter { $0.kind == job.kind }.count)
+        lock.unlock()
+        let idle = limited || !accelerationAllowed() || (!head.playing && head.rate == 0)
+        guard let segmentStart = job.segmentStart else { return PlainDue(inMs: 0, idle: idle, ranges: ranges, soon: !idle) }
+        let ahead = segmentStart - (armed ? head.current(at: now) : 0)
+        if ahead < 0, readers == 0 { return PlainDue(inMs: 0, idle: true, ranges: ranges, soon: false) }
+        let rate = max(0.25, head.rate == 0 ? 1 : abs(head.rate))
+        let aheadMs = max(0, ahead * 1000 / rate)
+        let waiting = !head.playing && ahead < Self.plainStartupSeconds
+        return PlainDue(inMs: waiting ? 0 : aheadMs, idle: idle, ranges: ranges,
+                        soon: !idle && aheadMs < Self.plainHandoverRaceMs)
+    }
+
+    private func escalate(_ kind: MediaKind, reason: String) {
+        lock.lock()
+        let first = tracks[kind].map { !$0.escalated } ?? false
+        tracks[kind]?.escalated = true
+        let handle = tracks[kind]?.spec.handle
+        lock.unlock()
+        handle?.clearPreferredDirect()
+        if first { onEscalate(kind, reason) }
     }
 
     private func deadlineMs(segmentStart: Double) -> Double? {

@@ -5,8 +5,11 @@ import Foundation
 
 /// BTR-style acceleration (owned by Core/Acceleration).
 enum CDNMode: String, Codable, CaseIterable, Identifiable {
-    /// Mainland CDN nodes (BTR's recommended default for overseas users: the origin tier has every
-    /// video cached, and multi-connection download compensates for the long distance).
+    /// Decided per video by what the overseas node's first answer says about its cache: cached means one connection to
+    /// that node, the quickest start; not cached means the mainland nodes, which have every video.
+    case auto
+    /// Mainland CDN nodes: the origin tier has every video cached, and multi-connection download compensates for the
+    /// long distance.
     case mainland
     /// Overseas nodes (akamai / aliov / cosov …) — try this if mainland routes are poor locally.
     case overseas
@@ -17,7 +20,8 @@ enum CDNMode: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .mainland: return "大陆 CDN（推荐）"
+        case .auto: return "自动（推荐）"
+        case .mainland: return "大陆 CDN"
         case .overseas: return "海外 CDN"
         case .custom: return "自定义"
         case .original: return "官方分配（不替换）"
@@ -29,16 +33,16 @@ struct AccelerationSettings: SettingsGroup {
     /// Master switch. When off the local proxy still converts DASH to HLS but downloads with a
     /// single connection to the URL playurl returned.
     var enabled: Bool = true
-    var cdnMode: CDNMode = .mainland
+    var cdnMode: CDNMode = .auto
     var customHosts: [String] = []
     /// Automatic concurrency (BTR "自动"); otherwise `manualConcurrency` connections.
     var autoConcurrency: Bool = true
     var manualConcurrency: Int = 16
     /// Accelerate bangumi / movies / documentaries too.
     var accelerateBangumi: Bool = true
-    /// 「竖屏视频禁用加速」. Short vertical videos need a quick start more than throughput, and measured from the UK they
-    /// start two to three times faster on a single connection to the address playurl gives.
-    var verticalVideosDirect: Bool = true
+    /// 「竖屏视频禁用加速」: vertical videos always stay on one connection to the address playurl gives, even when
+    /// that node has nothing cached. `CDNMode.auto` already plays cached ones that way.
+    var verticalVideosDirect: Bool = false
     /// Reserved: BTR's live-stream switch. Live acceleration is not implemented (live rooms play straight from the
     /// CDN) and nothing reads this; it stays so stored settings keep decoding. The settings row shows 「暂未支持」.
     var accelerateLive: Bool = false
@@ -48,6 +52,16 @@ struct AccelerationSettings: SettingsGroup {
     /// Whether a video of this kind goes through the BTR downloader.
     func accelerates(pgc: Bool, vertical: Bool) -> Bool {
         enabled && (!pgc || accelerateBangumi) && !(vertical && verticalVideosDirect)
+    }
+
+    /// Settings saved before `CDNMode.auto` hold the earlier defaults, which nobody chose by saving another setting.
+    func adoptingCacheRoute() -> AccelerationSettings {
+        var adopted = self
+        if adopted.cdnMode == .mainland {
+            adopted.cdnMode = .auto
+            adopted.verticalVideosDirect = false
+        }
+        return adopted
     }
 }
 

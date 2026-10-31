@@ -64,6 +64,14 @@ final class AppSettings: ObservableObject {
         danmaku = SettingsStore.load(key: "settings.danmaku")
         smartSkip = SettingsStore.load(key: "settings.smartSkip")
         feedFilter = SettingsStore.load(key: "settings.feedFilter")
+        let adoptedKey = "settings.acceleration.cacheRouteAdopted"
+        if !SettingsStore.defaults.bool(forKey: adoptedKey) {
+            SettingsStore.defaults.set(true, forKey: adoptedKey)
+            if SettingsStore.defaults.data(forKey: "settings.acceleration") != nil {
+                acceleration = acceleration.adoptingCacheRoute()
+                SettingsStore.save(acceleration, key: "settings.acceleration")
+            }
+        }
     }
 
     /// Posted on the changing (main) thread after every `acceleration` change; the acceleration engine copies the

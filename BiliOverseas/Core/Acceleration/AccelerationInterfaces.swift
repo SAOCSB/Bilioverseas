@@ -108,7 +108,8 @@ struct BTRConfig: Equatable {
     init() {}
 
     init(settings: AccelerationSettings, maxAutoThreads: Int) {
-        mode = settings.cdnMode
+        // `CDNMode.auto` sends a track here only once its overseas node has nothing cached.
+        mode = settings.cdnMode == .auto ? .mainland : settings.cdnMode
         customHosts = settings.customHosts
         autoConcurrency = settings.autoConcurrency
         concurrency = settings.manualConcurrency
@@ -155,6 +156,18 @@ protocol BTRTrackHandle: AnyObject {
     /// Swap in freshly signed URLs (expiry refresh, BTR §11.5). Speed history is kept (keyed by host+path).
     func updateURLs(_ urls: [String])
     func nodeStatus() -> [CDNNodeStatus]
+    /// The first verified answer any node gave for this track.
+    var firstAnswer: CDNFirstAnswer? { get }
+    /// Plain downloads try this node first from now on.
+    func preferDirect(_ url: String)
+    /// Back to playurl's order: this track left that node.
+    func clearPreferredDirect()
+}
+
+extension BTRTrackHandle {
+    var firstAnswer: CDNFirstAnswer? { nil }
+    func preferDirect(_ url: String) {}
+    func clearPreferredDirect() {}
 }
 
 /// Player → auto-concurrency signals (BTR §8 iOS mapping). One app-wide controller.

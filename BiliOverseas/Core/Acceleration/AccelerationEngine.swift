@@ -70,6 +70,8 @@ struct AccelerationStats {
     var totalBytes: Int64 = 0
     var hedgedBytes: Int64 = 0
     var fallbackActive: Bool = false
+    /// `PlaybackSession.routeDescription`.
+    var route: String = ""
 }
 
 enum AccelerationEngineError: LocalizedError, Equatable {
@@ -158,6 +160,9 @@ final class AccelerationEngine: LocalProxyRequestHandler {
     private let lock = NSLock()
     private var sessions: [String: EngineWeakSession] = [:]
     private var sessionOrder: [String] = []
+    /// 自动: tracks lately found cold, by when. See `startsPlain`.
+    private var coldTracks: [String: Double] = [:]
+    private static let coldTrackMemoryMs: Double = 10 * 60 * 1000
     private var clientSwitch: EngineMediaClientSwitch?
     private var settingsObserver: NSObjectProtocol?
 
@@ -293,18 +298,20 @@ final class AccelerationEngine: LocalProxyRequestHandler {
             audio: metas.audio == nil ? nil : request.audio, audioURI: metas.audio == nil ? nil : "a.m3u8",
             averageBandwidth: average, allowDolbyVision: request.allowHDR).utf8)
 
+        let videoPlain = startsPlain(videoHandle, stream: request.video, accelerate: accelerate)
         var tracks = [SegmentStoreTrack(kind: .video, handle: videoHandle, total: metas.video.total,
                                         pinned: metas.video.pinned, segments: metas.video.segments,
-                                        accelerate: accelerate)]
+                                        accelerate: accelerate && !videoPlain, canEscalate: videoPlain)]
         var handles: [EngineSessionTrack] = [EngineSessionTrack(kind: .video, handle: videoHandle,
                                                                 stream: request.video)]
         if let audioMeta = metas.audio, let audioHandle, let audio = request.audio {
+            let audioPlain = startsPlain(audioHandle, stream: audio, accelerate: accelerate)
             tracks.append(SegmentStoreTrack(kind: .audio, handle: audioHandle, total: audioMeta.total,
                                             pinned: audioMeta.pinned, segments: audioMeta.segments,
-                                            accelerate: accelerate))
+                                            accelerate: accelerate && !audioPlain, canEscalate: audioPlain))
             handles.append(EngineSessionTrack(kind: .audio, handle: audioHandle, stream: audio))
         }
-        return makeSession(token: token, port: port, entry: "master.m3u8", isHLS: true, tracks: tracks,
+        return makeSession(token: token, routeKey: request.routeKey, port: port, entry: "master.m3u8", isHLS: true, tracks: tracks,
                            handles: handles, playlists: playlists,
                            routes: ["v.m4s": .video, "a.m4s": .audio],
                            contentTypes: [.video: "video/mp4", .audio: "audio/mp4"],
@@ -349,10 +356,11 @@ final class AccelerationEngine: LocalProxyRequestHandler {
         let pinned = PinnedBytes(range: ByteRange(start: 0, end: Int64(head.data.count) - 1), data: head.data)
         let duration = segment.lengthMs > 0 ? Double(segment.lengthMs) / 1000 : 0
         let units = Self.progressiveUnits(total: total, from: Int64(head.data.count), duration: duration)
-        let track = SegmentStoreTrack(kind: .video, handle: handle, total: total, pinned: [pinned], segments: units,
-                                      accelerate: accelerate)
         let stream = DashStream(kind: .video, id: 0, baseURL: segment.url, backupURLs: segment.backupURLs)
-        return makeSession(token: token, port: port, entry: "p.mp4", isHLS: false, tracks: [track],
+        let plain = startsPlain(handle, stream: stream, accelerate: accelerate)
+        let track = SegmentStoreTrack(kind: .video, handle: handle, total: total, pinned: [pinned], segments: units,
+                                      accelerate: accelerate && !plain, canEscalate: plain)
+        return makeSession(token: token, routeKey: routeKey, port: port, entry: "p.mp4", isHLS: false, tracks: [track],
                            handles: [EngineSessionTrack(kind: .video, handle: handle, stream: stream)],
                            playlists: [:], routes: ["p.mp4": .video], contentTypes: [.video: "video/mp4"],
                            downloader: downloader, accelerate: accelerate, videoHeight: 0, refreshURLs: refreshURLs)
@@ -403,7 +411,35 @@ final class AccelerationEngine: LocalProxyRequestHandler {
         return units
     }
 
-    private func makeSession(token: String, port: UInt16, entry: String, isHLS: Bool, tracks: [SegmentStoreTrack],
+    /// 自动: the answer to the track's first request decides between one connection to that node and the mainland
+    /// nodes. Asking leaves init and sidx at the node, so for a while after a track was found cold its next answer
+    /// would say HIT with the media as cold as before.
+    private func startsPlain(_ handle: BTRTrackHandle, stream: DashStream, accelerate: Bool) -> Bool {
+        guard accelerate, settingsBox.value.cdnMode == .auto else { return false }
+        let now = dependencies.clock.nowMs()
+        lock.lock()
+        coldTracks = coldTracks.filter { now - $0.value < Self.coldTrackMemoryMs }
+        let remembered = coldTracks[Self.coldKey(stream)] != nil
+        lock.unlock()
+        guard !remembered, let answer = handle.firstAnswer, answer.isCached else {
+            noteColdTrack(stream)
+            return false
+        }
+        handle.preferDirect(answer.url)
+        return true
+    }
+
+    func noteColdTrack(_ stream: DashStream) {
+        let now = dependencies.clock.nowMs()
+        lock.lock()
+        coldTracks[Self.coldKey(stream)] = now
+        lock.unlock()
+    }
+
+    /// The file, on whichever node and however signed.
+    private static func coldKey(_ stream: DashStream) -> String { URLComponents(string: stream.baseURL)?.path ?? stream.baseURL }
+
+    private func makeSession(token: String, routeKey: String, port: UInt16, entry: String, isHLS: Bool, tracks: [SegmentStoreTrack],
                              handles: [EngineSessionTrack], playlists: [String: Data], routes: [String: MediaKind],
                              contentTypes: [MediaKind: String], downloader: BTRDownloading, accelerate: Bool,
                              videoHeight: Int,
@@ -415,9 +451,11 @@ final class AccelerationEngine: LocalProxyRequestHandler {
                                  budgetBytes: dependencies.cacheBudgetBytes, videoHeight: videoHeight,
                                  forwardSeconds: { max(10, box.value.forwardBufferSeconds) },
                                  accelerationAllowed: { box.value.enabled },
-                                 onHardFailure: { relay.session?.noteHardFailure() })
+                                 onHardFailure: { relay.session?.noteHardFailure() },
+                                 onEscalate: { kind, reason in relay.session?.noteEscalated(kind, reason: reason) },
+                                 cacheRouteActive: { box.value.cdnMode == .auto })
         let url = URL(string: "http://127.0.0.1:\(port)/\(token)/\(entry)")!
-        let session = PlaybackSession(id: token, url: url, isHLS: isHLS, port: port, engine: self, store: store,
+        let session = PlaybackSession(id: token, routeKey: routeKey, url: url, isHLS: isHLS, port: port, engine: self, store: store,
                                       downloader: downloader, tracks: handles, playlists: playlists, routes: routes,
                                       contentTypes: contentTypes, accelerate: accelerate, auto: dependencies.auto,
                                       clock: dependencies.clock, wallClock: dependencies.wallClock,
@@ -446,7 +484,7 @@ final class AccelerationEngine: LocalProxyRequestHandler {
         lock.unlock()
         retained.removeAll()
         for old in evicted { old.close() }
-        if accelerate { dependencies.auto?.newSession() }
+        if tracks.contains(where: \.accelerate) { dependencies.auto?.newSession() }
         session.startRefreshLoop()
         return session
     }
@@ -524,6 +562,7 @@ final class AccelerationEngine: LocalProxyRequestHandler {
 /// releasing the last reference) cancels every download and makes the token answer 404.
 final class PlaybackSession {
     let id: String
+    let routeKey: String
     /// master.m3u8 (HLS) or p.mp4 (progressive).
     let url: URL
     let isHLS: Bool
@@ -554,12 +593,13 @@ final class PlaybackSession {
     private var refreshFailures = 0
     private var streams: [MediaKind: DashStream] = [:]
 
-    init(id: String, url: URL, isHLS: Bool, port: UInt16, engine: AccelerationEngine, store: SegmentStore,
+    init(id: String, routeKey: String, url: URL, isHLS: Bool, port: UInt16, engine: AccelerationEngine, store: SegmentStore,
          downloader: BTRDownloading, tracks: [EngineSessionTrack], playlists: [String: Data],
          routes: [String: MediaKind], contentTypes: [MediaKind: String], accelerate: Bool,
          auto: AutoConcurrencySignals?, clock: MonotonicClock, wallClock: @escaping () -> Double,
          refreshURLs: (() async throws -> (video: DashStream, audio: DashStream?))?, refreshInterval: TimeInterval) {
         self.id = id
+        self.routeKey = routeKey
         self.url = url
         self.isHLS = isHLS
         self.port = port
@@ -599,12 +639,12 @@ final class PlaybackSession {
         lock.lock()
         lastBufferedAhead = bufferedAhead
         lock.unlock()
-        if store.isAccelerating { auto?.buffer(ahead: bufferedAhead, playing: playing, cacheFull: cacheFull) }
+        if store.isVideoAccelerating { auto?.buffer(ahead: bufferedAhead, playing: playing, cacheFull: cacheFull) }
     }
 
     /// Playback waits for data while it should be playing (not during a seek or the initial start).
     func playerDidStall() {
-        guard !isClosed, store.isAccelerating else { return }
+        guard !isClosed, store.isVideoAccelerating else { return }
         // With this much already buffered AVPlayer waits for its decoder, not for data (BTR #58).
         let recovery = min(10, max(6, (store.startupTargetSeconds ?? 6) + 2))
         lock.lock()
@@ -619,7 +659,33 @@ final class PlaybackSession {
         guard !isClosed else { return }
         let cached = store.isCached(at: time)
         store.seek(to: time, outsideBuffer: outsideBuffer)
-        if outsideBuffer && !cached && store.isAccelerating { auto?.newSession() }
+        if outsideBuffer && !cached && store.isVideoAccelerating { auto?.newSession() }
+    }
+
+    /// One track left its plain connection: the mainland nodes start from the threads an accelerated session gets.
+    func noteEscalated(_ kind: MediaKind, reason: String) {
+        if let track = tracks.first(where: { $0.kind == kind }) { engine?.noteColdTrack(track.stream) }
+        auto?.newSession()
+        Self.routeLog?("route \(routeKey) \(kind == .video ? "video" : "audio") to mainland: \(reason)")
+    }
+
+    /// The next session of these files takes the other route.
+    func noteAllCold() {
+        for track in tracks { engine?.noteColdTrack(track.stream) }
+    }
+
+    /// Where the app's playback log is.
+    static var routeLog: ((String) -> Void)?
+
+    /// Which way each track downloads, for the playback log: hosts and statuses, no URLs.
+    var routeDescription: String {
+        guard accelerate || store.hasAcceleratedTrack else { return "plain" }
+        return tracks.map { track in
+            let name = track.kind == .video ? "v" : "a"
+            let answer = track.handle.firstAnswer?.summary ?? "no answer"
+            let plain = store.isPlain(track.kind)
+            return "\(name)=\(plain ? "plain" : "accel") (\(answer))"
+        }.joined(separator: " ")
     }
 
     /// See `AccelerationEngine.noteInUse`.
@@ -637,11 +703,11 @@ final class PlaybackSession {
         let b = downloader.stats
         var nodes = b.nodes
         if nodes.isEmpty { nodes = tracks.flatMap { $0.handle.nodeStatus() } }
-        return AccelerationStats(accelerated: accelerate && store.isAccelerating, threads: b.threads,
+        return AccelerationStats(accelerated: store.isAccelerating, threads: b.threads,
                                  activeConnections: b.activeConnections, bytesPerSecond: b.bytesPerSecond,
                                  autoReason: b.autoReason, nodes: nodes, cachedAheadSeconds: store.cachedAheadSeconds(),
                                  totalBytes: b.totalBytes, hedgedBytes: b.hedgedBytes,
-                                 fallbackActive: store.fallbackActive)
+                                 fallbackActive: store.fallbackActive, route: routeDescription)
     }
 
     /// Seconds AVPlayer should have buffered before starting / resuming, measured once (nil until measured).

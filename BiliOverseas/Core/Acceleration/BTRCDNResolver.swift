@@ -99,6 +99,45 @@ final class BTRBanRegistry: @unchecked Sendable {
     }
 }
 
+// MARK: - What a node says about its cache
+
+/// A node's first answer for a track. It comes with init and sidx, before any media is fetched, so it costs nothing to
+/// ask. The answer describes the start of the file: later ranges can still be cold, which `SegmentStore` watches for.
+struct CDNFirstAnswer: Equatable {
+    /// Akamai answers this fast only from its own cache (about 100 ms, against over 900 ms when it has to ask).
+    static let akamaiQuickMs: Double = 300
+
+    var url: String
+    /// `eo-cache-status`: cosov's own verdict.
+    var cacheStatus: String?
+    /// `sever-timing`, spelt so by Bilibili's proxy behind Akamai: "Hit from child", "Miss from child, Hit from parent".
+    /// Akamai stores it with the object, so an old "Miss" can come back on a hit, which is why speed decides first.
+    var fillTiming: String?
+    var elapsedMs: Double
+
+    init(url: String, headers: [String: String], elapsedMs: Double) {
+        self.url = url
+        cacheStatus = headers["eo-cache-status"]
+        fillTiming = headers["sever-timing"]
+        self.elapsedMs = elapsedMs
+    }
+
+    /// False for any node whose answer does not say so, such as a mainland node that won the race.
+    var isCached: Bool {
+        if let cacheStatus { return cacheStatus.lowercased().hasPrefix("hit") }
+        guard BTRCDN.isAkamai(url) else { return false }
+        if elapsedMs < Self.akamaiQuickMs { return true }
+        // Past this limit its next range would be handed over anyway.
+        guard elapsedMs < SegmentStore.plainFirstByteMs else { return false }
+        return fillTiming?.lowercased().contains("hit from") ?? false
+    }
+
+    /// For the playback log: a host and a status, no URL.
+    var summary: String {
+        "\(BTRCDN.hostOf(url)) \(cacheStatus ?? fillTiming ?? "-") \(Int(elapsedMs))ms"
+    }
+}
+
 // MARK: - Host lists and URL synthesis
 
 enum BTRCDN {

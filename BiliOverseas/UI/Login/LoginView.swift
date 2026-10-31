@@ -69,6 +69,7 @@ struct LoginView: View {
         .onDisappear { model.stop() }
         .onChange(of: model.mode) { _ in model.restart() }
         .onChange(of: scenePhase) { phase in
+            LoginTrace.log("scene \(phase)")
             if phase == .active { model.pollNow() }
         }
         .onChange(of: model.didLogin) { done in
@@ -282,10 +283,17 @@ final class LoginQRViewModel: ObservableObject {
     private var polling = false
     private var issuedAt = Date()
     private var saver: LoginQRPhotoSaver?
+    /// A fresh code is on its way for the official app (`openInBiliApp`).
+    private var openWhenReady = false
+    private var replacedUsedCode = false
 
     private static let pollInterval: UInt64 = 2_000_000_000
-    /// The server expires codes after 180 s; this is only a local backstop.
-    private static let lifetime: TimeInterval = 185
+    /// The server expires codes after 180 s. Its answer is what counts; this is for when none comes.
+    private static let lifetime: TimeInterval = 210
+    /// A code said to be expired before this was not out of time: it was used (`codeExpired`).
+    private static let usedBefore: TimeInterval = 170
+    /// An older one is replaced before going to the official app, where the rest of its time would pass.
+    private static let freshForOpening: TimeInterval = 120
 
     var canUseCode: Bool {
         qrURL != nil && (phase == .waitingScan || phase == .scanned)
@@ -300,6 +308,7 @@ final class LoginQRViewModel: ObservableObject {
         loopTask?.cancel()
         loopTask = nil
         session += 1
+        openWhenReady = false
     }
 
     func restart() {
@@ -330,6 +339,17 @@ final class LoginQRViewModel: ObservableObject {
     // MARK: Actions
 
     func openInBiliApp() {
+        guard Date().timeIntervalSince(issuedAt) <= LoginQRViewModel.freshForOpening else {
+            LoginTrace.log("open: code too old, replacing it")
+            restart()
+            openWhenReady = true
+            return
+        }
+        openCodeInBiliApp()
+    }
+
+    private func openCodeInBiliApp() {
+        LoginTrace.log("open in official app")
         guard let qrURL,
               let encoded = qrURL.addingPercentEncoding(withAllowedCharacters: BiliHTTP.uriComponentAllowed),
               let url = URL(string: "bilibili://browser?url=\(encoded)") else { return }
@@ -367,6 +387,7 @@ final class LoginQRViewModel: ObservableObject {
     // MARK: Loop
 
     private func run(session s: Int, mode m: Mode) async {
+        LoginTrace.log("new code \(m)")
         do {
             let url: String
             let code: String
@@ -386,8 +407,14 @@ final class LoginQRViewModel: ObservableObject {
             qrImage = LoginQRRenderer.image(for: url)
             issuedAt = Date()
             phase = .waitingScan
+            if openWhenReady {
+                openWhenReady = false
+                openCodeInBiliApp()
+            }
         } catch {
             guard s == session, !Task.isCancelled else { return }
+            LoginTrace.log("new code failed: \(LoginQRViewModel.traceText(for: error))")
+            openWhenReady = false
             phase = .failed(LoginQRViewModel.message(for: error))
             return
         }
@@ -402,10 +429,10 @@ final class LoginQRViewModel: ObservableObject {
     private func pollOnce(session s: Int, mode m: Mode) async -> Bool {
         guard s == session, let key else { return true }
         guard !polling else { return false }
-        if Date().timeIntervalSince(issuedAt) > LoginQRViewModel.lifetime {
-            end(.expired)
-            return true
-        }
+        // Only with the app in front. The server gives a login out once, then calls the code expired; a response that
+        // arrives as iOS suspends the app is lost, and the user who confirmed in the official app comes back to
+        // 「二维码已失效」. Coming back polls at once (`pollNow`).
+        guard UIApplication.shared.applicationState == .active else { return false }
         polling = true
         defer { polling = false }
         do {
@@ -417,6 +444,7 @@ final class LoginQRViewModel: ObservableObject {
             switch m {
             case .web:
                 let state = try await LoginAPI.pollWebQR(key: key)
+                LoginTrace.log("poll web: \(LoginQRViewModel.traceText(for: state)), age \(age)")
                 if case .success(let refreshToken, let crossDomainURL) = state {
                     end(.success)
                     await AuthService.shared.completeWebQRLogin(refreshToken: refreshToken, crossDomainURL: crossDomainURL)
@@ -430,7 +458,7 @@ final class LoginQRViewModel: ObservableObject {
                 case .scannedWaitingConfirm:
                     phase = .scanned
                 case .expired:
-                    end(.expired)
+                    codeExpired()
                     return true
                 case .success:
                     return true
@@ -450,23 +478,45 @@ final class LoginQRViewModel: ObservableObject {
                 case .scannedWaitingConfirm:
                     phase = .scanned
                 case .expired:
-                    end(.expired)
+                    codeExpired()
                     return true
                 case .success:
                     return true
                 }
             }
         } catch let e as BiliError {
+            LoginTrace.log("poll failed: \(LoginQRViewModel.traceText(for: e)), age \(age)")
             guard s == session else { return true }
             if case .api = e {
                 end(.failed(LoginQRViewModel.message(for: e)))
                 return true
             }
-            // Transport hiccup (e.g. while the app was in the background): keep polling.
+            // Transport hiccup: keep polling.
         } catch {
             // URLError etc.: keep polling.
+            LoginTrace.log("poll failed: \(LoginQRViewModel.traceText(for: error)), age \(age)")
+        }
+        guard s == session else { return true }
+        if Date().timeIntervalSince(issuedAt) > LoginQRViewModel.lifetime {
+            end(.expired)
+            return true
         }
         return false
+    }
+
+    /// Seconds since the code was made, for the trace.
+    private var age: Int { Int(Date().timeIntervalSince(issuedAt)) }
+
+    /// The server calls the code expired. One too young for that was used, and the answer that carried the login did not
+    /// reach us (the network dropped): say what happened and put up a new code, once.
+    private func codeExpired() {
+        guard Date().timeIntervalSince(issuedAt) < LoginQRViewModel.usedBefore, !replacedUsedCode else {
+            end(.expired)
+            return
+        }
+        replacedUsedCode = true
+        ToastCenter.shared.show("没有收到登录结果，已换新的二维码，请再确认一次", duration: 3.5)
+        restart()
     }
 
     /// Terminal state: the loop and any in-flight poll stop acting.
@@ -477,12 +527,48 @@ final class LoginQRViewModel: ObservableObject {
     }
 
     private func finishLogin() {
+        LoginTrace.log("login finished, signed in: \(BiliHTTP.shared.isLoggedIn)")
         ToastCenter.shared.show("登录成功")
         didLogin = true
     }
 
     private static func message(for error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
+    private static func traceText(for state: QRLoginState) -> String {
+        if case .success = state { return "success" }
+        return "\(state)"
+    }
+
+    /// Without the URL, which holds the code.
+    private static func traceText(for error: Error) -> String {
+        if let e = error as? URLError { return "URLError \(e.code.rawValue)" }
+        if let e = error as? BiliError {
+            if case .api(let code, _) = e { return "api \(code)" }
+            return "BiliError"
+        }
+        return "other"
+    }
+}
+
+/// What the login screen did, without codes or tokens, kept where it can be read off a phone
+/// (`Library/Caches/login-trace.txt`): logging in has failed on and off, and only on phones.
+enum LoginTrace {
+    private static let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm:ss"
+        return f
+    }()
+
+    @MainActor static func log(_ line: String) {
+        guard let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+        let url = dir.appendingPathComponent("login-trace.txt")
+        let state = UIApplication.shared.applicationState == .active ? "front" : "back"
+        let text = "\(formatter.string(from: Date())) [\(state)] \(line)\n"
+        var kept = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        if kept.count > 20_000 { kept = String(kept.suffix(10_000)) }
+        try? (kept + text).write(to: url, atomically: true, encoding: .utf8)
     }
 }
 

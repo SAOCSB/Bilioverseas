@@ -87,6 +87,8 @@ struct VideoRef: Hashable {
     var startTime: Double? = nil
     /// 播放全部 list (稍后再看 / 收藏夹) the video page continues through after this video; nil for a single video.
     var playlist: VideoPlaylist? = nil
+    /// Opened from the 短视频 feed (完整视频页): a swipe up on the vertical video goes back to that feed.
+    var fromShortVideos: Bool = false
 
     var isPGC: Bool { epId != 0 || seasonId != 0 }
 

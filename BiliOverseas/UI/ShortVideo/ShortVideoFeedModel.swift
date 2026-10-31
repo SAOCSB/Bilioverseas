@@ -11,6 +11,7 @@ final class ShortVideoFeedModel: ObservableObject {
         didSet {
             guard index != oldValue else { return }
             userPaused = false
+            pendingAdvance = false
             activate()
         }
     }
@@ -21,6 +22,8 @@ final class ShortVideoFeedModel: ObservableObject {
 
     /// Entry video (tapped in a list), shown first while page 1 loads; nil starts from the feed's pick.
     let start: ShortVideoItem?
+    /// The entry video was swiped away on its video page: the feed continues from it without showing it.
+    private let skippedEntryID: String?
     private var cursor: ShortVideoCursor?
     private var exhausted = false
     private var playbacks: [String: ShortVideoPlayback] = [:]
@@ -29,14 +32,17 @@ final class ShortVideoFeedModel: ObservableObject {
     private var appActive = true
     /// The user paused the video on screen (tap); coming back to the screen or the app keeps it paused.
     private var userPaused = false
+    /// `advance` found no next video yet: moves on when the page being loaded brings one.
+    private var pendingAdvance = false
     /// Bumped by 换一批 so a page still loading for the old feed is dropped.
     private var generation = 0
     private var loadingGeneration: Int?
     private var cancellables: Set<AnyCancellable> = []
 
-    init(start: ShortVideoItem?) {
+    init(start: ShortVideoItem?, startsAfterEntry: Bool = false) {
         self.start = start
-        if let start { items = [start] }
+        skippedEntryID = startsAfterEntry ? start?.id : nil
+        if let start, !startsAfterEntry { items = [start] }
         if SmokeTest.isEnabled { SmokeTest.activeShortVideoFeed = self }
         let center = NotificationCenter.default
         center.publisher(for: UIApplication.didEnterBackgroundNotification)
@@ -65,6 +71,7 @@ final class ShortVideoFeedModel: ObservableObject {
         cursor = nil
         exhausted = false
         userPaused = false
+        pendingAdvance = false
         index = 0
         await loadMore()
     }
@@ -81,6 +88,8 @@ final class ShortVideoFeedModel: ObservableObject {
             if loadingGeneration == gen {
                 loadingGeneration = nil
                 isLoading = false
+                // Moved on already, or nothing came: it must not jump much later, under someone watching.
+                pendingAdvance = false
             }
         }
         do {
@@ -105,6 +114,7 @@ final class ShortVideoFeedModel: ObservableObject {
     /// takes the feed's fuller copy (counts, uploader) in place.
     private func append(_ page: [ShortVideoItem]) -> Int {
         var known = Set(items.map(\.id))
+        if let skippedEntryID { known.insert(skippedEntryID) }
         var fresh: [ShortVideoItem] = []
         for item in page {
             if let i = items.firstIndex(where: { $0.id == item.id }) {
@@ -119,9 +129,25 @@ final class ShortVideoFeedModel: ObservableObject {
             fresh.append(item)
         }
         items.append(contentsOf: fresh)
-        // Prepares the new next video when the one on screen was the last.
-        if !fresh.isEmpty { activate() }
+        if !fresh.isEmpty {
+            if pendingAdvance {
+                index += 1
+            } else {
+                // Prepares the new next video when the one on screen was the last.
+                activate()
+            }
+        }
         return fresh.count
+    }
+
+    /// On to the next video, as soon as there is one.
+    func advance() {
+        if items.indices.contains(index + 1) {
+            index += 1
+        } else {
+            pendingAdvance = true
+            Task { await loadMore() }
+        }
     }
 
     /// Tap to pause / resume the video on screen.
@@ -165,6 +191,7 @@ final class ShortVideoFeedModel: ObservableObject {
 
     func setVisible(_ isVisible: Bool) {
         visible = isVisible
+        if isVisible { PlayerNowPlayingCenter.shared.shortVideosAppeared() }
         if !isVisible { reportCurrentHistory() }
         activate()
     }

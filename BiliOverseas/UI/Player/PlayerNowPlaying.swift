@@ -46,6 +46,13 @@ final class PlayerNowPlayingCenter {
         PlayerPiPKeeper.stopOthers(than: nil)
     }
 
+    /// The 短视频 feed comes on screen. It plays by itself and has no Now Playing of its own, so a video page it
+    /// covers gives up the commands: the lock screen or a headset would otherwise start that page's video over the
+    /// feed. The page claims them again when it next plays. A video in Picture in Picture keeps them.
+    func shortVideosAppeared() {
+        if let owner, !owner.isPiPBusy { release(owner) }
+    }
+
     func release(_ controller: PlayerController) {
         guard owner === controller else { return }
         owner = nil

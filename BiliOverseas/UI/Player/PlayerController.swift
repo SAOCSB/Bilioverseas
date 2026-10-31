@@ -244,6 +244,10 @@ final class PlayerController: ObservableObject {
     }
     @Published private(set) var hasNext = false
 
+    /// Set by a page that can go on to another video when a vertical video is swiped up (nil: offline files).
+    var onSwipeToNextVideo: (() -> Void)?
+    private var lastNextVideoSwipe: CFTimeInterval = 0
+
     /// Optional: when set, the fullscreen bar shows 「上一集」 and the lock screen offers "previous track".
     var onPrevious: (() -> Void)? {
         didSet { hasPrevious = onPrevious != nil }
@@ -591,17 +595,36 @@ final class PlayerController: ObservableObject {
         enterFullscreen(byRotation: false, deviceOrientation: nil)
     }
 
-    func exitFullscreen() {
+    /// `then`: the fullscreen player has gone, and fullscreen was not entered again meanwhile.
+    func exitFullscreen(then done: (() -> Void)? = nil) {
         guard isFullscreen else { return }
         overlay.unlock()
         fullscreenByRotation = false
         isFullscreen = false
         overlay.fullscreenChanged()
-        fullscreenPresenter.dismiss { [weak self] in
+        fullscreenPresenter.dismiss(releasingSurface: { [weak self] in
             // Back inline before the fade, also when fullscreen was entered again meanwhile: the page then shows
             // the current picture until the new fullscreen controller takes it (`willPresent`).
             self?.surfaceInFullscreen = false
-        }
+        }, completion: { [weak self] in
+            guard let self, !self.isFullscreen else { return }
+            done?()
+        })
+    }
+
+    /// A swipe up on this vertical video goes on to the next one (「竖屏视频进入短视频」). Not for bangumi episodes,
+    /// and not while the video plays in Picture in Picture.
+    var canSwipeToNextVideo: Bool {
+        onSwipeToNextVideo != nil && isVerticalVideo && item?.epId == 0 && !isPiPActive
+            && AppSettings.shared.general.portraitOpensShortVideo
+    }
+
+    func swipeToNextVideo() {
+        // Touches can still arrive while the page is leaving; the one swipe is enough.
+        let now = CACurrentMediaTime()
+        guard now - lastNextVideoSwipe > 1 else { return }
+        lastNextVideoSwipe = now
+        onSwipeToNextVideo?()
     }
 
     /// Stop & release. While Picture in Picture runs the player keeps going (kept alive) and stops when PiP ends.

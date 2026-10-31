@@ -63,6 +63,7 @@ struct VideoDetailView: View {
             }
             model.pageAppeared()
             model.attach(player)
+            connectSwipeToNextVideo()
             model.startIfNeeded()
             if resumeOnAppear {
                 resumeOnAppear = false
@@ -94,6 +95,31 @@ struct VideoDetailView: View {
             if player.wantsToPlay {
                 resumeOnAppear = true
                 player.pause()
+            }
+        }
+    }
+
+    /// A swipe up on a vertical video goes on to the next one: in the 播放全部 list while it has more, else in the
+    /// 短视频 feed, the one this page was opened from or a new one continuing from this video. Weak: the player
+    /// keeps this closure.
+    private func connectSwipeToNextVideo() {
+        player.onSwipeToNextVideo = { [weak model, weak player, weak router] in
+            guard let model, let player, let router, !model.swipeUpInPlaylist(),
+                  let entry = model.shortVideoEntry else { return }
+            let leave = {
+                if model.openedFromShortVideos {
+                    // The feed starts its next video as this page slides away.
+                    player.pause()
+                    router.advanceShortVideos = true
+                    router.pop()
+                } else {
+                    router.push(.shortVideos(start: entry, startsAfterEntry: true))
+                }
+            }
+            if player.isFullscreen {
+                player.exitFullscreen(then: leave)
+            } else {
+                leave()
             }
         }
     }
@@ -479,6 +505,8 @@ final class VideoDetailModel: ObservableObject {
     private var playedAids: Set<Int64> = []
     /// 播放全部 list this page was opened with (稍后再看 / 收藏夹); kept across in-place switches.
     private let playlist: VideoPlaylist?
+    /// Opened from the 短视频 feed (完整视频页); kept across in-place switches.
+    let openedFromShortVideos: Bool
     /// Bumped by every content load; stale responses are dropped.
     private var generation = 0
     /// Bumped by every content / part / episode change; stale side data is dropped.
@@ -492,6 +520,7 @@ final class VideoDetailModel: ObservableObject {
         let aid = ref.aid > 0 ? ref.aid : (BVConverter.bv2av(ref.bvid) ?? 0)
         comments = VideoCommentsModel(oid: ref.isPGC ? 0 : aid, type: 1)
         playlist = ref.playlist
+        openedFromShortVideos = ref.fromShortVideos
     }
 
     // MARK: Derived state
@@ -531,6 +560,16 @@ final class VideoDetailModel: ObservableObject {
         guard let d = detail else { return false }
         if let p = currentPart, p.width > 0, p.height > 0 { return p.isVertical }
         return d.isVertical
+    }
+
+    /// What the 短视频 feed continues from when this video is swiped away (nil for bangumi).
+    var shortVideoEntry: ShortVideoItem? {
+        guard season == nil, let d = detail, d.aid != 0 || !d.bvid.isEmpty else { return nil }
+        var item = ShortVideoItem(id: !d.bvid.isEmpty ? d.bvid : "av\(d.aid)")
+        item.aid = d.aid
+        item.bvid = d.bvid
+        item.title = d.title
+        return item
     }
 
     var shareURL: URL? {
@@ -959,6 +998,18 @@ final class VideoDetailModel: ObservableObject {
         case .episode(let ep): selectEpisode(ep)
         case .video(let r): replace(with: r)
         }
+    }
+
+    /// A swipe up on a vertical video in a 播放全部 list stays in the list: on to its next entry (or this entry's
+    /// next part) in place, or, with the list's next page not loaded yet, asks for it. false: this video is not in
+    /// a list, or the list has ended; the swipe goes to the 短视频 feed.
+    fileprivate func swipeUpInPlaylist() -> Bool {
+        guard let d = detail, let position = playlistPosition(aid: d.aid, bvid: d.bvid) else { return false }
+        let hasNext = nextStep(includeRelated: false) != nil
+        if case .end = position, !hasNext { return false }
+        if case .pending = position, !hasNext { ToastCenter.shared.show("列表下一页加载中，稍后再滑") }
+        advance(manual: true)
+        return true
     }
 
     /// 「下一集」 (fullscreen bar, lock screen next-track) only when there is something to advance to.

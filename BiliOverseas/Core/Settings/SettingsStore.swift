@@ -116,7 +116,8 @@ struct GeneralSettings: SettingsGroup {
     /// 「检查未读动态」: check for new dynamics every 5 minutes and badge the 动态 tab.
     var checkUnreadDynamics: Bool = true
     /// 「竖屏视频进入短视频」: tapping a portrait video in 推荐 opens the 短视频 feed from it, like the
-    /// official app; off opens the normal video page.
+    /// official app, and a swipe up on a portrait video's page goes on to that feed; off opens the normal
+    /// video page and the swipe does nothing.
     var portraitOpensShortVideo: Bool = true
     /// 短视频 「只看竖屏」: skip the landscape videos the feed mixes in (about half of them).
     var shortVideoPortraitOnly: Bool = false

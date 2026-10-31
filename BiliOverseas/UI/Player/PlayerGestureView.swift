@@ -10,13 +10,16 @@ import MediaPlayer
 /// - long press 0.3 s while playing: 长按倍速, released → the previous speed;
 /// - horizontal pan: seek preview (「滑动快进/快退时长」 per full width, applied on release; top-corner cancel zone);
 /// - vertical pan: left third brightness, right third volume (MPVolumeView slider) — 「左右侧滑动调节亮度/音量」 —,
-///   middle third fullscreen — 「中间滑动进入/退出全屏」;
+///   middle third fullscreen — 「中间滑动进入/退出全屏」. A vertical video has neither: up goes on to the next video
+///   as in the 短视频 feed (`PlayerController.swipeToNextVideo`), down leaves fullscreen;
 /// - pinch: zoom the picture 0.75–2× (「还原屏幕」 on the surface);
 /// - pans starting within 25 pt of an edge are ignored (system edge gestures); direction lock at 3×.
 final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     weak var controller: PlayerController?
 
     static let edgeInset: CGFloat = 25
+    /// How far up a vertical video is dragged to go on to the next one.
+    private static let nextVideoDistance: CGFloat = 30
 
     private let singleTap = UITapGestureRecognizer()
     private let doubleTap = UITapGestureRecognizer()
@@ -29,7 +32,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
 
     private enum PanMode {
         /// `ignored`: a vertical drag in a zone whose switch is off; nothing happens until the finger lifts.
-        case undecided, seek, brightness, volume, fullscreen, ignored
+        case undecided, seek, brightness, volume, fullscreen, nextVideo, ignored
     }
 
     private var panMode: PanMode = .undecided
@@ -38,7 +41,8 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     private var panTarget: Double = 0
     private var panCancelled = false
     private var lastTranslation: CGPoint = .zero
-    private var fullscreenFired = false
+    /// The fullscreen or next-video swipe has done its one thing.
+    private var swipeFired = false
     private var level: Double = 0
     private var lastVolumeWrite: CFTimeInterval = 0
     private var adjustingVolume = false
@@ -335,7 +339,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             panMode = .undecided
             panStartPoint = CGPoint(x: p.x - t.x, y: p.y - t.y)
             lastTranslation = .zero
-            fullscreenFired = false
+            swipeFired = false
             panCancelled = false
             decideDirection(t, controller)
             handleMove(t, p, controller)
@@ -362,7 +366,14 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         } else if dy > 3 * dx {
             let w = bounds.width
             let settings = AppSettings.shared.player
-            if panStartPoint.x < w / 3 || panStartPoint.x > w * 2 / 3 {
+            let inSideZone = panStartPoint.x < w / 3 || panStartPoint.x > w * 2 / 3
+            if controller.isVerticalVideo {
+                if controller.canSwipeToNextVideo {
+                    panMode = .nextVideo
+                } else {
+                    panMode = !inSideZone && settings.slideFullscreen ? .fullscreen : .ignored
+                }
+            } else if inSideZone {
                 if !settings.slideVolumeBrightness {
                     panMode = .ignored
                 } else if panStartPoint.x < w / 3 {
@@ -420,13 +431,22 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             }
             controller.overlay.showLevel(.volume, value: level)
         case .fullscreen:
-            guard !fullscreenFired else { break }
+            guard !swipeFired else { break }
             if t.y > 2.5, controller.isFullscreen {
-                fullscreenFired = true
+                swipeFired = true
                 controller.exitFullscreen()
             } else if t.y < -2.5, !controller.isFullscreen {
-                fullscreenFired = true
+                swipeFired = true
                 controller.enterFullscreen()
+            }
+        case .nextVideo:
+            guard !swipeFired else { break }
+            if t.y < -Self.nextVideoDistance {
+                swipeFired = true
+                controller.swipeToNextVideo()
+            } else if t.y > 2.5, controller.isFullscreen, AppSettings.shared.player.slideFullscreen {
+                swipeFired = true
+                controller.exitFullscreen()
             }
         }
         lastTranslation = t
@@ -448,7 +468,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             controller.overlay.hideLevel(after: 0.2)
         case .brightness:
             controller.overlay.hideLevel(after: 0.2)
-        case .undecided, .fullscreen, .ignored:
+        case .undecided, .fullscreen, .nextVideo, .ignored:
             break
         }
         panMode = .undecided

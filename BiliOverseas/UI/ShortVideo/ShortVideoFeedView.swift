@@ -11,8 +11,8 @@ struct ShortVideoFeedView: View {
     @State private var coinFor: ShortVideoItem?
     @State private var favoriteFor: ShortVideoItem?
 
-    init(start: ShortVideoItem? = nil) {
-        _model = StateObject(wrappedValue: ShortVideoFeedModel(start: start))
+    init(start: ShortVideoItem? = nil, startsAfterEntry: Bool = false) {
+        _model = StateObject(wrappedValue: ShortVideoFeedModel(start: start, startsAfterEntry: startsAfterEntry))
     }
 
     var body: some View {
@@ -42,7 +42,13 @@ struct ShortVideoFeedView: View {
         .toolbar(.hidden, for: .tabBar)
         .statusBarHidden(true)
         .task { await model.loadInitialIfNeeded() }
-        .onAppear { model.setVisible(true) }
+        .onAppear {
+            if router.advanceShortVideos {
+                router.advanceShortVideos = false
+                model.advance()
+            }
+            model.setVisible(true)
+        }
         .onDisappear { model.setVisible(false) }
         // A push from inside the comments (a commenter's space, login…) lands under the sheet: close it.
         .onChange(of: router.path.count) { _ in

@@ -122,9 +122,9 @@ struct PlayerSettingsView: View {
                                 options: Self.seekStepOptions) { SettingsFormat.seconds($0) }
             SettingsValuePicker(title: "滑动快进/快退时长", selection: $settings.player.slideSeekSeconds,
                                 options: Self.slideSeekOptions) { SettingsFormat.seconds($0) }
-            SettingsToggleRow(title: "左右侧滑动调节亮度/音量", subtitle: "在画面左侧上下滑动调节亮度，右侧调节音量",
+            SettingsToggleRow(title: "左右侧滑动调节亮度/音量", subtitle: "在画面左侧上下滑动调节亮度，右侧调节音量（竖屏视频没有）",
                               isOn: $settings.player.slideVolumeBrightness)
-            SettingsToggleRow(title: "中间滑动进入/退出全屏", subtitle: "在画面中间上滑进入全屏，下滑退出全屏",
+            SettingsToggleRow(title: "中间滑动进入/退出全屏", subtitle: "在画面中间上滑进入全屏，下滑退出全屏（竖屏视频上滑是下一个视频）",
                               isOn: $settings.player.slideFullscreen)
         } header: {
             Text("手势")

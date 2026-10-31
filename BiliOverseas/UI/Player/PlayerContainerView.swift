@@ -479,6 +479,8 @@ struct PlayerChromeView: View {
             .padding(.bottom, -VerticalVideoMetrics.progressOverlap)
             .modifier(PlayerVerticalSwipeThrough(controller: controller))
             makeProgressBar(barHeight: 2, height: 22, verticalScreenStyle: true)
+                // A drag under way ends with its video.
+                .id(controller.item?.cid)
                 .padding(.horizontal, 12)
                 .offset(y: VerticalVideoMetrics.progressOverhang)
         }

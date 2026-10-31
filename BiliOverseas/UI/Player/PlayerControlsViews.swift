@@ -271,12 +271,6 @@ struct PlayerScrubTouchArea: UIViewRepresentable {
             return abs(velocity.x) >= abs(velocity.y) || area?.onVerticalDragMoved != nil
         }
 
-        /// A tap on the bar seeks; the page's own tap (pause) waits to see that it is not one.
-        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                               shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            gestureRecognizer === tap && otherGestureRecognizer !== pan && otherGestureRecognizer is UITapGestureRecognizer
-        }
-
         private func fraction(_ recognizer: UIGestureRecognizer) -> CGFloat {
             recognizer.location(in: self).x / max(bounds.width, 1)
         }

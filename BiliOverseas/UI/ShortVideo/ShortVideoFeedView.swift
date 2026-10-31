@@ -26,7 +26,7 @@ struct ShortVideoFeedView: View {
                 } else {
                     ShortVideoPager(items: model.items, index: $model.index,
                                     onReachEnd: { Task { await model.loadMore() } },
-                                    onLanding: { model.landingIndex = $0 }) { item, position in
+                                    onLanding: { model.landing.index = $0 }) { item, position in
                         ShortVideoPageView(item: item, isCurrent: position == model.index,
                                            playback: model.playback(for: item), social: model.social(for: item),
                                            actions: actions)
@@ -139,9 +139,11 @@ struct ShortVideoFeedView: View {
     }
 
     private var topBar: some View {
-        VerticalVideoTopBar(online: model.onlineText, onBack: { dismiss() }, onSearch: { router.push(.searchHome) }) {
-            if let item = model.showing {
-                moreMenu(item)
+        ShortVideoLandingReader(landing: model.landing) {
+            VerticalVideoTopBar(online: model.onlineText, onBack: { dismiss() }, onSearch: { router.push(.searchHome) }) {
+                if let item = model.showing {
+                    moreMenu(item)
+                }
             }
         }
     }
@@ -194,6 +196,14 @@ struct ShortVideoFeedView: View {
             Toggle(isOn: Binding(get: { model.portraitOnly }, set: { model.setPortraitOnly($0) })) {
                 Label("只看竖屏", systemImage: "rectangle.portrait")
             }
+            if settings.acceleration.enabled {
+                Toggle(isOn: Binding(get: { settings.acceleration.verticalVideosDirect }, set: { direct in
+                    settings.acceleration.verticalVideosDirect = direct
+                    ToastCenter.shared.show(direct ? "竖屏视频已禁用加速" : "竖屏视频已开启加速")
+                })) {
+                    Label("禁用加速", systemImage: "bolt.slash")
+                }
+            }
             Button { Task { await model.reload() } } label: {
                 Label("换一批", systemImage: "arrow.clockwise")
             }
@@ -202,6 +212,14 @@ struct ShortVideoFeedView: View {
         }
         .accessibilityLabel("更多")
     }
+}
+
+/// Rebuilds its content when a swipe starts coming to rest on another page, without rebuilding the pages.
+private struct ShortVideoLandingReader<Content: View>: View {
+    @ObservedObject var landing: ShortVideoLanding
+    @ViewBuilder let content: () -> Content
+
+    var body: some View { content() }
 }
 
 /// What the page's buttons do; navigation, sheets and the play state belong to the feed screen.
@@ -231,51 +249,59 @@ struct ShortVideoPageView: View {
 
     var body: some View {
         GeometryReader { geo in
-            ZStack {
-                Color.black
-                ShortVideoSurface(player: playback.player, fill: fills(in: geo.size), readyForDisplay: $readyForDisplay)
-                if !readyForDisplay || playback.phase != .ready {
-                    RemoteImage(url: item.cover, contentMode: fills(in: geo.size) ? .fill : .fit)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .clipped()
-                        .allowsHitTesting(false)
-                }
-                LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 110)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .allowsHitTesting(false)
-                LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
-                    .frame(height: 300)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                    .allowsHitTesting(false)
-                // Below the top bar; the controls below it stay readable over the danmaku.
-                ShortVideoDanmakuLayer(danmaku: playback.danmaku)
-                    .padding(.top, VerticalVideoMetrics.topBarHeight)
-                    .allowsHitTesting(false)
-                statusOverlay
-                ForEach(bursts) { burst in
-                    VerticalVideoLikeBurstView(burst: burst)
-                        .position(burst.location)
-                }
-                overlay
+            ZStack(alignment: .bottom) {
+                page(in: geo)
+                // Beside the page, not in it: the page's gestures would take a finger held still on the bar.
+                progress
             }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2, coordinateSpace: .local) { location in doubleTap(at: location) }
-            .onTapGesture { actions.togglePlay(item) }
-            .onLongPressGesture(minimumDuration: 0.4, maximumDistance: 12, perform: {
-                guard AppSettings.shared.player.longPressSpeedEnabled, !playback.isPaused else { return }
-                playback.setFastForward(true)
-            }, onPressingChanged: { pressing in
-                if !pressing, playback.isFastForward { playback.setFastForward(false) }
-            })
-            .accessibilityElement(children: .contain)
-            .accessibilityAction(named: Text(playback.isPaused ? "播放" : "暂停")) { actions.togglePlay(item) }
         }
         .ignoresSafeArea()
         .onChange(of: isCurrent) { current in
             if !current { titleExpanded = false }
         }
+    }
+
+    private func page(in geo: GeometryProxy) -> some View {
+        ZStack {
+            Color.black
+            ShortVideoSurface(player: playback.player, fill: fills(in: geo.size), readyForDisplay: $readyForDisplay)
+            if !readyForDisplay || playback.phase != .ready {
+                RemoteImage(url: item.cover, contentMode: fills(in: geo.size) ? .fill : .fit)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
+                    .allowsHitTesting(false)
+            }
+            LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
+                .frame(height: 110)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .allowsHitTesting(false)
+            LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
+                .frame(height: 300)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+                .allowsHitTesting(false)
+            // Below the top bar; the controls below it stay readable over the danmaku.
+            ShortVideoDanmakuLayer(danmaku: playback.danmaku)
+                .padding(.top, VerticalVideoMetrics.topBarHeight)
+                .allowsHitTesting(false)
+            statusOverlay
+            ForEach(bursts) { burst in
+                VerticalVideoLikeBurstView(burst: burst)
+                    .position(burst.location)
+            }
+            overlay
+        }
+        .frame(width: geo.size.width, height: geo.size.height)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2, coordinateSpace: .local) { location in doubleTap(at: location) }
+        .onTapGesture { actions.togglePlay(item) }
+        .onLongPressGesture(minimumDuration: 0.4, maximumDistance: 12, perform: {
+            guard AppSettings.shared.player.longPressSpeedEnabled, !playback.isPaused else { return }
+            playback.setFastForward(true)
+        }, onPressingChanged: { pressing in
+            if !pressing, playback.isFastForward { playback.setFastForward(false) }
+        })
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: Text(playback.isPaused ? "播放" : "暂停")) { actions.togglePlay(item) }
     }
 
     private func fills(in size: CGSize) -> Bool {
@@ -289,12 +315,9 @@ struct ShortVideoPageView: View {
                 Text(message)
                     .font(.footnote)
                     .multilineTextAlignment(.center)
-                Button("重试") {
-                    playback.close()
-                    playback.play()
-                }
-                .buttonStyle(.bordered)
-                .tint(.white)
+                Button("重试") { playback.retry() }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
             }
             .foregroundStyle(.white)
             .padding(24)
@@ -335,19 +358,22 @@ struct ShortVideoPageView: View {
                 VerticalVideoActionColumn(actions: videoActions)
             }
             .padding(.leading, 12)
-            .padding(.bottom, -VerticalVideoMetrics.progressOverlap)
-            PlayerProgressBar(timeline: playback.timeline, chapters: [], segments: [], clips: [], barHeight: 2,
-                              height: 22, verticalScreenStyle: true,
-                              onScrubBegan: {},
-                              onScrubChanged: { scrubbing = $0 },
-                              onScrubEnded: { target in
-                                  scrubbing = nil
-                                  playback.seek(to: target)
-                              },
-                              onScrubCancelled: { scrubbing = nil })
-                .padding(.horizontal, 12)
-                .offset(y: VerticalVideoMetrics.progressOverhang)
+            .padding(.bottom, 22 - VerticalVideoMetrics.progressOverlap)
         }
+    }
+
+    private var progress: some View {
+        PlayerProgressBar(timeline: playback.timeline, chapters: [], segments: [], clips: [], barHeight: 2,
+                          height: 22, verticalScreenStyle: true,
+                          onScrubBegan: {},
+                          onScrubChanged: { scrubbing = $0 },
+                          onScrubEnded: { target in
+                              scrubbing = nil
+                              playback.seek(to: target)
+                          },
+                          onScrubCancelled: { scrubbing = nil })
+            .padding(.horizontal, 12)
+            .offset(y: VerticalVideoMetrics.progressOverhang)
     }
 
     private var videoActions: PlayerFullscreenActions {

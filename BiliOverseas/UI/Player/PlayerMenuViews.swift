@@ -339,6 +339,11 @@ struct PlayerMenuBuilder {
                                   kind: .toggle(Binding(get: { settings.player.backgroundPlay },
                                                         set: { settings.player.backgroundPlay = $0 }))))
         if controller.item?.localFileURL == nil {
+            if controller.isVerticalVideo, settings.acceleration.enabled {
+                rows.append(PlayerMenuRow(id: "more.verticalDirect", title: "竖屏视频禁用加速",
+                                          kind: .toggle(Binding(get: { settings.acceleration.verticalVideosDirect },
+                                                                set: { settings.acceleration.verticalVideosDirect = $0 }))))
+            }
             // 「当前：{cdn}，无法播放请切换」: mode, hosts and threads apply to the playing video at once.
             rows.append(PlayerMenuRow(id: "more.cdn", title: "CDN 设置",
                                       detail: "当前：\(settings.acceleration.cdnMode.title)", chevron: true,

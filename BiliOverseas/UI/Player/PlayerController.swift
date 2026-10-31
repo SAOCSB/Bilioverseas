@@ -450,6 +450,9 @@ final class PlayerController: ObservableObject {
     /// A `rebuild` is preparing its new item (reset when it installs or gives up).
     private var rebuildPending = false
     private var pendingSwitchToast: String?
+    /// An acceleration switch was flipped while a stream was being prepared or starting, whose path was chosen before
+    /// that: looked at again once it has started.
+    private var accelerationSwitchPending = false
     private var switchRevert: (quality: Int?, audio: Int?, codec: VideoCodecPreference?, forceAVC: Bool)?
     private var tickCount = 0
     private var itemObservations: [NSKeyValueObservation] = []
@@ -489,7 +492,7 @@ final class PlayerController: ObservableObject {
         setupPiP()
         // `@Published` emits before the value is stored: hop once so the handler reads the new settings.
         accelerationObservation = AppSettings.shared.$acceleration
-            .map { [$0.enabled, $0.accelerateBangumi] }
+            .map { [$0.enabled, $0.accelerateBangumi, $0.verticalVideosDirect] }
             .removeDuplicates()
             .dropFirst()
             .sink { [weak self] _ in
@@ -781,10 +784,12 @@ final class PlayerController: ObservableObject {
             // It counted as playing when the app left (`appDidEnterBackground`), for the video that did not come.
             pausedByBackground = false
             backgroundTask?.cancel()
+        } else if isCoveredByPage {
+            // Goes on with its page, not when the app is back.
+            pausedByBackground = false
+            resumeOnContainerAppear = true
         } else if pausedByBackground {
             // Goes on when the app is back (`appWillEnterForeground`).
-        } else if isCoveredByPage {
-            resumeOnContainerAppear = true
         } else {
             play()
         }
@@ -905,13 +910,16 @@ final class PlayerController: ObservableObject {
 
     /// 启用海外加速 / 剧集加速 changed: the playing item is rebuilt on the matching path (btr-core §3).
     private func accelerationSwitchesChanged() {
-        guard let target = item, target.localFileURL == nil, playInfo != nil, startupDone, !forceNoProxy else { return }
+        guard let target = item, target.localFileURL == nil, playInfo != nil, !forceNoProxy else { return }
+        guard startupDone, !rebuildPending else {
+            accelerationSwitchPending = true
+            return
+        }
         switch status {
         case .failed, .ended, .idle: return
         default: break
         }
-        let s = AppSettings.shared.acceleration
-        let want = s.enabled && (target.epId == 0 || s.accelerateBangumi)
+        let want = AppSettings.shared.acceleration.accelerates(pgc: target.epId != 0, vertical: target.isVertical)
         guard want != isAccelerated else { return }
         if want {
             // A manual switch gives acceleration a fresh chance (also after an earlier fallback).
@@ -969,8 +977,7 @@ final class PlayerController: ObservableObject {
 
     private func retakeDecision(windowStart: Double, generation lgen: Int) -> RetakeDecision {
         guard lgen == loadGeneration, forceDirect, !forceNoProxy, let target = item else { return .stop }
-        let s = AppSettings.shared.acceleration
-        guard s.enabled, target.epId == 0 || s.accelerateBangumi,
+        guard AppSettings.shared.acceleration.accelerates(pgc: target.epId != 0, vertical: target.isVertical),
               ProcessInfo.processInfo.systemUptime - windowStart <= Self.retakeWindow else { return .stop }
         // Never during a stall, a seek or another rebuild: a healthy direct playback is not interrupted. The
         // fallback's own direct rebuild may still be preparing (the failed accelerated item is installed until then).
@@ -1256,7 +1263,7 @@ final class PlayerController: ObservableObject {
         let settings = AppSettings.shared
         let pgc = target.epId > 0
         let retake = reason == .retake
-        let accelerationOn = settings.acceleration.enabled && (!pgc || settings.acceleration.accelerateBangumi)
+        let accelerationOn = settings.acceleration.accelerates(pgc: pgc, vertical: target.isVertical)
         let wantAccel = accelerationOn && (!forceDirect || retake)
         let allowHDR = settings.player.allowHDR && PlayerDeviceSupport.hdrEligible
         let total = info.duration > 0 ? info.duration : target.duration
@@ -1634,6 +1641,7 @@ final class PlayerController: ObservableObject {
         isAccelerated = false
         isProgressive = false
         audioOnlyStream = nil
+        accelerationSwitchPending = false
         resetRetake()
         resetFeatureState()
     }
@@ -1765,6 +1773,10 @@ final class PlayerController: ObservableObject {
         if let toast = pendingSwitchToast {
             ToastCenter.shared.show(toast)
             pendingSwitchToast = nil
+        }
+        if accelerationSwitchPending {
+            accelerationSwitchPending = false
+            accelerationSwitchesChanged()
         }
         transientMessage = nil
         switchRevert = nil
@@ -1977,7 +1989,14 @@ final class PlayerController: ObservableObject {
         autoExitTask?.cancel()
         autoExitTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_200_000_000)
-            // Not from under a sheet: leaving fullscreen closes it, with whatever is being typed there.
+            // Not from under a sheet: leaving fullscreen closes it, with whatever is being typed there. Once it has
+            // gone, what comes next gets the same time to load.
+            var waited = false
+            while let self, !Task.isCancelled, self.status == .ended, self.overlay.sheet != nil {
+                waited = true
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+            if waited { try? await Task.sleep(nanoseconds: 1_200_000_000) }
             guard let self, !Task.isCancelled, self.status == .ended, self.overlay.sheet == nil else { return }
             self.exitFullscreen()
         }

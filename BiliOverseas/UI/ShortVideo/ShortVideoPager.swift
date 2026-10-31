@@ -103,6 +103,11 @@ struct ShortVideoPager<Item: Identifiable, Page: View>: UIViewRepresentable {
 
         func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { settle(scrollView) }
 
+        /// A finger catching a page as it comes to rest: where it will land is open again.
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            DispatchQueue.main.async { [parent] in parent.onLanding(nil) }
+        }
+
         func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint,
                                        targetContentOffset: UnsafeMutablePointer<CGPoint>) {
             let height = scrollView.bounds.height

@@ -102,6 +102,8 @@ struct AccelerationSettingsView: View {
 
     private var contentSection: some View {
         Section {
+            SettingsToggleRow(title: "竖屏视频禁用加速", subtitle: "短视频和竖屏视频用单条连接直接播放，起播通常更快；经常卡顿时可以关闭",
+                              isOn: $settings.acceleration.verticalVideosDirect)
             SettingsToggleRow(title: "剧集加速", subtitle: "加速番剧、电影、纪录片等剧集",
                               isOn: $settings.acceleration.accelerateBangumi)
             // Not implemented: live rooms always play straight from the CDN (`accelerateLive` is never read).

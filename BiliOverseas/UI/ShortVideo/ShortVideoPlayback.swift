@@ -2,11 +2,12 @@ import AVFoundation
 import Combine
 import SwiftUI
 
-/// The player of one 短视频 item: the html5 MP4 (one file, fast to start) served through the
-/// acceleration engine (`prepareProgressive`), retried without acceleration, then played straight
-/// from the CDN. It feeds the engine session the signals the main player does (see the wiring notes
-/// in AccelerationEngine.swift). The feed keeps the current item and its neighbours prepared so a
-/// swipe starts at once; the video loops like the official app's.
+/// The player of one 短视频 item: the DASH streams through the local proxy, as in the main player, on a single
+/// connection unless 「竖屏视频禁用加速」 is off. They start faster than the html5 MP4, which is rarely watched and often has
+/// to come from further away the first time. That MP4 remains the fallback, through the proxy and then straight from the
+/// CDN. It feeds the engine session the signals the main player does (see the wiring notes in AccelerationEngine.swift).
+/// The feed keeps the current item and its neighbours prepared so a swipe starts at once; the video loops like the
+/// official app's.
 @MainActor
 final class ShortVideoPlayback: ObservableObject {
     enum Phase: Equatable {
@@ -31,6 +32,8 @@ final class ShortVideoPlayback: ObservableObject {
     @Published private(set) var isFastForward = false
 
     private var session: PlaybackSession?
+    /// Whether the stream was loaded for acceleration.
+    private var usesAcceleration = false
     private var loadTask: Task<Void, Never>?
     private var timeObserver: Any?
     private var observers: Set<AnyCancellable> = []
@@ -131,6 +134,25 @@ final class ShortVideoPlayback: ObservableObject {
 
     private var fastRate: Float { Float(max(1.25, AppSettings.shared.player.longPressSpeed)) }
 
+    /// 重试: loads again and goes on where it was, or where it was dragged to while it loaded.
+    func retry() {
+        if resumeAt == nil, position > 1 { resumeAt = position }
+        teardown()
+        play()
+    }
+
+    private var wantsAcceleration: Bool {
+        AppSettings.shared.acceleration.accelerates(pgc: false, vertical: item.isPortrait)
+    }
+
+    /// 启用海外加速 / 竖屏视频禁用加速 changed: loads again on the matching path, from where it is.
+    func accelerationChanged() {
+        guard phase != .idle, wantsAcceleration != usesAcceleration else { return }
+        if resumeAt == nil, position > 1 { resumeAt = position }
+        teardown()
+        prepare()
+    }
+
     /// Stops everything and releases the stream; `prepare()` starts over.
     func close() {
         reportHistoryIfNeeded()
@@ -175,6 +197,20 @@ final class ShortVideoPlayback: ObservableObject {
             resolvedCid = cid
             let (aid, bvid) = (item.aid, item.bvid)
             let qn = min(AppSettings.shared.player.preferredQuality, VideoQuality.q1080.rawValue)
+            let accelerate = wantsAcceleration
+            usesAcceleration = accelerate
+            let routeKey = (bvid.isEmpty ? "av\(aid)" : bvid) + ":short"
+            if let dash = await prepareDash(cid: cid, qn: qn, routeKey: routeKey, accelerate: accelerate) {
+                if Task.isCancelled {
+                    dash.session.close()
+                    return
+                }
+                if dash.duration > 0 { duration = dash.duration }
+                danmaku.load(cid: cid, aid: aid, duration: duration)
+                session = dash.session
+                install(AVPlayerItem(asset: AVURLAsset(url: dash.session.url)))
+                return
+            }
             let info = try await VideoAPI.progressivePlayInfo(aid: aid, bvid: bvid, cid: cid, qn: qn)
             try Task.checkCancellation()
             guard let segment = info.durl.first else { throw BiliError.other("视频资源不存在") }
@@ -184,12 +220,10 @@ final class ShortVideoPlayback: ObservableObject {
             let refresher = AccelerationEngine.progressiveRefresher(for: segment) {
                 try await VideoAPI.progressivePlayInfo(aid: aid, bvid: bvid, cid: cid, qn: qn).durl
             }
-            let routeKey = (bvid.isEmpty ? "av\(aid)" : bvid) + ":short"
-            let attempts = AppSettings.shared.acceleration.enabled ? [true, false] : [false]
             var made: PlaybackSession?
-            for accelerate in attempts {
+            for attempt in accelerate ? [true, false] : [false] {
                 made = try? await AccelerationEngine.shared.prepareProgressive(
-                    routeKey: routeKey, segment: segment, accelerate: accelerate, refreshURLs: refresher)
+                    routeKey: routeKey, segment: segment, accelerate: attempt, refreshURLs: refresher)
                 if made != nil || Task.isCancelled { break }
             }
             if Task.isCancelled {
@@ -211,6 +245,30 @@ final class ShortVideoPlayback: ObservableObject {
             if Task.isCancelled || ListMapping.isCancellation(error) { return }
             phase = .failed((error as? LocalizedError)?.errorDescription ?? "加载失败")
         }
+    }
+
+    /// nil: no usable DASH answer or session, which the MP4 path below may still be able to play.
+    private func prepareDash(cid: Int64, qn: Int, routeKey: String, accelerate: Bool)
+    async -> (session: PlaybackSession, duration: Double)? {
+        let (aid, bvid) = (item.aid, item.bvid)
+        let player = AppSettings.shared.player
+        let hdr = player.allowHDR && PlayerDeviceSupport.hdrEligible
+        let constraints = PlayerStreamConstraints(preferredQuality: qn, codec: player.preferredCodec,
+                                                  av1Supported: PlayerDeviceSupport.av1HardwareDecode, hdrAllowed: hdr,
+                                                  preferLossless: false, forceNormalAudio: true)
+        guard let info = try? await VideoAPI.playInfo(aid: aid, bvid: bvid, cid: cid, qn: qn), info.isDash, !info.isDRM,
+              let picked = PlayerStreamPicker.choose(info, constraints) else { return nil }
+        let refresher = PlayerStreamPicker.makeRefresher(aid: aid, bvid: bvid, cid: cid, epId: 0, seasonId: 0, choice: picked)
+        for attempt in accelerate ? [true, false] : [false] {
+            let request = PlaybackRequest(routeKey: routeKey, video: picked.video, audio: picked.audio,
+                                          duration: info.duration, accelerate: attempt, allowHDR: hdr,
+                                          refreshURLs: refresher)
+            if let made = try? await AccelerationEngine.shared.prepare(request) {
+                return (made, info.duration)
+            }
+            if Task.isCancelled { return nil }
+        }
+        return nil
     }
 
     private func install(_ playerItem: AVPlayerItem) {

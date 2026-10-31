@@ -36,11 +36,19 @@ struct AccelerationSettings: SettingsGroup {
     var manualConcurrency: Int = 16
     /// Accelerate bangumi / movies / documentaries too.
     var accelerateBangumi: Bool = true
+    /// 「竖屏视频禁用加速」. Short vertical videos need a quick start more than throughput, and measured from the UK they
+    /// start two to three times faster on a single connection to the address playurl gives.
+    var verticalVideosDirect: Bool = true
     /// Reserved: BTR's live-stream switch. Live acceleration is not implemented (live rooms play straight from the
     /// CDN) and nothing reads this; it stays so stored settings keep decoding. The settings row shows 「暂未支持」.
     var accelerateLive: Bool = false
     /// Seconds of media AVPlayer should try to keep buffered ahead.
     var forwardBufferSeconds: Double = 60
+
+    /// Whether a video of this kind goes through the BTR downloader.
+    func accelerates(pgc: Bool, vertical: Bool) -> Bool {
+        enabled && (!pgc || accelerateBangumi) && !(vertical && verticalVideosDirect)
+    }
 }
 
 /// In-video sponsor-segment skipping (owned by Core/SmartSkip).

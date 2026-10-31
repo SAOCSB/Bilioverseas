@@ -12,7 +12,6 @@ struct BiliOverseasApp: App {
             RootTabView()
                 .environmentObject(settings)
                 .environmentObject(auth)
-                .preferredColorScheme(colorScheme)
                 .tint(.biliPink)
                 .onAppear {
                     // Toasts get their own window above every sheet / full-screen cover.
@@ -28,17 +27,9 @@ struct BiliOverseasApp: App {
         }
     }
 
-    private var colorScheme: ColorScheme? {
-        switch settings.general.theme {
-        case .system: return nil
-        case .light: return .light
-        case .dark: return .dark
-        }
-    }
-
-    /// `preferredColorScheme(nil)` does not reliably hand an explicit light / dark choice back to the
-    /// system (the window can keep the last forced style until relaunch), so the window-level override
-    /// is set as well; `.unspecified` follows the system again.
+    /// On the window, not with `preferredColorScheme`: that hands the status bar to the root (a screen pushed with dark
+    /// controls, like 短视频, would get dark text on black) and does not reliably hand an explicit light / dark choice
+    /// back to the system (the window can keep the last forced style until relaunch). `.unspecified` follows the system.
     private func applyInterfaceStyle(_ theme: AppTheme) {
         let style: UIUserInterfaceStyle
         switch theme {

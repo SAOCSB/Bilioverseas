@@ -20,9 +20,8 @@ final class ShortVideoFeedModel: ObservableObject {
     @Published private(set) var portraitOnly = AppSettings.shared.general.shortVideoOnlyPortrait
     /// 「N人正在看」 of the video on screen.
     @Published private(set) var onlineText: String?
-    /// The page a swipe is coming to rest on (nil: none is). `index` follows once it has stopped. Not published: a
-    /// render in the middle of the swipe's deceleration would rebuild the visible pages for nothing.
-    var landingIndex: Int?
+    /// Where a swipe is coming to rest. An object of its own (`ShortVideoLanding`).
+    let landing = ShortVideoLanding()
 
     /// Entry video (tapped in a list), shown first while page 1 loads; nil starts from the feed's pick.
     let start: ShortVideoItem?
@@ -52,13 +51,24 @@ final class ShortVideoFeedModel: ObservableObject {
         center.publisher(for: UIApplication.willEnterForegroundNotification)
             .sink { [weak self] _ in self?.setAppActive(true) }
             .store(in: &cancellables)
+        // `@Published` emits before the value is stored: hop once so the players read the new settings.
+        AppSettings.shared.$acceleration
+            .map { [$0.enabled, $0.verticalVideosDirect] }
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.playbacks.values.forEach { $0.accelerationChanged() }
+                }
+            }
+            .store(in: &cancellables)
     }
 
     var current: ShortVideoItem? { items.indices.contains(index) ? items[index] : nil }
 
     /// What the bars around the pages act on: while a swipe comes to rest, the video it comes to, not the one leaving.
     var showing: ShortVideoItem? {
-        if let landingIndex, items.indices.contains(landingIndex) { return items[landingIndex] }
+        if let landing = landing.index, items.indices.contains(landing) { return items[landing] }
         return current
     }
 
@@ -269,6 +279,13 @@ final class ShortVideoFeedModel: ObservableObject {
             ToastCenter.shared.show((error as? LocalizedError)?.errorDescription ?? "操作失败")
         }
     }
+}
+
+/// The page a swipe is coming to rest on (nil: none is), ahead of the model's `index`, which follows once it has stopped.
+/// Apart from the model: a render in the middle of the swipe's deceleration would rebuild the visible pages for nothing.
+@MainActor
+final class ShortVideoLanding: ObservableObject {
+    @Published var index: Int?
 }
 
 /// Like / coin / favourite / follow state of one item, loaded when it comes on screen.

@@ -113,7 +113,13 @@ final class ToastWindowRootController: UIHostingController<ToastOverlay> {
         appTop()?.supportedInterfaceOrientations ?? OrientationManager.shared.mask
     }
     override var prefersStatusBarHidden: Bool { statusBarHiddenSource?.prefersStatusBarHidden ?? false }
-    override var preferredStatusBarStyle: UIStatusBarStyle { statusBarStyleSource?.preferredStatusBarStyle ?? .default }
+    override var preferredStatusBarStyle: UIStatusBarStyle {
+        guard let source = statusBarStyleSource else { return .default }
+        let style = source.preferredStatusBarStyle
+        // `.default` goes by the traits of whichever controller is asked, here this one: 短视频 is dark in a light app.
+        guard style == .default else { return style }
+        return source.traitCollection.userInterfaceStyle == .dark ? .lightContent : .darkContent
+    }
     override var prefersHomeIndicatorAutoHidden: Bool {
         var vc = appTop()
         while let child = vc?.childForHomeIndicatorAutoHidden { vc = child }

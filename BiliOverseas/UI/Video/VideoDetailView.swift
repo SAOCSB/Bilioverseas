@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import UIKit
 
@@ -508,6 +509,9 @@ final class VideoDetailModel: ObservableObject {
     private var swipeQueueTask: Task<Void, Never>?
     private var swipeSeenIDs: Set<String> = []
     private var swipeFetchNotBefore = Date.distantPast
+    /// The video ended with the fullscreen comments sheet open: 连播 goes on when that closes.
+    private var autoNextHeldBySheet = false
+    private var sheetObservation: AnyCancellable?
     /// Bumped by every content load; stale responses are dropped.
     private var generation = 0
     /// Bumped by every content / part / episode change; stale side data is dropped.
@@ -1143,7 +1147,10 @@ final class VideoDetailModel: ObservableObject {
             }
         }
         if toVertical {
-            guard manual || !commentsHoldAutoNext else { return }
+            guard manual || !commentsHoldAutoNext else {
+                noteAutoNextHeld()
+                return
+            }
             if !manual { player?.beginAutomaticVideoSwipe() }
             performSwipe(.next)
             return
@@ -1158,7 +1165,9 @@ final class VideoDetailModel: ObservableObject {
             switch step {
             case .part: break
             case .episode(let ep) where ep.aid == comments.oid: break
-            default: return
+            default:
+                noteAutoNextHeld()
+                return
             }
         }
         switch step {
@@ -1172,6 +1181,17 @@ final class VideoDetailModel: ObservableObject {
     /// reading. The comments sheet over the fullscreen player has a list of its own, which would stay on the video left.
     private var commentsHoldAutoNext: Bool {
         comments.composerTarget != nil || comments.subRepliesRoot != nil || player?.overlay.sheet == .page("comments")
+    }
+
+    private func noteAutoNextHeld() {
+        autoNextHeldBySheet = player?.overlay.sheet == .page("comments")
+    }
+
+    fileprivate func resumeAutoNextIfHeld() {
+        guard autoNextHeldBySheet else { return }
+        autoNextHeldBySheet = false
+        // Replayed or moved on meanwhile: nothing was waiting any more.
+        if player?.status == .ended { advance(manual: false) }
     }
 
     /// 「下一集」 (fullscreen bar, lock screen next-track) only when there is something to advance to.
@@ -1630,6 +1650,11 @@ extension VideoDetailModel {
         }
         // 列表循环 with nothing else to play: the player loops the item itself (the screen lock stays).
         player.loopsAtEnd = { [weak self] in self?.replaysItselfAtEnd ?? false }
+        // `@Published` emits before the value is stored: hop once so the handler reads the closed sheet.
+        sheetObservation = player.overlay.$sheet.sink { [weak self] sheet in
+            guard sheet == nil else { return }
+            Task { @MainActor [weak self] in self?.resumeAutoNextIfHeld() }
+        }
         player.videoSwipeCover = { [weak self] swipe in self?.swipeCover(swipe) }
         player.onVideoSwipe = { [weak self] swipe in self?.performSwipe(swipe) }
     }

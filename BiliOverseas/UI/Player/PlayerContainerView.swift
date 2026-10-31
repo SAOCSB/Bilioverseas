@@ -475,8 +475,8 @@ struct PlayerChromeView: View {
                     VerticalVideoActionColumn(actions: actions)
                 }
             }
-            .padding(.leading, 14)
-            .padding(.trailing, 6)
+            .padding(.leading, 12)
+            .padding(.bottom, -VerticalVideoMetrics.progressOverlap)
             .modifier(PlayerVerticalSwipeThrough(controller: controller))
             makeProgressBar(barHeight: 2, height: 22, verticalScreenStyle: true)
                 .padding(.horizontal, 12)

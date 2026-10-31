@@ -334,8 +334,8 @@ struct ShortVideoPageView: View {
                 VerticalVideoInfoView(actions: videoActions, title: item.title, expanded: $titleExpanded)
                 VerticalVideoActionColumn(actions: videoActions)
             }
-            .padding(.leading, 14)
-            .padding(.trailing, 6)
+            .padding(.leading, 12)
+            .padding(.bottom, -VerticalVideoMetrics.progressOverlap)
             PlayerProgressBar(timeline: playback.timeline, chapters: [], segments: [], clips: [], barHeight: 2,
                               height: 22, verticalScreenStyle: true,
                               onScrubBegan: {},

@@ -8,13 +8,15 @@ import UIKit
 
 enum VerticalVideoMetrics {
     /// The bar below the picture, not counting the home indicator's inset.
-    static let bottomBarHeight: CGFloat = 56
+    static let bottomBarHeight: CGFloat = 60
     /// The top bar over the picture; danmaku start below it.
     static let topBarHeight: CGFloat = 44
     /// What the uploader and title take above the picture's bottom edge: subtitles and prompts stay above it.
     static let infoHeight: CGFloat = 130
     /// How far the progress bar's touch area reaches below the picture: the line itself runs just above its edge.
     static let progressOverhang: CGFloat = 3
+    /// How far the uploader, the title and the buttons reach down into that touch area, which is mostly empty.
+    static let progressOverlap: CGFloat = 6
 
     /// How far the safe area starts below the status bar (some points on Dynamic Island phones). The picture starts
     /// right under the status bar, so the screen reaches this far above its safe area.
@@ -122,7 +124,7 @@ struct VerticalVideoActionColumn: View {
                 .accessibilityLabel(Text("转发"))
             }
         }
-        .frame(width: 58)
+        .frame(width: 54)
     }
 
     private func button<Icon: View>(count: Int64, label: String, action: @escaping () -> Void,
@@ -272,7 +274,7 @@ struct VerticalVideoBottomBar: View {
                         .font(.system(size: 14))
                         .foregroundColor(.white.opacity(0.55))
                         .padding(.leading, 16)
-                        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+                        .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -282,7 +284,7 @@ struct VerticalVideoBottomBar: View {
                     .frame(width: 1, height: 18)
                 Button(action: onToggle) {
                     VerticalVideoDanmakuSwitch(on: danmakuOn)
-                        .frame(width: 50, height: 36)
+                        .frame(width: 50, height: 32)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -315,7 +317,7 @@ struct VerticalVideoBottomBar: View {
             .accessibilityLabel(Text("弹幕设置"))
         }
         .foregroundColor(.white)
-        .padding(.leading, 10)
+        .padding(.leading, 6)
         .padding(.trailing, 4)
         .frame(height: VerticalVideoMetrics.bottomBarHeight)
     }

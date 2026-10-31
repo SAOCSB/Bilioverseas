@@ -30,6 +30,8 @@ final class ShortVideoPlayback: ObservableObject {
     let timeline = PlayerTimeline()
     /// The long-press 倍速 is active.
     @Published private(set) var isFastForward = false
+    /// Not the video on screen: it keeps what it has and downloads no further than a swipe to it needs.
+    @Published private(set) var isStandingBy = false
 
     private var session: PlaybackSession?
     /// Whether the stream was loaded for acceleration.
@@ -49,6 +51,10 @@ final class ShortVideoPlayback: ObservableObject {
     /// Furthest position reached, for the watch-history heartbeat.
     private var furthest: Double = 0
     private var reportedHistory = false
+    /// Runs when this video first plays (`whenStarted`).
+    private var onStarted: (() -> Void)?
+    /// Since when `play()` has been waiting (`PlaybackTrace`).
+    private var playAskedAt: TimeInterval?
 
     init(item: ShortVideoItem) {
         self.item = item
@@ -82,6 +88,8 @@ final class ShortVideoPlayback: ObservableObject {
     func play() {
         wantsPlay = true
         reportedHistory = false
+        setStandingBy(false)
+        if !isPlaying, playAskedAt == nil { playAskedAt = ProcessInfo.processInfo.systemUptime }
         if rebuildIfEndpointLost() { return }
         prepare()
         if phase == .ready { player.playImmediately(atRate: isFastForward ? fastRate : 1) }
@@ -98,8 +106,48 @@ final class ShortVideoPlayback: ObservableObject {
     }
 
     func pause() {
+        stopPlaying()
+        setStandingBy(false)
+    }
+
+    func standBy() {
+        stopPlaying()
+        setStandingBy(true)
+    }
+
+    private func stopPlaying() {
         wantsPlay = false
+        playAskedAt = nil
         player.pause()
+        runStartedAction()
+    }
+
+    private func setStandingBy(_ on: Bool) {
+        guard on != isStandingBy else { return }
+        isStandingBy = on
+        player.currentItem?.preferredForwardBufferDuration = forwardBuffer
+        session?.limitPrefetch(toSeconds: on ? PlayerStreamPreload.prefetchSeconds : nil)
+    }
+
+    private var forwardBuffer: Double {
+        isStandingBy ? PlayerStreamPreload.prefetchSeconds : max(5, AppSettings.shared.acceleration.forwardBufferSeconds)
+    }
+
+    /// `action` once this video plays, or fails or is paused on its way there; right away if it already does or is not
+    /// meant to.
+    func whenStarted(_ action: @escaping () -> Void) {
+        if startedPlaying || !wantsPlay {
+            onStarted = nil
+            action()
+        } else {
+            onStarted = action
+        }
+    }
+
+    private func runStartedAction() {
+        let action = onStarted
+        onStarted = nil
+        action?()
     }
 
     func togglePlay() {
@@ -167,6 +215,7 @@ final class ShortVideoPlayback: ObservableObject {
         reportHistoryIfNeeded()
         wantsPlay = false
         resumeAt = nil
+        onStarted = nil
         teardown()
     }
 
@@ -253,6 +302,7 @@ final class ShortVideoPlayback: ObservableObject {
         } catch {
             if Task.isCancelled || ListMapping.isCancellation(error) { return }
             phase = .failed((error as? LocalizedError)?.errorDescription ?? "加载失败")
+            runStartedAction()
         }
     }
 
@@ -281,7 +331,10 @@ final class ShortVideoPlayback: ObservableObject {
     }
 
     private func install(_ playerItem: AVPlayerItem) {
-        playerItem.preferredForwardBufferDuration = max(5, AppSettings.shared.acceleration.forwardBufferSeconds)
+        playerItem.preferredForwardBufferDuration = forwardBuffer
+        if isStandingBy { session?.limitPrefetch(toSeconds: PlayerStreamPreload.prefetchSeconds) }
+        PlaybackTrace.log("feed install \(item.id) accel=\(usesAcceleration) "
+            + (session == nil ? "mp4 without the proxy" : session?.isHLS == true ? "dash" : "mp4"))
         itemObservers.removeAll()
         observeItem(playerItem)
         player.replaceCurrentItem(with: playerItem)
@@ -342,8 +395,10 @@ final class ShortVideoPlayback: ObservableObject {
     }
 
     private func itemFailed(message: String?) {
+        PlaybackTrace.log("feed item failed \(item.id) \(PlaybackTrace.describe(player.currentItem?.error))")
         guard let session, session.isHLS, session.isEndpointValid, !dashFailed else {
             phase = .failed(message ?? "播放失败")
+            runStartedAction()
             return
         }
         dashFailed = true
@@ -369,7 +424,15 @@ final class ShortVideoPlayback: ObservableObject {
         isPlaying = status == .playing
         isBuffering = wantsPlay && status == .waitingToPlayAtSpecifiedRate
         danmaku.playbackStateDidChange()
-        if status == .playing { startedPlaying = true }
+        if status == .playing {
+            startedPlaying = true
+            if let asked = playAskedAt {
+                playAskedAt = nil
+                let waited = Int((ProcessInfo.processInfo.systemUptime - asked) * 1000)
+                PlaybackTrace.log("feed playing \(item.id) +\(waited)ms")
+            }
+            runStartedAction()
+        }
         if status == .waitingToPlayAtSpecifiedRate, startedPlaying, !seeking,
            player.reasonForWaitingToPlay == .toMinimizeStalls {
             session?.playerDidStall()

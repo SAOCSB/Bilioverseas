@@ -28,35 +28,11 @@ struct PlayerStageView: View {
 
     /// The controls (and sheets) live in exactly one stage at a time: the fullscreen one while fullscreen.
     private var isActive: Bool { (role == .fullscreen) == controller.isFullscreen }
-    /// The video and what is drawn with it (cover, subtitles, loading / error) are in the stage holding the surface,
-    /// which is still the fullscreen one while it turns back after leaving fullscreen.
-    private var holdsSurface: Bool { (role == .fullscreen) == controller.surfaceInFullscreen }
-    private var ignoredEdges: Edge.Set { role == .fullscreen ? .all : [] }
 
     var body: some View {
         GeometryReader { geo in
-            // The vertical-video screen: the picture stays between the status bar and the bar below it. This goes by
-            // the whole window, as the safe area depends on that status bar.
-            let verticalScreen = role == .fullscreen && controller.isVerticalVideo
-                && geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom > geo.size.width
-            let gap = verticalScreen ? VerticalVideoMetrics.statusBarGap : 0
-            let size = CGSize(width: geo.size.width, height: geo.size.height + gap)
-            ZStack(alignment: .top) {
-                Color.black.ignoresSafeArea(edges: ignoredEdges)
-                PlayerSurfaceRepresentable(controller: controller, role: role)
-                    .frame(height: verticalScreen ? max(size.height - VerticalVideoMetrics.bottomBarHeight, 0) : nil)
-                    .ignoresSafeArea(edges: verticalScreen ? [] : ignoredEdges)
-                if isActive || holdsSurface {
-                    PlayerChromeView(controller: controller, overlay: overlay, size: size,
-                                     fullscreen: role == .fullscreen, verticalScreen: verticalScreen,
-                                     showsPicture: holdsSurface && !controller.isVideoSwipeActive,
-                                     showsControls: isActive)
-                }
-            }
-            .frame(width: size.width, height: size.height)
-            .offset(y: -gap)
-            .onAppear { stageChanged(verticalScreen: verticalScreen) }
-            .onChange(of: verticalScreen) { stageChanged(verticalScreen: $0) }
+            PlayerStageContent(controller: controller, overlay: overlay, role: role, measured: geo.size,
+                               safeArea: geo.safeAreaInsets)
         }
         // The keyboard of 发弹幕 comes up in a sheet: the video stays where it is behind that.
         .ignoresSafeArea(role == .fullscreen ? .keyboard : [])
@@ -65,13 +41,54 @@ struct PlayerStageView: View {
         }
     }
 
-    private func stageChanged(verticalScreen: Bool) {
-        if role == .fullscreen { controller.fullscreenStageChanged(verticalScreen: verticalScreen) }
-    }
-
     private var sheetBinding: Binding<PlayerSheet?> {
         Binding(get: { isActive ? overlay.sheet : nil },
                 set: { overlay.sheet = $0 })
+    }
+}
+
+/// What the stage draws at the size it measured. A view of its own that observes the controller itself: what a
+/// GeometryReader's closure reads of it stays as it was when the size last changed.
+private struct PlayerStageContent: View {
+    @ObservedObject var controller: PlayerController
+    @ObservedObject var overlay: PlayerOverlayModel
+    let role: PlayerStageRole
+    let measured: CGSize
+    let safeArea: EdgeInsets
+
+    private var isActive: Bool { (role == .fullscreen) == controller.isFullscreen }
+    /// The video and what is drawn with it (cover, subtitles, loading / error) are in the stage holding the surface,
+    /// which is still the fullscreen one while it turns back after leaving fullscreen.
+    private var holdsSurface: Bool { (role == .fullscreen) == controller.surfaceInFullscreen }
+    private var ignoredEdges: Edge.Set { role == .fullscreen ? .all : [] }
+
+    var body: some View {
+        // The vertical-video screen: the picture stays between the status bar and the bar below it. This goes by
+        // the whole window, as the safe area depends on that status bar.
+        let verticalScreen = role == .fullscreen && controller.isVerticalVideo
+            && measured.height + safeArea.top + safeArea.bottom > measured.width
+        let gap = verticalScreen ? VerticalVideoMetrics.statusBarGap : 0
+        let size = CGSize(width: measured.width, height: measured.height + gap)
+        ZStack(alignment: .top) {
+            Color.black.ignoresSafeArea(edges: ignoredEdges)
+            PlayerSurfaceRepresentable(controller: controller, role: role)
+                .frame(height: verticalScreen ? max(size.height - VerticalVideoMetrics.bottomBarHeight, 0) : nil)
+                .ignoresSafeArea(edges: verticalScreen ? [] : ignoredEdges)
+            if isActive || holdsSurface {
+                PlayerChromeView(controller: controller, overlay: overlay, size: size,
+                                 fullscreen: role == .fullscreen, verticalScreen: verticalScreen,
+                                 showsPicture: holdsSurface && !controller.isVideoSwipeActive,
+                                 showsControls: isActive)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .offset(y: -gap)
+        .onAppear { stageChanged(verticalScreen: verticalScreen) }
+        .onChange(of: verticalScreen) { stageChanged(verticalScreen: $0) }
+    }
+
+    private func stageChanged(verticalScreen: Bool) {
+        if role == .fullscreen { controller.fullscreenStageChanged(verticalScreen: verticalScreen) }
     }
 }
 
@@ -212,22 +229,34 @@ struct PlayerChromeView: View {
 
     @ViewBuilder
     private var centerLayer: some View {
-        switch controller.status {
-        case .failed(let message):
-            PlayerErrorView(message: message) { controller.retry() }
-        case .ended:
-            if !overlay.isLocked { replayButton }
-        case .loading, .buffering:
-            if controller.status == .loading || controller.wantsToPlay {
-                PlayerBufferingView(text: bufferingText)
-            }
-        case .paused:
-            // 听视频 has its own label there.
-            if verticalScreen, overlay.seekPreview == nil, controller.audioOnlyStream == nil {
-                PlayerVerticalPausedHint(timeline: controller.timeline)
-            }
-        default:
+        // A swipe pauses the video it leaves on the way, which is not the viewer pausing it.
+        if controller.isVideoSwipeActive {
             EmptyView()
+        } else if controller.isSwitchingBySwipe {
+            // The page goes on by itself: nothing slides in to show that something is coming.
+            PlayerQuietSpinner(waitBegan: controller.waitBegan)
+        } else {
+            switch controller.status {
+            case .failed(let message):
+                PlayerErrorView(message: message) { controller.retry() }
+            case .ended:
+                if !overlay.isLocked { replayButton }
+            case .loading, .buffering:
+                if controller.status == .loading || controller.wantsToPlay {
+                    if controller.isVerticalVideo {
+                        PlayerQuietSpinner(waitBegan: controller.status == .loading ? controller.waitBegan : nil)
+                    } else {
+                        PlayerBufferingView(text: bufferingText)
+                    }
+                }
+            case .paused:
+                // 听视频 has its own label there.
+                if verticalScreen, overlay.seekPreview == nil, controller.audioOnlyStream == nil {
+                    PlayerVerticalPausedHint(timeline: controller.timeline)
+                }
+            default:
+                EmptyView()
+            }
         }
     }
 

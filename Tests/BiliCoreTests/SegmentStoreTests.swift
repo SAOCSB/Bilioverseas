@@ -84,6 +84,23 @@ final class SegmentStoreTests: XCTestCase {
         store.close()
     }
 
+    func testForwardLimitStopsPrefetchUntilLifted() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: Array(repeating: 50_000, count: 8),
+                                           durations: Array(repeating: 2000, count: 8))
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let store = try makeStore(file, downloader: downloader)
+        store.setForwardLimit(4)
+        store.seek(to: 0, outsideBuffer: true)
+        let upToLimit = await engineEventually { store.debugCachedIndices(.video) == [0, 1] }
+        XCTAssertTrue(upToLimit, "\(store.debugCachedIndices(.video))")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(store.debugCachedIndices(.video), [0, 1], "nothing beyond the limit, and no playhead report needed")
+        store.setForwardLimit(nil)
+        let lifted = await engineEventually { store.debugCachedIndices(.video).count == 8 }
+        XCTAssertTrue(lifted, "\(store.debugCachedIndices(.video))")
+        store.close()
+    }
+
     func testWholeFileFromPinnedSegmentsAndTrailingGap() async throws {
         let file = EngineSyntheticMP4.make(segmentSizes: [70_000, 66_000, 90_000], durations: [2000, 2000, 1000],
                                            trailing: 500)

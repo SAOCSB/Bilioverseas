@@ -33,6 +33,8 @@ final class ShortVideoFeedModel: ObservableObject {
     private var appActive = true
     /// The user paused the video on screen (tap); coming back to the screen or the app keeps it paused.
     private var userPaused = false
+    /// The page a swipe coming to rest started ahead of `index` (`setLanding`).
+    private var landingStarted: Int?
     /// Bumped by 换一批 so a page still loading for the old feed is dropped.
     private var generation = 0
     private var loadingGeneration: Int?
@@ -145,9 +147,26 @@ final class ShortVideoFeedModel: ObservableObject {
             fresh.append(item)
         }
         items.append(contentsOf: fresh)
-        // Prepares the new next video when the one on screen was the last.
-        if !fresh.isEmpty { activate() }
+        // Prepares the new next video when the one on screen was the last. A swipe coming to rest does that when it
+        // lands: with the index still on the page it leaves, this would turn its early start around.
+        if !fresh.isEmpty, landingStarted == nil { activate() }
         return fresh.count
+    }
+
+    /// A swipe is coming to rest on `page`: that video starts now, not when the page stands still. nil: where it lands
+    /// is open again (a finger caught the page), or it has landed.
+    func setLanding(_ page: Int?) {
+        landing.index = page
+        if let page, page != index, visible, appActive, items.indices.contains(page), let current {
+            landingStarted = page
+            playbacks[current.id]?.standBy()
+            playback(for: items[page]).play()
+        } else if let started = landingStarted {
+            landingStarted = nil
+            guard started != index else { return }
+            if items.indices.contains(started) { playbacks[items[started].id]?.standBy() }
+            activate()
+        }
     }
 
     /// Tap to pause / resume the video on screen.
@@ -222,13 +241,8 @@ final class ShortVideoFeedModel: ObservableObject {
         for id in socials.keys where !window.contains(id) && id != current.id { socials[id] = nil }
 
         if visible, items.indices.contains(index - 1), let previous = playbacks[items[index - 1].id] {
-            previous.pause()
+            previous.standBy()
             previous.reportHistoryIfNeeded()
-        }
-        if visible, items.indices.contains(index + 1) {
-            let next = playback(for: items[index + 1])
-            next.pause()
-            next.prepare()
         }
         let now = playback(for: current)
         if visible && appActive && !userPaused {
@@ -236,6 +250,15 @@ final class ShortVideoFeedModel: ObservableObject {
         } else {
             now.pause()
             now.prepare()
+        }
+        if visible, items.indices.contains(index + 1) {
+            let next = playback(for: items[index + 1])
+            next.standBy()
+            // Once the video on screen has started: until then they would share the connection.
+            now.whenStarted { [weak self, weak next] in
+                guard let self, let next, self.playbacks[next.item.id] === next else { return }
+                next.prepare()
+            }
         }
         Task { await social(for: current).loadRelationIfNeeded() }
         Task { await social(for: current).loadFansIfNeeded(mid: current.ownerMid) }

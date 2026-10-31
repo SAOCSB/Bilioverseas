@@ -167,7 +167,12 @@ final class PlayerSurfaceView: UIView {
             swipeCover.isHidden = false
             setVideoSwipe(offset: videoView.transform.ty, coverFromBelow: toNext)
         }
-        swipeCover.showsSpinner = true
+        // Only for a wait long enough to notice: a video made ready ahead takes no longer than the slide.
+        let generation = swipeGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, generation == self.swipeGeneration else { return }
+            self.swipeCover.showsSpinner = true
+        }
         UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
             self.setVideoSwipe(offset: toNext ? -self.bounds.height : self.bounds.height, coverFromBelow: toNext)
         } completion: { _ in

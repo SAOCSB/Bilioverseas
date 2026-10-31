@@ -312,6 +312,8 @@ final class SegmentStore {
     private var cachedBytes: Int64 = 0
     private var playhead = Playhead()
     private var planner: PrefetchPlanner
+    /// Prefetching goes no further than this ahead of the playhead (nil: `forwardSeconds`).
+    private var forwardLimit: Double?
     private var closed = false
 
     init(tracks specs: [SegmentStoreTrack], downloader: BTRDownloading, clock: MonotonicClock = SystemClock.shared,
@@ -403,6 +405,20 @@ final class SegmentStore {
             planner.reset(time: playhead.time, nowMs: now, tracks: segmentListsLocked())
             for track in tracks.values { track.warmEnd = nil }
         }
+        let cancels = replanLocked(now: now)
+        lock.unlock()
+        for task in cancels { task.cancel() }
+    }
+
+    /// A video that may never play downloads only what a quick start needs; nil lifts that.
+    func setForwardLimit(_ seconds: Double?) {
+        let now = clock.nowMs()
+        lock.lock()
+        guard !closed else {
+            lock.unlock()
+            return
+        }
+        forwardLimit = seconds
         let cancels = replanLocked(now: now)
         lock.unlock()
         for task in cancels { task.cancel() }
@@ -697,8 +713,9 @@ final class SegmentStore {
                                                      cached: Set(track.cache.keys), inflight: reading,
                                                      failedAtMs: track.failedAtMs))
         }
+        let forward = forwardLimit.map { min($0, forwardSeconds()) } ?? forwardSeconds()
         let input = PrefetchPlanner.Input(nowMs: now, time: time, bufferedAhead: playhead.bufferedAhead,
-                                          cacheFull: playhead.cacheFull, forwardSeconds: forwardSeconds(),
+                                          cacheFull: playhead.cacheFull, forwardSeconds: forward,
                                           budgetBytes: budgetBytes, usedBytes: used, evictableBytes: evictable,
                                           tracks: inputs)
         let plan = planner.plan(input)

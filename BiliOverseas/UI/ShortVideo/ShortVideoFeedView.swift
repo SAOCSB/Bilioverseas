@@ -26,7 +26,7 @@ struct ShortVideoFeedView: View {
                 } else {
                     ShortVideoPager(items: model.items, index: $model.index,
                                     onReachEnd: { Task { await model.loadMore() } },
-                                    onLanding: { model.landing.index = $0 }) { item, position in
+                                    onLanding: { model.setLanding($0) }) { item, position in
                         ShortVideoPageView(item: item, isCurrent: position == model.index,
                                            playback: model.playback(for: item), social: model.social(for: item),
                                            actions: actions)
@@ -336,10 +336,8 @@ struct ShortVideoPageView: View {
                 PlayerPill { Text("\(PlayerFormat.time(scrubbing))/\(PlayerFormat.time(playback.duration))").monospacedDigit() }
                     .allowsHitTesting(false)
             } else if isCurrent && (playback.isBuffering || playback.phase == .loading) {
-                ProgressView()
-                    .tint(.white)
-                    .allowsHitTesting(false)
-            } else if isCurrent && playback.isPaused && playback.phase == .ready {
+                PlayerQuietSpinner()
+            } else if isCurrent && playback.isPaused && !playback.isStandingBy && playback.phase == .ready {
                 VerticalVideoPausedHint(time: "\(PlayerFormat.time(playback.position)) / \(PlayerFormat.time(playback.duration))")
             }
         }

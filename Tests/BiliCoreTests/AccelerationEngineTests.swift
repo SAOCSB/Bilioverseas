@@ -468,6 +468,19 @@ final class AccelerationEngineTests: XCTestCase {
         c.close()
     }
 
+    func testSessionInUseIsEvictedAfterTheOthers() async throws {
+        let h = makeHarness(files: [.video: videoFile.data], maxSessions: 2)
+        let a = try await h.engine.prepare(request(audio: .some(nil)))
+        let b = try await h.engine.prepare(request(audio: .some(nil)))
+        a.markInUse()
+        let c = try await h.engine.prepare(request(audio: .some(nil)))
+        XCTAssertFalse(a.isClosed)
+        XCTAssertTrue(b.isClosed)
+        XCTAssertFalse(c.isClosed)
+        a.close()
+        c.close()
+    }
+
     func testReleasingTheSessionClosesIt() async throws {
         let h = makeHarness(files: [.video: videoFile.data])
         var session: PlaybackSession? = try await h.engine.prepare(request(audio: .some(nil)))

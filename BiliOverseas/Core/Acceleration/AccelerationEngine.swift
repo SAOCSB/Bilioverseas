@@ -462,6 +462,14 @@ final class AccelerationEngine: LocalProxyRequestHandler {
         }
     }
 
+    /// The player on screen uses this session: the cap evicts it after the others from now on.
+    func noteInUse(_ token: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let index = sessionOrder.firstIndex(of: token) else { return }
+        sessionOrder.append(sessionOrder.remove(at: index))
+    }
+
     func unregister(_ token: String) {
         lock.lock()
         sessions[token] = nil
@@ -612,6 +620,17 @@ final class PlaybackSession {
         let cached = store.isCached(at: time)
         store.seek(to: time, outsideBuffer: outsideBuffer)
         if outsideBuffer && !cached && store.isAccelerating { auto?.newSession() }
+    }
+
+    /// See `AccelerationEngine.noteInUse`.
+    func markInUse() {
+        engine?.noteInUse(id)
+    }
+
+    /// See `SegmentStore.setForwardLimit`.
+    func limitPrefetch(toSeconds seconds: Double?) {
+        guard !isClosed else { return }
+        store.setForwardLimit(seconds)
     }
 
     var stats: AccelerationStats {

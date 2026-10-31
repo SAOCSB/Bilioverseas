@@ -555,6 +555,28 @@ struct PlayerBufferingView: View {
     }
 }
 
+/// Waiting on a vertical video: no words over the picture while swiping through them, and only a wait long enough to
+/// notice shows at all.
+struct PlayerQuietSpinner: View {
+    /// When the wait began (`systemUptime`), if earlier than this view: it takes over from the swipe cover's spinner.
+    var waitBegan: TimeInterval?
+    @State private var visible = false
+
+    var body: some View {
+        ProgressView()
+            .progressViewStyle(.circular)
+            .tint(.white)
+            .scaleEffect(1.1)
+            .opacity(visible ? 1 : 0)
+            .allowsHitTesting(false)
+            .task {
+                let waited = waitBegan.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0
+                if waited < 0.5 { try? await Task.sleep(nanoseconds: UInt64((0.5 - waited) * 1_000_000_000)) }
+                if !Task.isCancelled { visible = true }
+            }
+    }
+}
+
 struct PlayerErrorView: View {
     let message: String
     let retry: () -> Void

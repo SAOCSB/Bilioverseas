@@ -278,11 +278,23 @@ final class PlayerController: ObservableObject {
     /// picture (cover, subtitles, loading) steps aside until then.
     @Published private(set) var isVideoSwipeActive = false
     /// The swipe has been decided; the page is switching and no new one starts.
-    private(set) var isSwitchingBySwipe = false
+    @Published private(set) var isSwitchingBySwipe = false
     private var playAfterFailedSwipe = false
     private var controlsBeforeSwipe = false
     /// The item playing came from a swipe: a position it was given is the one it was left at, nothing to point out.
     private var itemCameFromSwipe = false
+    /// Streams kept ready: the video the next swipe goes to, and the one just left (`PlayerStreamPreload`).
+    private var streamPreloads: [PlayerStreamPreload] = []
+    /// The page's wish for the former, until this video has enough of its own to share the connection.
+    private var streamPreloadWanted: PlaybackItem?
+    /// The preload `load` took over, until the item is installed.
+    private var takenPreload: PlayerStreamPreload?
+    /// Buffer this video has before the next one starts downloading next to it.
+    private static let bufferBeforePreload = 4.0
+    /// Since when the viewer has been waiting for this item: a swipe's lift, else `load`.
+    private(set) var waitBegan = ProcessInfo.processInfo.systemUptime
+    private var tracedPlaying = false
+    private var lastItemError: Error?
 
     /// Optional: when set, the fullscreen bar shows 「上一集」 and the lock screen offers "previous track".
     var onPrevious: (() -> Void)? {
@@ -553,11 +565,17 @@ final class PlayerController: ObservableObject {
         }
         let swiped = isSwitchingBySwipe
         itemCameFromSwipe = swiped
+        if !swiped { waitBegan = ProcessInfo.processInfo.systemUptime }
+        tracedPlaying = false
         // Auto-next (or another part tapped while playing) keeps playing even with 「自动播放」 off, and so does a
         // swipe from a paused video (the swipe itself paused it).
         let continuing = item != nil && (wantsToPlay || status == .ended || swiped)
         autoExitTask?.cancel()
+        let preload = swapStreamPreloads(for: newItem, swiped: swiped)
         teardown(reportHeartbeat: true)
+        takenPreload = preload
+        trace("load \(newItem.bvid) cid=\(newItem.cid) vertical=\(newItem.isVertical) swiped=\(swiped) "
+            + "preload=\(preload == nil ? "no" : preload?.wasLeft == true ? "left" : "next")")
         item = newItem
         isVerticalVideo = newItem.isVertical
         aspectMode = .stored(forVertical: newItem.isVertical)
@@ -739,7 +757,8 @@ final class PlayerController: ObservableObject {
             isVideoSwipeActive = true
             controlsBeforeSwipe = overlay.controlsVisible
             overlay.hideControls()
-            surface.beginVideoSwipe(leavingCover: hasFirstFrame ? nil : item?.cover)
+            // 听视频 has shown a frame of an earlier item, and has no picture now.
+            surface.beginVideoSwipe(leavingCover: hasFirstFrame && audioOnlyStream == nil ? nil : item?.cover)
         }
         surface.moveVideoSwipe(offset: offset, targetCover: videoSwipeCover?(offset < 0 ? .next : .previous))
     }
@@ -763,6 +782,7 @@ final class PlayerController: ObservableObject {
         pause()
         isSwitchingBySwipe = true
         playAfterFailedSwipe = wasPlaying
+        waitBegan = ProcessInfo.processInfo.systemUptime
         surface.commitVideoSwipe(toNext: swipe == .next, targetCover: cover) { [weak self] in
             guard let self, self.isSwitchingBySwipe else { return }
             self.onVideoSwipe?(swipe)
@@ -771,6 +791,7 @@ final class PlayerController: ObservableObject {
 
     /// The page goes on by itself to the video a swipe would go to (this one ended): it comes up the same way.
     func beginAutomaticVideoSwipe() {
+        waitBegan = ProcessInfo.processInfo.systemUptime
         isSwitchingBySwipe = true
         playAfterFailedSwipe = false
         controlsBeforeSwipe = overlay.controlsVisible
@@ -803,6 +824,69 @@ final class PlayerController: ObservableObject {
         isVideoSwipeActive = false
     }
 
+    // MARK: Preloading for swipes
+
+    /// The page's next swipe goes to `item`. It is made ready once this video has some buffer of its own.
+    func preloadStream(of item: PlaybackItem) {
+        streamPreloadWanted = streamPreloads.contains { $0.matches(item) } ? nil : item
+    }
+
+    /// Nothing kept ready any more: another page covers this one.
+    func closeStreamPreloads() {
+        streamPreloadWanted = nil
+        streamPreloads.forEach { $0.close() }
+        streamPreloads = []
+    }
+
+    private func startWantedPreload(time: Double, bufferedAhead: Double) {
+        // 听视频 stays on for the next video, which then uses none of this.
+        guard let wanted = streamPreloadWanted, startupDone, canSwipeVideos, !isCoveredByPage, !audioOnly else { return }
+        let rest = duration > 0 ? max(0, duration - time - 0.5) : .infinity
+        guard bufferedAhead >= min(Self.bufferBeforePreload, rest) else { return }
+        streamPreloadWanted = nil
+        // The new session must not push out the one playing.
+        session?.markInUse()
+        streamPreloads.filter { !$0.wasLeft }.forEach { $0.close() }
+        streamPreloads.removeAll { !$0.wasLeft }
+        let settings = AppSettings.shared
+        streamPreloads.append(PlayerStreamPreload(
+            item: wanted, constraints: startingConstraints(), quality: settings.player.preferredQuality,
+            accelerate: settings.acceleration.accelerates(pgc: false, vertical: wanted.isVertical),
+            allowHDR: settings.player.allowHDR && PlayerDeviceSupport.hdrEligible,
+            start: { [weak self] info in self?.resolveStartPosition(wanted, info) ?? 0 }))
+    }
+
+    /// `newItem` is about to load: its preload is taken, and the video a swipe leaves stays ready in place of the others.
+    private func swapStreamPreloads(for newItem: PlaybackItem, swiped: Bool) -> PlayerStreamPreload? {
+        let taken = streamPreloads.first { $0.matches(newItem) }
+        for other in streamPreloads where other !== taken { other.close() }
+        streamPreloads = []
+        if swiped, let left = leaveStreamBehind() { streamPreloads = [left] }
+        return taken
+    }
+
+    /// The session of the video a swipe leaves stays open, with the answer it came from: going back needs no network.
+    private func leaveStreamBehind() -> PlayerStreamPreload? {
+        guard let session, session.isHLS, session.isEndpointValid, let item, item.epId == 0, let playInfo,
+              let playInfoFetchedAt, let choice, audioOnlyStream == nil else { return nil }
+        session.limitPrefetch(toSeconds: PlayerStreamPreload.prefetchSeconds)
+        session.update(time: lastKnownPosition, rate: 1, playing: false, bufferedAhead: 0, cacheFull: false)
+        self.session = nil
+        // Coming back goes on from here, which the answer from when it was opened cannot know.
+        var answer = playInfo
+        if startupDone {
+            answer.lastPlayTime = lastKnownPosition
+            answer.lastPlayCid = item.cid
+        }
+        return PlayerStreamPreload(left: item, info: answer, fetchedAt: playInfoFetchedAt, session: session,
+                                   choice: choice, accelerated: isAccelerated)
+    }
+
+    private func trace(_ line: String) {
+        let waited = Int((ProcessInfo.processInfo.systemUptime - waitBegan) * 1000)
+        PlaybackTrace.log("\(line) +\(waited)ms")
+    }
+
     /// Stop & release. While Picture in Picture runs the player keeps going (kept alive) and stops when PiP ends.
     func stop() {
         if isPiPBusy {
@@ -818,6 +902,7 @@ final class PlayerController: ObservableObject {
         autoExitTask?.cancel()
         if isFullscreen { exitFullscreen() }
         teardown(reportHeartbeat: true)
+        closeStreamPreloads()
         endVideoSwipe()
         surface.finishVideoSwipe()
         item = nil
@@ -1117,6 +1202,15 @@ final class PlayerController: ObservableObject {
                                        forceAVC: forceAVC, forceNormalAudio: forceNormalAudio)
     }
 
+    /// What a video starts with: the settings, before any menu choice or fallback of its own.
+    private func startingConstraints() -> PlayerStreamConstraints {
+        let p = AppSettings.shared.player
+        return PlayerStreamConstraints(preferredQuality: p.preferredQuality, codec: p.preferredCodec,
+                                       av1Supported: PlayerDeviceSupport.av1HardwareDecode,
+                                       hdrAllowed: p.allowHDR && PlayerDeviceSupport.hdrEligible,
+                                       preferLossless: p.preferLosslessAudio)
+    }
+
     private func refreshStreamMenus() {
         guard let info = playInfo else {
             qualityEntries = []
@@ -1186,23 +1280,33 @@ final class PlayerController: ObservableObject {
         }
         let quality = AppSettings.shared.player.preferredQuality
         let info: PlayInfo
-        do {
-            info = try await PlayerStreamPicker.fetchPlayInfo(aid: target.aid, bvid: target.bvid, cid: target.cid,
-                                                              epId: target.epId, seasonId: target.seasonId,
-                                                              quality: quality)
-        } catch {
-            // Still the current load: even a cancellation we did not ask for must not leave the status at .loading.
-            guard gen == loadGeneration, !Task.isCancelled else { return }
-            fail(Self.describe(error))
-            return
-        }
+        var fetchedAt = Date()
+        let preloaded = await takenPreload?.answer()
         guard gen == loadGeneration, !Task.isCancelled else { return }
+        if let preloaded {
+            info = preloaded.info
+            fetchedAt = preloaded.fetchedAt
+        } else {
+            do {
+                info = try await PlayerStreamPicker.fetchPlayInfo(aid: target.aid, bvid: target.bvid, cid: target.cid,
+                                                                  epId: target.epId, seasonId: target.seasonId,
+                                                                  quality: quality)
+            } catch {
+                // Still the current load: even a cancellation we did not ask for must not leave the status at .loading.
+                guard gen == loadGeneration, !Task.isCancelled else { return }
+                trace("playurl failed \(PlaybackTrace.describe(error))")
+                fail(Self.describe(error))
+                return
+            }
+            guard gen == loadGeneration, !Task.isCancelled else { return }
+            trace("playurl")
+        }
         if info.isDRM {
             fail("该内容受版权保护（DRM），暂不支持播放")
             return
         }
         playInfo = info
-        playInfoFetchedAt = Date()
+        playInfoFetchedAt = fetchedAt
         if info.duration > 0 {
             duration = info.duration
             timeline.update(time: timeline.snapshot.time, duration: info.duration, buffered: 0)
@@ -1227,6 +1331,11 @@ final class PlayerController: ObservableObject {
             offerResumePart(aid: target.aid, cid: info.lastPlayCid, time: info.lastPlayTime)
         }
         await installStreams(position: start, generation: streamGeneration, reason: .initial)
+        // A preload that did not fit (`takeSession`) has done what it could.
+        if gen == loadGeneration {
+            takenPreload?.close()
+            takenPreload = nil
+        }
     }
 
     /// Contract 1 (离线缓存): the downloaded file straight into AVPlayer, from `startTime` when it is usable.
@@ -1296,7 +1405,6 @@ final class PlayerController: ObservableObject {
             if retake {
                 forceDirect = false
                 fallbackSteps.remove(.direct)
-                ToastCenter.shared.show("加速线路已恢复")
             } else if wantAccel && !accelerated {
                 noteDirectFallback()
             }
@@ -1349,6 +1457,13 @@ final class PlayerController: ObservableObject {
 
         if !audioOnly, info.isDash, !forceNoProxy {
             if let picked = PlayerStreamPicker.choose(info, constraints()) {
+                if reason == .initial, let first = attempts.first,
+                   let made = takenPreload?.takeSession(for: picked, accelerate: first) {
+                    prepared(accelerated: first)
+                    install(made, choice: picked, accelerated: first, progressive: false, position: position,
+                            generation: sgen)
+                    return
+                }
                 for accelerate in attempts {
                     do {
                         let request = PlaybackRequest(
@@ -1369,6 +1484,7 @@ final class PlayerController: ObservableObject {
                     } catch {
                         // Still current: a stray CancellationError is just another failed attempt (never a stuck .loading).
                         guard current() else { return }
+                        trace("session failed accel=\(accelerate) \(PlaybackTrace.describe(error))")
                         lastError = error
                     }
                 }
@@ -1483,8 +1599,7 @@ final class PlayerController: ObservableObject {
         guard let segment = info.durl.first, let url = URL(string: segment.url.biliHTTPS) else {
             throw PlayerLoadError.noStream
         }
-        // Announced when it replaces a proxy item (or there was none yet), not on every direct rebuild.
-        if session != nil || playerItem == nil { ToastCenter.shared.show("加速通道不可用，已改为直连播放") }
+        trace("mp4 without the proxy, last \(PlaybackTrace.describe(lastItemError))")
         forceNoProxy = true
         fallbackSteps.formUnion([.direct, .noProxy])
         let headers = ["Referer": "https://www.bilibili.com/", "User-Agent": BiliHTTP.webUserAgent]
@@ -1540,6 +1655,8 @@ final class PlayerController: ObservableObject {
             }
         }
 
+        trace("install accel=\(accelerated) progressive=\(progressive) proxy=\(newSession != nil) "
+            + PlaybackTrace.describe(picked))
         let asset = AVURLAsset(url: url, options: assetOptions)
         let newItem = AVPlayerItem(asset: asset)
         newItem.preferredForwardBufferDuration = forwardBufferSeconds
@@ -1620,6 +1737,10 @@ final class PlayerController: ObservableObject {
         loadTask = nil
         sideTask?.cancel()
         sideTask = nil
+        streamPreloadWanted = nil
+        takenPreload?.close()
+        takenPreload = nil
+        lastItemError = nil
         cancelFeatureTasks()
         if reportHeartbeat, heartbeatStarted { heartbeat.stop(position: lastKnownPosition) }
         heartbeatStarted = false
@@ -1710,7 +1831,10 @@ final class PlayerController: ObservableObject {
     }
 
     private func layerReadinessChanged() {
-        if surface.videoView.playerLayer.isReadyForDisplay, item != nil, !hasFirstFrame { hasFirstFrame = true }
+        if surface.videoView.playerLayer.isReadyForDisplay, item != nil, !hasFirstFrame {
+            hasFirstFrame = true
+            trace("first frame")
+        }
     }
 
     private func observeItem(_ observed: AVPlayerItem, generation sgen: Int) {
@@ -1754,6 +1878,8 @@ final class PlayerController: ObservableObject {
                 finishStartup()
             }
         case .failed:
+            lastItemError = observed.error
+            trace("item failed \(PlaybackTrace.describe(observed.error)) \(PlaybackTrace.describe(choice))")
             handleFailure(message: observed.error.map { ($0 as NSError).localizedDescription })
         default:
             break
@@ -1762,6 +1888,8 @@ final class PlayerController: ObservableObject {
 
     private func itemFailed(message: String?, generation sgen: Int) {
         guard sgen == streamGeneration else { return }
+        trace("item failed while playing \(PlaybackTrace.describe(playerItem?.error)) \(PlaybackTrace.describe(choice))")
+        lastItemError = playerItem?.error
         handleFailure(message: message)
     }
 
@@ -1781,6 +1909,7 @@ final class PlayerController: ObservableObject {
 
     private func finishStartup() {
         guard itemReady, !startupDone, let target = item else { return }
+        trace("ready")
         startupDone = true
         waitingSince = nil
         lastKnownPosition = displayTime()
@@ -1837,6 +1966,10 @@ final class PlayerController: ObservableObject {
             case .playing:
                 waitingSince = nil
                 stallReported = false
+                if !tracedPlaying {
+                    tracedPlaying = true
+                    trace("playing")
+                }
                 if !wantsToPlay {
                     // Started from the PiP window / headphones: this player now owns playback.
                     wantsToPlay = true
@@ -2170,6 +2303,7 @@ final class PlayerController: ObservableObject {
         clipTick(time: t)
         updateSubtitle(at: t)
         runWatchdog()
+        startWantedPreload(time: t, bufferedAhead: ahead)
         if tickCount % 4 == 0 { secondTick(time: t, playing: playing) }
     }
 
@@ -2188,7 +2322,7 @@ final class PlayerController: ObservableObject {
         guard stuck, ProcessInfo.processInfo.systemUptime - since >= 60 else { return }
         noteDirectFallback()
         waitingSince = nil
-        ToastCenter.shared.show("加速线路长时间缓冲，已切换为直连")
+        trace("watchdog: direct")
         rebuild(position: nil, reason: .fallback)
     }
 

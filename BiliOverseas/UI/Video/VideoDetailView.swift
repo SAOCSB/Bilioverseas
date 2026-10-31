@@ -444,6 +444,12 @@ final class VideoDetailModel: ObservableObject {
         case pgc(PGCSeason, PGCEpisode)
     }
 
+    private struct SwipeContent {
+        let ref: VideoRef
+        let task: Task<Content, Error>
+        let madeAt = Date()
+    }
+
     @Published private(set) var ref: VideoRef
     @Published private(set) var phase: Phase = .loading
     @Published private(set) var isRegionLocked = false
@@ -509,6 +515,9 @@ final class VideoDetailModel: ObservableObject {
     private var swipeQueueTask: Task<Void, Never>?
     private var swipeSeenIDs: Set<String> = []
     private var swipeFetchNotBefore = Date.distantPast
+    /// The detail of the video the next swipe goes to, fetched ahead, and of the one just left.
+    private var nextContent: SwipeContent?
+    private var leftContent: SwipeContent?
     /// The video ended with the fullscreen comments sheet open: 连播 goes on when that closes.
     private var autoNextHeldBySheet = false
     private var sheetObservation: AnyCancellable?
@@ -606,6 +615,7 @@ final class VideoDetailModel: ObservableObject {
         if let item = pendingItem, !isCovered {
             pendingItem = nil
             player.load(item)
+            refreshSwipePreload()
         }
     }
 
@@ -615,11 +625,15 @@ final class VideoDetailModel: ObservableObject {
         if hasContent, BiliHTTP.shared.isLoggedIn != sideDataLoggedIn {
             reloadAccountState()
         }
+        refreshSwipePreload()
     }
 
     /// Another page was pushed on top (or another tab was selected).
     func pageCovered() {
         isCovered = true
+        nextContent?.task.cancel()
+        nextContent = nil
+        player?.closeStreamPreloads()
     }
 
     func startIfNeeded() {
@@ -641,6 +655,9 @@ final class VideoDetailModel: ObservableObject {
     func pageClosed() {
         swipeQueueTask?.cancel()
         swipeQueueTask = nil
+        nextContent?.task.cancel()
+        nextContent = nil
+        leftContent = nil
         loadTask?.cancel()
         cancelSideTasks()
     }
@@ -667,16 +684,24 @@ final class VideoDetailModel: ObservableObject {
             phase = .loading
             isRegionLocked = false
         }
+        let known = inPlace ? swipeContent(for: target)?.task : nil
         loadTask = Task { [weak self] in
             do {
-                let content = try await VideoDetailModel.fetch(target)
+                let content: Content
+                if let ready = try? await known?.value {
+                    content = ready
+                } else {
+                    content = try await VideoDetailModel.fetch(target)
+                }
                 guard let self, gen == self.generation else { return }
                 self.ref = target
                 self.swipeIndexBeforeSwitch = nil
                 self.swipeItemBeingOpened = nil
+                self.keepLeftContent()
                 self.apply(content, target: target)
                 self.isSwitching = false
                 self.phase = .loaded
+                self.refreshSwipePreload()
             } catch {
                 guard let self, gen == self.generation else { return }
                 self.isSwitching = false
@@ -794,6 +819,7 @@ final class VideoDetailModel: ObservableObject {
         } else {
             pendingItem = item
         }
+        refreshSwipePreload()
     }
 
     private func makeItem(startTime: Double?) -> PlaybackItem? {
@@ -1074,6 +1100,87 @@ final class VideoDetailModel: ObservableObject {
         if requeue { swipeQueue.insert(item, at: 0) }
     }
 
+    /// The video the next swipe goes to, when it needs its detail for that.
+    private func nextSwipeRef() -> VideoRef? {
+        switch swipeStep(.next) {
+        case .list(.video(let ref))?, .trail(let ref)?:
+            return ref
+        case .queue(let item)?:
+            var ref = item.videoRef
+            ref.startTime = 0
+            return ref
+        default:
+            return nil
+        }
+    }
+
+    /// Makes ready what a swipe to the next video needs, so that it needs nothing from the network: the video's detail,
+    /// and the player's stream once that detail says it is a vertical video.
+    private func refreshSwipePreload() {
+        guard !isSwitching, !isCovered, let player, player.canSwipeVideos, let target = nextSwipeRef() else { return }
+        let entry: SwipeContent
+        if let known = swipeContent(for: target) {
+            entry = known
+        } else {
+            nextContent?.task.cancel()
+            entry = SwipeContent(ref: target, task: Task { try await VideoDetailModel.fetch(target) })
+            nextContent = entry
+        }
+        Task { [weak self] in
+            guard let content = try? await entry.task.value, case .ugc(let detail) = content,
+                  let self, !self.isSwitching, !self.isCovered, let next = self.nextSwipeRef(),
+                  VideoDetailModel.sameVideo(next, target),
+                  let item = VideoDetailModel.swipeItem(detail, target: target) else { return }
+            self.player?.preloadStream(of: item)
+        }
+    }
+
+    private func swipeContent(for target: VideoRef) -> SwipeContent? {
+        [nextContent, leftContent].compactMap { $0 }.first {
+            VideoDetailModel.sameVideo($0.ref, target) && Date().timeIntervalSince($0.madeAt) < 600
+        }
+    }
+
+    /// A switch is about to replace the video on show: a swipe back finds its detail here, with the counts and the
+    /// follow buttons as they stand now (a like of a moment ago included).
+    private func keepLeftContent() {
+        nextContent?.task.cancel()
+        nextContent = nil
+        guard var kept = detail, season == nil else {
+            leftContent = nil
+            return
+        }
+        kept.stat.view = counts.view
+        kept.stat.danmaku = counts.danmaku
+        kept.stat.like = counts.like
+        kept.stat.coin = counts.coin
+        kept.stat.favorite = counts.favorite
+        kept.stat.share = counts.share
+        kept.stat.reply = counts.reply
+        for index in kept.staff.indices {
+            kept.staff[index].user.isFollowed = isFollowing(kept.staff[index].user.mid)
+        }
+        let content = Content.ugc(kept)
+        leftContent = SwipeContent(ref: VideoRef(aid: kept.aid, bvid: kept.bvid), task: Task { content })
+    }
+
+    private static func sameVideo(_ a: VideoRef, _ b: VideoRef) -> Bool {
+        (a.aid != 0 && a.aid == b.aid) || (!a.bvid.isEmpty && a.bvid == b.bvid)
+    }
+
+    /// As much of `makeItem` as the player's stream needs, once the page shows this video; nil when it is not vertical.
+    private static func swipeItem(_ d: VideoDetail, target: VideoRef) -> PlaybackItem? {
+        let part = (target.cid != 0 ? d.pages.first { $0.cid == target.cid } : nil) ?? d.pages.first
+        let cid = part?.cid ?? d.cid
+        let vertical = part.flatMap { $0.width > 0 && $0.height > 0 ? $0.isVertical : nil } ?? d.isVertical
+        guard cid != 0, vertical else { return nil }
+        var item = PlaybackItem(aid: d.aid, bvid: d.bvid, cid: cid, title: d.title)
+        item.duration = Double(part?.duration ?? d.duration)
+        item.startTime = target.startTime
+        item.isVertical = true
+        return item
+    }
+
     /// A vertical video also goes on to the next video a swipe would go to.
     private var hasVerticalNext: Bool {
         season == nil && isVerticalVideo && AppSettings.shared.general.portraitOpensShortVideo
@@ -1206,6 +1313,7 @@ final class VideoDetailModel: ObservableObject {
             }
         }
         syncPlayerPage()
+        refreshSwipePreload()
     }
 
     // MARK: Side data
@@ -1270,6 +1378,10 @@ final class VideoDetailModel: ObservableObject {
     /// Back on the page after logging in / out (the login page is pushed on top): the like / coin / favourite
     /// and follow state shown was loaded for the other session.
     private func reloadAccountState() {
+        // Fetched ahead for the account before this one.
+        nextContent?.task.cancel()
+        nextContent = nil
+        leftContent = nil
         sideDataLoggedIn = BiliHTTP.shared.isLoggedIn
         relationEdits += 1
         relation = VideoRelation()

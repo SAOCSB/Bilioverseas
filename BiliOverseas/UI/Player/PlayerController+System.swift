@@ -117,7 +117,8 @@ extension PlayerController {
         surface.reattachPlayerIfNeeded()
         if pausedByBackground {
             pausedByBackground = false
-            play()
+            // A switch under way: what comes next was decided when the swipe found the video playing or paused.
+            if !isSwitchingBySwipe { play() }
         }
     }
 

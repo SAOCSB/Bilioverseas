@@ -35,22 +35,38 @@ struct PlayerStageView: View {
 
     var body: some View {
         GeometryReader { geo in
-            ZStack {
+            // The vertical-video screen: the picture stays between the status bar and the bar below it. This goes by
+            // the whole window, as the safe area depends on that status bar.
+            let verticalScreen = role == .fullscreen && controller.isVerticalVideo
+                && geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom > geo.size.width
+            let gap = verticalScreen ? VerticalVideoMetrics.statusBarGap : 0
+            let size = CGSize(width: geo.size.width, height: geo.size.height + gap)
+            ZStack(alignment: .top) {
                 Color.black.ignoresSafeArea(edges: ignoredEdges)
                 PlayerSurfaceRepresentable(controller: controller, role: role)
-                    .ignoresSafeArea(edges: ignoredEdges)
+                    .frame(height: verticalScreen ? max(size.height - VerticalVideoMetrics.bottomBarHeight, 0) : nil)
+                    .ignoresSafeArea(edges: verticalScreen ? [] : ignoredEdges)
                 if isActive || holdsSurface {
-                    PlayerChromeView(controller: controller, overlay: overlay, size: geo.size,
-                                     fullscreen: role == .fullscreen,
+                    PlayerChromeView(controller: controller, overlay: overlay, size: size,
+                                     fullscreen: role == .fullscreen, verticalScreen: verticalScreen,
                                      showsPicture: holdsSurface && !controller.isVideoSwipeActive,
                                      showsControls: isActive)
                 }
             }
-            .frame(width: geo.size.width, height: geo.size.height)
+            .frame(width: size.width, height: size.height)
+            .offset(y: -gap)
+            .onAppear { stageChanged(verticalScreen: verticalScreen) }
+            .onChange(of: verticalScreen) { stageChanged(verticalScreen: $0) }
         }
+        // The keyboard of 发弹幕 comes up in a sheet: the video stays where it is behind that.
+        .ignoresSafeArea(role == .fullscreen ? .keyboard : [])
         .sheet(item: sheetBinding) { sheet in
             PlayerSheetHost(controller: controller, sheet: sheet)
         }
+    }
+
+    private func stageChanged(verticalScreen: Bool) {
+        if role == .fullscreen { controller.fullscreenStageChanged(verticalScreen: verticalScreen) }
     }
 
     private var sheetBinding: Binding<PlayerSheet?> {
@@ -102,29 +118,46 @@ struct PlayerChromeView: View {
     @ObservedObject private var settings = AppSettings.shared
     let size: CGSize
     let fullscreen: Bool
+    var verticalScreen = false
     var showsPicture = true
     var showsControls = true
+
+    @State private var verticalTitleExpanded = false
 
     private var compact: Bool { size.width < 520 }
     private var landscape: Bool { size.width > size.height }
     private var bottomBarHeight: CGFloat { fullscreen ? 88 : 44 }
+    /// The surface's height (`PlayerStageView`), which is what most layers go over.
+    private var pictureHeight: CGFloat {
+        verticalScreen ? max(size.height - VerticalVideoMetrics.bottomBarHeight, 0) : size.height
+    }
 
     var body: some View {
-        ZStack {
-            if showsPicture {
-                coverLayer
-                subtitleLayer
-                centerLayer
+        ZStack(alignment: .bottom) {
+            ZStack {
+                if showsPicture {
+                    coverLayer
+                    subtitleLayer
+                    centerLayer
+                }
+                if showsControls {
+                    hudLayer
+                    promptLayer
+                    controlsLayer
+                    statsLayer
+                }
             }
+            .frame(width: size.width, height: pictureHeight)
+            .frame(maxHeight: .infinity, alignment: .top)
             if showsControls {
-                hudLayer
-                promptLayer
-                controlsLayer
-                statsLayer
+                if verticalScreen { verticalBottomBar }
                 panelLayer
             }
         }
         .frame(width: size.width, height: size.height)
+        .onChange(of: controller.item?.cid) { _ in verticalTitleExpanded = false }
+        .animation(.easeOut(duration: 0.15), value: controller.isVideoSwipeActive)
+        .animation(.easeOut(duration: 0.15), value: overlay.danmakuBubbleOpen)
         .animation(.easeInOut(duration: 0.2), value: overlay.controlsVisible)
         .animation(.easeInOut(duration: 0.15), value: controller.isBoosting)
         .animation(.easeInOut(duration: 0.25), value: overlay.panel)
@@ -148,7 +181,7 @@ struct PlayerChromeView: View {
         let listening = controller.audioOnlyStream != nil
         if !controller.hasFirstFrame || listening, let cover = controller.item?.cover, !cover.isEmpty {
             RemoteImage(url: cover, width: 640, contentMode: .fill)
-                .frame(width: size.width, height: size.height)
+                .frame(width: size.width, height: pictureHeight)
                 .clipped()
                 .overlay(Color.black.opacity(listening ? 0.45 : 0.25))
                 .allowsHitTesting(false)
@@ -172,7 +205,8 @@ struct PlayerChromeView: View {
         if let text = controller.subtitleText {
             // 「字幕设置」 style (PlayerSurfaceView.swift).
             PlayerSubtitleView(text: text, style: settings.player, fullscreen: fullscreen,
-                               minBottom: showsControls && overlay.controlsVisible ? bottomBarHeight + 6 : 0)
+                               minBottom: verticalScreen ? VerticalVideoMetrics.infoHeight
+                                   : showsControls && overlay.controlsVisible ? bottomBarHeight + 6 : 0)
         }
     }
 
@@ -186,6 +220,11 @@ struct PlayerChromeView: View {
         case .loading, .buffering:
             if controller.status == .loading || controller.wantsToPlay {
                 PlayerBufferingView(text: bufferingText)
+            }
+        case .paused:
+            // 听视频 has its own label there.
+            if verticalScreen, overlay.seekPreview == nil, controller.audioOnlyStream == nil {
+                PlayerVerticalPausedHint(timeline: controller.timeline)
             }
         default:
             EmptyView()
@@ -245,6 +284,10 @@ struct PlayerChromeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .allowsHitTesting(false)
         }
+        ForEach(overlay.likeBursts) { burst in
+            VerticalVideoLikeBurstView(burst: burst)
+                .position(burst.location)
+        }
     }
 
     private func seekPreviewView(_ preview: PlayerSeekPreview) -> some View {
@@ -280,14 +323,17 @@ struct PlayerChromeView: View {
 
     @ViewBuilder
     private var promptLayer: some View {
-        let bottom = (overlay.controlsVisible ? bottomBarHeight : 0) + size.height * 0.1
+        let bottom = verticalScreen ? VerticalVideoMetrics.infoHeight + 10
+            : (overlay.controlsVisible ? bottomBarHeight : 0) + size.height * 0.1
+        // The vertical-video screen has its buttons down the right.
+        let trailing: CGFloat = verticalScreen ? 70 : 24
         if !overlay.isLocked, let prompt = controller.skipPrompt {
             SmartSkipPromptView(segment: prompt.segment, remaining: prompt.remaining,
                                 total: Double(settings.smartSkip.countdownSeconds),
                                 onSkip: { controller.smartSkipTapped(prompt.segment) },
                                 onDismiss: { controller.smartSkipDismissed(prompt.segment) },
                                 onInteractionChanged: { controller.smartSkipInteraction($0) })
-                .padding(.trailing, 24)
+                .padding(.trailing, trailing)
                 .padding(.bottom, bottom)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -295,7 +341,7 @@ struct PlayerChromeView: View {
             PlayerClipSkipButton(title: PlayerController.clipTitle(clip),
                                  onSkip: { controller.skipClip() },
                                  onDismiss: { controller.dismissClip() })
-                .padding(.trailing, 24)
+                .padding(.trailing, trailing)
                 .padding(.bottom, bottom)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -322,6 +368,15 @@ struct PlayerChromeView: View {
 
     @ViewBuilder
     private var controlsLayer: some View {
+        if verticalScreen {
+            verticalControls
+        } else {
+            regularControls
+        }
+    }
+
+    @ViewBuilder
+    private var regularControls: some View {
         if overlay.controlsVisible, !overlay.isLocked {
             VStack(spacing: 0) {
                 topBar
@@ -358,8 +413,9 @@ struct PlayerChromeView: View {
     private var statsLayer: some View {
         if let stats = controller.stats, !overlay.isLocked {
             PlayerStatsOverlay(stats: stats, stream: controller.currentStreamDescription)
-                .padding(.top, overlay.controlsVisible ? (fullscreen ? 60 : 40) : 8)
-                .padding(.leading, fullscreen ? 64 : 8)
+                .padding(.top, verticalScreen ? VerticalVideoMetrics.topBarHeight + 8
+                            : overlay.controlsVisible ? (fullscreen ? 60 : 40) : 8)
+                .padding(.leading, fullscreen && !verticalScreen ? 64 : 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
@@ -378,6 +434,64 @@ struct PlayerChromeView: View {
                     .transition(.move(edge: landscape ? .trailing : .bottom))
             }
         }
+    }
+
+    // MARK: Vertical-video screen
+
+    /// `VerticalVideoViews.swift`. Nothing here hides by itself; while a swipe goes to another video only the top bar stays.
+    private var verticalControls: some View {
+        ZStack {
+            LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
+                .frame(height: 110)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .allowsHitTesting(false)
+            LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
+                .frame(height: 260)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+                .allowsHitTesting(false)
+                .opacity(controller.isVideoSwipeActive ? 0 : 1)
+            VStack(spacing: 0) {
+                VerticalVideoTopBar(online: controller.onlineCount, onBack: { controller.fullscreenBack() },
+                                    onSearch: controller.pageRouter.map { router in { router.push(.searchHome) } }) {
+                    Button { open(.more) } label: {
+                        VerticalVideoBarIcon(systemName: "ellipsis", upright: true)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Text("更多设置"))
+                }
+                Spacer(minLength: 0)
+                verticalPageControls
+            }
+        }
+    }
+
+    private var verticalPageControls: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .bottom, spacing: 8) {
+                // A downloaded video has no page behind it: only its title.
+                VerticalVideoInfoView(actions: controller.fullscreenActions ?? PlayerFullscreenActions(),
+                                      title: controller.item?.title ?? "", expanded: $verticalTitleExpanded)
+                if let actions = controller.fullscreenActions {
+                    VerticalVideoActionColumn(actions: actions)
+                }
+            }
+            .padding(.leading, 14)
+            .padding(.trailing, 6)
+            .modifier(PlayerVerticalSwipeThrough(controller: controller))
+            makeProgressBar(barHeight: 2, height: 22, verticalScreenStyle: true)
+                .padding(.horizontal, 12)
+                .offset(y: VerticalVideoMetrics.progressOverhang)
+        }
+        .opacity(controller.isVideoSwipeActive || overlay.danmakuBubbleOpen ? 0 : 1)
+        .allowsHitTesting(!controller.isSwitchingBySwipe && !overlay.danmakuBubbleOpen)
+    }
+
+    private var verticalBottomBar: some View {
+        VerticalVideoBottomBar(danmakuOn: settings.danmaku.enabled,
+                               onSend: { overlay.sheet = .danmakuSend },
+                               onToggle: { controller.toggleDanmaku() },
+                               onDetail: { controller.exitFullscreen() },
+                               onSettings: { overlay.sheet = .danmakuSettings })
     }
 
     // MARK: Bars
@@ -534,8 +648,22 @@ struct PlayerChromeView: View {
     }
 
     private var progressBar: some View {
+        makeProgressBar()
+    }
+
+    private func makeProgressBar(barHeight: CGFloat = 3, height: CGFloat = 28,
+                                 verticalScreenStyle: Bool = false) -> some View {
         PlayerProgressBar(timeline: controller.timeline, chapters: controller.chapters,
                           segments: visibleSegments, clips: visibleClips,
+                          barHeight: barHeight, height: height, verticalScreenStyle: verticalScreenStyle,
+                          onVerticalDragMoved: { offset in
+                              if controller.canSwipeVideos, !controller.isSwitchingBySwipe {
+                                  controller.videoSwipeMoved(offset: offset)
+                              }
+                          },
+                          onVerticalDragEnded: { offset, velocity in
+                              controller.videoSwipeEnded(offset: offset, velocity: velocity)
+                          },
                           onScrubBegan: {
                               overlay.beginHold()
                               controller.ensureVideoShot()
@@ -619,6 +747,63 @@ struct PlayerChromeView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(overlay.isLocked ? "解锁" : "锁定"))
+    }
+}
+
+/// The vertical-video screen's paused hint, with the player's position.
+private struct PlayerVerticalPausedHint: View {
+    @ObservedObject var timeline: PlayerTimeline
+
+    var body: some View {
+        let snap = timeline.snapshot
+        VerticalVideoPausedHint(time: "\(PlayerFormat.time(snap.time)) / \(PlayerFormat.time(snap.duration))")
+    }
+}
+
+/// A drag that starts on the uploader, the title or the buttons on the right, which lie over the surface's own gesture
+/// view, goes to the next or previous video all the same.
+private struct PlayerVerticalSwipeThrough: ViewModifier {
+    let controller: PlayerController
+    /// The drag goes up or down (nil: no drag, or not decided yet).
+    @State private var swiping: Bool?
+    @GestureState private var touching = false
+
+    func body(content: Content) -> some View {
+        content
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 10, coordinateSpace: .global)
+                    .updating($touching) { _, state, _ in state = true }
+                    .onChanged { value in
+                        if swiping == nil {
+                            let moved = value.translation
+                            swiping = abs(moved.height) > 3 * abs(moved.width) && controller.canSwipeVideos
+                                && !controller.isSwitchingBySwipe
+                        }
+                        if swiping == true { controller.videoSwipeMoved(offset: value.translation.height) }
+                    }
+                    .onEnded { value in
+                        if swiping == true {
+                            controller.videoSwipeEnded(offset: value.translation.height, velocity: velocity(of: value))
+                        }
+                        swiping = nil
+                    }
+            )
+            // `onEnded` is not called for a cancelled drag, nor is anything else for one whose view goes away.
+            .onChange(of: touching) { touching in
+                if !touching { cancelSwipe() }
+            }
+            .onDisappear { cancelSwipe() }
+    }
+
+    private func cancelSwipe() {
+        if swiping == true { controller.videoSwipeEnded(offset: 0, velocity: 0) }
+        swiping = nil
+    }
+
+    private func velocity(of value: DragGesture.Value) -> CGFloat {
+        if #available(iOS 17, *) { return value.velocity.height }
+        // `predictedEnd` lies about a quarter of a second ahead at that speed.
+        return (value.predictedEndTranslation.height - value.translation.height) * 4
     }
 }
 

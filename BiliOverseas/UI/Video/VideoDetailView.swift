@@ -63,12 +63,16 @@ struct VideoDetailView: View {
             }
             model.pageAppeared()
             model.attach(player)
+            player.pageRouter = router
             model.startIfNeeded()
             if resumeOnAppear {
                 resumeOnAppear = false
                 player.play()
             }
+            refullscreenIfPageReturned()
         }
+        // The path update of a swipe back lands after `onAppear`.
+        .onChange(of: router.path.count) { _ in refullscreenIfPageReturned() }
         // Playing (from the bar, a comment's timestamp, the lock screen …), another tab, fullscreen, PiP or a
         // vertical video: show the player again.
         .onChange(of: player.wantsToPlay) { if $0 { setPlayerCollapsed(false) } }
@@ -95,6 +99,17 @@ struct VideoDetailView: View {
                 resumeOnAppear = true
                 player.pause()
             }
+        }
+    }
+
+    /// Fullscreen gave way to a page opened from it (`PlayerController.pagePathChanged`), which has gone again: back into
+    /// fullscreen once the way back has finished, if it did not stop halfway.
+    private func refullscreenIfPageReturned() {
+        guard player.refullscreenWhenPageReturns, router.path.count == stackDepth else { return }
+        player.refullscreenWhenPageReturns = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            guard router.path.count == stackDepth, player.item != nil, !player.isPiPActive else { return }
+            player.enterFullscreen()
         }
     }
 
@@ -1128,8 +1143,7 @@ final class VideoDetailModel: ObservableObject {
             }
         }
         if toVertical {
-            // Going to another comment area would close the open composer (losing the draft) or reply thread.
-            guard manual || (comments.composerTarget == nil && comments.subRepliesRoot == nil) else { return }
+            guard manual || !commentsHoldAutoNext else { return }
             if !manual { player?.beginAutomaticVideoSwipe() }
             performSwipe(.next)
             return
@@ -1140,9 +1154,7 @@ final class VideoDetailModel: ObservableObject {
             if isPlaylistPending { prefetchPlaylistIfNeeded() }
             return
         }
-        if !manual && (comments.composerTarget != nil || comments.subRepliesRoot != nil) {
-            // Switching to another comment area would close the open composer (losing the draft) or the
-            // reply thread the user is reading.
+        if !manual && commentsHoldAutoNext {
             switch step {
             case .part: break
             case .episode(let ep) where ep.aid == comments.oid: break
@@ -1154,6 +1166,12 @@ final class VideoDetailModel: ObservableObject {
         case .episode(let ep): selectEpisode(ep)
         case .video(let r): replace(with: r)
         }
+    }
+
+    /// Going to another comment area would close the open composer (losing the draft) or the reply thread the user is
+    /// reading. The comments sheet over the fullscreen player has a list of its own, which would stay on the video left.
+    private var commentsHoldAutoNext: Bool {
+        comments.composerTarget != nil || comments.subRepliesRoot != nil || player?.overlay.sheet == .page("comments")
     }
 
     /// 「下一集」 (fullscreen bar, lock screen next-track) only when there is something to advance to.
@@ -1779,16 +1797,46 @@ extension VideoDetailModel {
         a.coined = relation.coinCount > 0
         a.favored = relation.favored
         a.likeCount = counts.like
+        a.commentCount = counts.reply
         a.coinCount = counts.coin
         a.favoriteCount = counts.favorite
         a.shareCount = counts.share
+        a.viewCount = counts.view
         a.shareURL = shareURL
         a.shareTitle = title
+        a.ownerName = detail?.owner.name ?? season?.upInfo?.name ?? ""
+        a.ownerFace = detail?.owner.face ?? season?.upInfo?.face ?? ""
+        a.ownerFans = ownerFans
+        let owner = detail?.owner.mid ?? season?.upInfo?.mid ?? 0
+        a.following = isFollowing(owner)
+        a.canFollow = owner != 0 && owner != BiliHTTP.shared.mid
         a.onLike = { [weak self] in Task { @MainActor in await self?.toggleLike() } }
         a.onTriple = { [weak self] in Task { @MainActor in await self?.triple() } }
         a.onCoin = { [weak self] in Task { @MainActor in self?.openPlayerCoinSheet() } }
         a.onFavorite = { [weak self] in Task { @MainActor in self?.openPlayerFavoriteSheet() } }
+        a.onComments = { [weak self] in Task { @MainActor in self?.openPlayerComments() } }
+        a.onFollow = { [weak self] in Task { @MainActor in await self?.toggleFollow(mid: owner) } }
+        a.onUploader = { [weak player] in
+            if owner != 0 { player?.pageRouter?.push(.user(mid: owner)) }
+        }
         return a
+    }
+
+    /// Over the fullscreen player, with a list of its own: the page's stays where it was, and so does its composer.
+    private func openPlayerComments() {
+        guard let player, let router = player.pageRouter, comments.oid > 0 else { return }
+        let aid = comments.oid
+        let sheet = NavigationStack {
+            // The sheet stays when the next video starts behind it: a time in these comments means this video.
+            VideoCommentsView(oid: aid, type: 1, onSeek: { [weak player] time in
+                if player?.item?.aid == aid { player?.seek(to: time) }
+            })
+                .navigationTitle("评论")
+                .navigationBarTitleDisplayMode(.inline)
+        }
+        .environmentObject(router)
+        .presentationDetents([.fraction(0.7), .large])
+        player.presentPageSheet(id: "comments", content: AnyView(sheet))
     }
 
     /// The intro tab's coin sheet over the player (fullscreen hides the page; the login page cannot be pushed).

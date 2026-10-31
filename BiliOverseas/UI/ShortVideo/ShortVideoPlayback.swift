@@ -25,6 +25,8 @@ final class ShortVideoPlayback: ObservableObject {
     /// Seconds.
     @Published private(set) var position: Double = 0
     @Published private(set) var duration: Double
+    /// What the progress bar shows.
+    let timeline = PlayerTimeline()
     /// The long-press 倍速 is active.
     @Published private(set) var isFastForward = false
 
@@ -46,6 +48,7 @@ final class ShortVideoPlayback: ObservableObject {
     init(item: ShortVideoItem) {
         self.item = item
         duration = Double(item.duration)
+        timeline.reset(duration: duration)
         player.actionAtItemEnd = .none
         player.automaticallyWaitsToMinimizeStalling = true
         danmaku.isFullscreen = true
@@ -102,9 +105,17 @@ final class ShortVideoPlayback: ObservableObject {
 
     func seek(to seconds: Double) {
         let target = max(0, min(seconds, duration > 0 ? duration - 0.5 : seconds))
+        guard player.currentItem != nil else {
+            // Dragged while it is still loading: it starts there (`install`).
+            resumeAt = target
+            position = target
+            timeline.update(time: target, duration: duration, buffered: 0)
+            return
+        }
         session?.playerWillSeek(to: target, outsideBuffer: !isBuffered(target))
         seeking = true
         position = target
+        timeline.update(time: target, duration: duration, buffered: timeline.snapshot.buffered)
         danmaku.seek(to: target)
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero,
                     toleranceAfter: .zero) { [weak self] _ in
@@ -256,7 +267,9 @@ final class ShortVideoPlayback: ObservableObject {
         playerItem.publisher(for: \.duration)
             .receive(on: RunLoop.main)
             .sink { [weak self] d in
-                if d.isNumeric, d.seconds > 0 { self?.duration = d.seconds }
+                guard let self, d.isNumeric, d.seconds > 0 else { return }
+                self.duration = d.seconds
+                self.timeline.update(time: self.position, duration: d.seconds, buffered: self.timeline.snapshot.buffered)
             }
             .store(in: &itemObservers)
     }
@@ -266,8 +279,10 @@ final class ShortVideoPlayback: ObservableObject {
         if wantsPlay, rebuildIfEndpointLost() { return }
         if !seeking { position = seconds }
         if isPlaying { furthest = max(furthest, seconds) }
-        guard let session, let current = player.currentItem else { return }
+        guard let current = player.currentItem else { return }
         let ahead = bufferedAhead(at: seconds, in: current)
+        timeline.update(time: position, duration: duration, buffered: seconds + ahead)
+        guard let session else { return }
         session.update(time: seconds, rate: Double(player.rate), playing: isPlaying && !seeking,
                        bufferedAhead: ahead, cacheFull: ahead >= current.preferredForwardBufferDuration - 1)
     }

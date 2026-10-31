@@ -41,6 +41,14 @@ final class PlayerSurfaceView: UIView {
     private var swipeGeneration = 0
     /// Which edge the target's cover is coming in from.
     private var swipeCoverFromBelow = true
+    /// The video's own size (zero until it is known).
+    private var videoSize: CGSize = .zero
+    /// Danmaku keep off the vertical-video screen's top bar.
+    var danmakuTopInset: CGFloat = 0 {
+        didSet {
+            if danmakuTopInset != oldValue { setNeedsLayout() }
+        }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -92,6 +100,10 @@ final class PlayerSurfaceView: UIView {
                 self?.dismissDanmakuBubble()
                 if !fullscreen { self?.resetZoom(animated: false) }
             },
+            controller.player.publisher(for: \.currentItem?.presentationSize).receive(on: RunLoop.main).sink { [weak self] size in
+                self?.videoSize = size ?? .zero
+                self?.updateVideoGravity()
+            },
         ]
     }
 
@@ -103,15 +115,19 @@ final class PlayerSurfaceView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        updateVideoGravity()
         // Bounds and centre, not frame: the zoom transform stays applied while the size changes.
         let video = videoFrame()
         videoView.bounds = CGRect(origin: .zero, size: video.size)
         videoView.center = CGPoint(x: video.midX, y: video.midY)
         // Bounds and centre here too: a swipe moves these with a transform.
-        for moving in [danmaku, leavingCover, swipeCover] as [UIView] {
+        for moving in [leavingCover, swipeCover] as [UIView] {
             moving.bounds = CGRect(origin: .zero, size: bounds.size)
             moving.center = CGPoint(x: bounds.midX, y: bounds.midY)
         }
+        let lanes = bounds.inset(by: UIEdgeInsets(top: danmakuTopInset, left: 0, bottom: 0, right: 0))
+        danmaku.bounds = CGRect(origin: .zero, size: lanes.size)
+        danmaku.center = CGPoint(x: lanes.midX, y: lanes.midY)
         gestureView.frame = bounds
         layoutRestoreButton()
     }
@@ -230,9 +246,12 @@ final class PlayerSurfaceView: UIView {
         addSubview(restoreButton)
     }
 
-    /// Shown while the picture is zoomed and the controls are visible (features.md §1.7).
+    private var onVerticalScreen: Bool { controller?.isOnVerticalScreen == true }
+
+    /// Shown while the picture is zoomed and the controls are visible (features.md §1.7), which on the vertical-video
+    /// screen they always are.
     private func updateRestoreButton() {
-        let show = zoomScale != 1 && chromeVisible && !chromeLocked
+        let show = zoomScale != 1 && (chromeVisible || onVerticalScreen) && !chromeLocked
         guard restoreButton.isHidden == show else { return }
         restoreButton.isHidden = !show
         if show {
@@ -245,8 +264,10 @@ final class PlayerSurfaceView: UIView {
         guard !restoreButton.isHidden else { return }
         let title = restoreButton.titleLabel?.intrinsicContentSize ?? .zero
         let size = CGSize(width: ceil(title.width) + 30, height: ceil(title.height) + 16)
-        // 95 pt above the bottom in fullscreen; the inline player is too short for that.
-        let gap: CGFloat = controller?.isFullscreen == true ? 95 : min(95, bounds.height * 0.3)
+        // 95 pt above the bottom in fullscreen; the inline player is too short for that. The vertical-video screen has
+        // the uploader and title there.
+        let gap: CGFloat = onVerticalScreen ? VerticalVideoMetrics.infoHeight + 30
+            : controller?.isFullscreen == true ? 95 : min(95, bounds.height * 0.3)
         restoreButton.frame = CGRect(x: (bounds.width - size.width) / 2, y: bounds.height - gap - size.height,
                                      width: size.width, height: size.height)
     }
@@ -267,9 +288,9 @@ final class PlayerSurfaceView: UIView {
             self.perform(action, item: hit.item, from: view)
         }
         addSubview(view)
-        // The danmaku layer fills the surface, so its frames are surface coordinates.
-        view.place(anchor: hit.frame, pointX: point.x, in: bounds)
+        view.place(anchor: danmaku.convert(hit.frame, to: self), pointX: point.x, in: bounds)
         bubble = view
+        controller.overlay.danmakuBubbleOpen = true
         controller.overlay.hideControls()
     }
 
@@ -282,6 +303,7 @@ final class PlayerSurfaceView: UIView {
     private func removeBubbleView() {
         bubble?.removeFromSuperview()
         bubble = nil
+        controller?.overlay.danmakuBubbleOpen = false
     }
 
     private func perform(_ action: DanmakuActionBubbleView.Action, item: DanmakuItem, from view: DanmakuActionBubbleView) {
@@ -364,14 +386,23 @@ final class PlayerSurfaceView: UIView {
     }
 
     private func applyAspect() {
+        updateVideoGravity()
+        setNeedsLayout()
+    }
+
+    /// 自适应 on the vertical-video screen goes by the video's shape (`VerticalVideoMetrics.fills`).
+    private func updateVideoGravity() {
         let gravity: AVLayerVideoGravity
         switch aspectMode {
-        case .fit: gravity = .resizeAspect
+        case .fit: gravity = onVerticalScreen && VerticalVideoMetrics.fills(video: videoSize, area: bounds.size) ? .resizeAspectFill : .resizeAspect
         case .fill: gravity = .resizeAspectFill
         case .stretch, .ratio16x9, .ratio4x3: gravity = .resize
         }
+        guard videoView.playerLayer.videoGravity != gravity else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         videoView.playerLayer.videoGravity = gravity
-        setNeedsLayout()
+        CATransaction.commit()
     }
 
     private func videoFrame() -> CGRect {

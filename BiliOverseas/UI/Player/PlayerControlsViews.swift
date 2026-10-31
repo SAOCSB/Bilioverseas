@@ -107,6 +107,15 @@ struct PlayerProgressBar: View {
     let clips: [PGCClipInfo]
     var barHeight: CGFloat = 3
     var thumbSize: CGFloat = 12
+    /// The touch area, with the line in its middle.
+    var height: CGFloat = 28
+    /// The vertical-video screen's bar: the little TV instead of the round thumb, and only sideways drags
+    /// (`PlayerScrubTouchArea`), as up and down go to another video there.
+    var verticalScreenStyle = false
+    /// Up and down drags, where nothing under the bar gets them (the 短视频 feed's pager does): the distance so far.
+    var onVerticalDragMoved: ((CGFloat) -> Void)? = nil
+    /// The distance and speed when the finger lifted (0, 0 when the drag was cancelled).
+    var onVerticalDragEnded: ((CGFloat, CGFloat) -> Void)? = nil
     let onScrubBegan: () -> Void
     let onScrubChanged: (Double) -> Void
     let onScrubEnded: (Double) -> Void
@@ -131,34 +140,35 @@ struct PlayerProgressBar: View {
                 if total > 0 {
                     markers(width: width, total: total)
                 }
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: thumbSize, height: thumbSize)
-                    .shadow(color: .black.opacity(0.3), radius: 2)
-                    .offset(x: width * played - thumbSize / 2)
+                if verticalScreenStyle {
+                    VerticalVideoProgressMascot()
+                        .offset(x: width * played - 9, y: -1)
+                } else {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: thumbSize, height: thumbSize)
+                        .shadow(color: .black.opacity(0.3), radius: 2)
+                        .offset(x: width * played - thumbSize / 2)
+                }
             }
             .frame(width: width, height: geo.size.height)
             .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .updating($isTouching) { _, touching, _ in touching = true }
-                    .onChanged { value in
-                        // Unknown duration: a tap would seek to 0.
-                        guard total > 0 else { return }
-                        let f = min(1, max(0, Double(value.location.x / width)))
-                        if scrubFraction == nil { onScrubBegan() }
-                        scrubFraction = f
-                        onScrubChanged(f * total)
-                    }
-                    .onEnded { value in
-                        guard total > 0 else { return }
-                        let f = min(1, max(0, Double(value.location.x / width)))
-                        scrubFraction = nil
-                        onScrubEnded(f * total)
-                    }
+            .gesture(verticalScreenStyle ? nil : DragGesture(minimumDistance: 0)
+                .updating($isTouching) { _, touching, _ in touching = true }
+                .onChanged { value in scrub(to: Double(value.location.x / width), total: total) }
+                .onEnded { value in endScrub(at: Double(value.location.x / width), total: total) }
             )
+            .overlay {
+                if verticalScreenStyle {
+                    PlayerScrubTouchArea(onMoved: { scrub(to: Double($0), total: total) },
+                                         onEnded: { endScrub(at: Double($0), total: total) },
+                                         onCancelled: { cancelScrub() },
+                                         onVerticalDragMoved: onVerticalDragMoved,
+                                         onVerticalDragEnded: onVerticalDragEnded)
+                }
+            }
         }
-        .frame(height: 28)
+        .frame(height: height)
         // `onEnded` is not called for a cancelled drag; without this the preview stayed on screen and the
         // auto-hide hold was never released (controls stuck visible until the next video).
         .onChange(of: isTouching) { touching in
@@ -178,6 +188,21 @@ struct PlayerProgressBar: View {
         }
     }
 
+    private func scrub(to fraction: Double, total: Double) {
+        // Unknown duration: a tap would seek to 0.
+        guard total > 0 else { return }
+        let f = min(1, max(0, fraction))
+        if scrubFraction == nil { onScrubBegan() }
+        scrubFraction = f
+        onScrubChanged(f * total)
+    }
+
+    private func endScrub(at fraction: Double, total: Double) {
+        guard total > 0 else { return }
+        scrubFraction = nil
+        onScrubEnded(min(1, max(0, fraction)) * total)
+    }
+
     private func cancelScrub() {
         guard scrubFraction != nil else { return }
         scrubFraction = nil
@@ -194,6 +219,125 @@ struct PlayerProgressBar: View {
                     .frame(width: 2, height: barHeight)
                     .offset(x: width * CGFloat(pair.element.from / total) - 1)
             }
+        }
+    }
+}
+
+/// The touch area of the vertical-video screen's bar. A drag that goes up or down is refused, so that it pages the
+/// 短视频 feed (whose collection view's pan then gets it) instead of seeking: SwiftUI's `DragGesture` cannot let go of a
+/// touch it has. The player's vertical fullscreen has nothing above this view to get it, so there it is passed on.
+struct PlayerScrubTouchArea: UIViewRepresentable {
+    /// The finger's position as a fraction of the width.
+    let onMoved: (CGFloat) -> Void
+    let onEnded: (CGFloat) -> Void
+    let onCancelled: () -> Void
+    var onVerticalDragMoved: ((CGFloat) -> Void)?
+    var onVerticalDragEnded: ((CGFloat, CGFloat) -> Void)?
+
+    func makeUIView(context: Context) -> TouchView { TouchView() }
+
+    func updateUIView(_ view: TouchView, context: Context) {
+        view.area = self
+    }
+
+    final class TouchView: UIView, UIGestureRecognizerDelegate {
+        var area: PlayerScrubTouchArea?
+        private let pan = UIPanGestureRecognizer()
+        private let tap = UITapGestureRecognizer()
+        /// A drag is under way whose end has not been reported.
+        private var dragging = false
+        private var dragsVertically = false
+
+        init() {
+            super.init(frame: .zero)
+            backgroundColor = .clear
+            pan.addTarget(self, action: #selector(handlePan(_:)))
+            pan.maximumNumberOfTouches = 1
+            pan.delegate = self
+            addGestureRecognizer(pan)
+            tap.addTarget(self, action: #selector(handleTap(_:)))
+            tap.delegate = self
+            addGestureRecognizer(tap)
+        }
+
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            // UIKit also asks this view about recognizers of its ancestors: leave those alone.
+            guard gestureRecognizer === pan else { return true }
+            let velocity = pan.velocity(in: self)
+            return abs(velocity.x) >= abs(velocity.y) || area?.onVerticalDragMoved != nil
+        }
+
+        /// A tap on the bar seeks; the page's own tap (pause) waits to see that it is not one.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            gestureRecognizer === tap && otherGestureRecognizer !== pan && otherGestureRecognizer is UITapGestureRecognizer
+        }
+
+        private func fraction(_ recognizer: UIGestureRecognizer) -> CGFloat {
+            recognizer.location(in: self).x / max(bounds.width, 1)
+        }
+
+        @objc private func handleTap(_ g: UITapGestureRecognizer) {
+            guard g.state == .ended else { return }
+            area?.onMoved(fraction(g))
+            area?.onEnded(fraction(g))
+        }
+
+        @objc private func handlePan(_ g: UIPanGestureRecognizer) {
+            switch g.state {
+            case .began:
+                let velocity = g.velocity(in: self)
+                dragging = true
+                dragsVertically = abs(velocity.y) > abs(velocity.x)
+                moved(g)
+            case .changed:
+                moved(g)
+            case .ended:
+                guard dragging else { return }
+                dragging = false
+                if dragsVertically {
+                    area?.onVerticalDragEnded?(g.translation(in: self).y, g.velocity(in: self).y)
+                } else {
+                    area?.onEnded(fraction(g))
+                }
+            case .cancelled, .failed:
+                cancel()
+            default:
+                break
+            }
+        }
+
+        private func moved(_ g: UIPanGestureRecognizer) {
+            guard dragging else { return }
+            if dragsVertically {
+                area?.onVerticalDragMoved?(g.translation(in: self).y)
+            } else {
+                area?.onMoved(fraction(g))
+            }
+        }
+
+        private func cancel() {
+            guard dragging else { return }
+            dragging = false
+            if dragsVertically {
+                area?.onVerticalDragEnded?(0, 0)
+            } else {
+                area?.onCancelled()
+            }
+        }
+
+        /// Taken away mid-drag (the controls changed with the video, fullscreen left): UIKit may not report the end.
+        override func willMove(toWindow newWindow: UIWindow?) {
+            super.willMove(toWindow: newWindow)
+            guard newWindow == nil, dragging else { return }
+            cancel()
+            // Disabling a running recognizer cancels it; its `.cancelled` callback is a no-op now.
+            pan.isEnabled = false
+            pan.isEnabled = true
         }
     }
 }

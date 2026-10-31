@@ -10,6 +10,8 @@ struct ShortVideoPager<Item: Identifiable, Page: View>: UIViewRepresentable {
     @Binding var index: Int
     /// A drag at the last page (more pages may be wanted, e.g. after a failed load).
     var onReachEnd: () -> Void = {}
+    /// The page a swipe is coming to rest on, ahead of `index` (nil once it has).
+    var onLanding: (Int?) -> Void = { _ in }
     let page: (Item, Int) -> Page
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -101,6 +103,15 @@ struct ShortVideoPager<Item: Identifiable, Page: View>: UIViewRepresentable {
 
         func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { settle(scrollView) }
 
+        func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint,
+                                       targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+            let height = scrollView.bounds.height
+            guard height > 0 else { return }
+            let page = Int((targetContentOffset.pointee.y / height).rounded())
+            guard parent.items.indices.contains(page) else { return }
+            DispatchQueue.main.async { [parent] in parent.onLanding(page) }
+        }
+
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
             if !decelerate { settle(scrollView) }
             if current == parent.items.count - 1 { parent.onReachEnd() }
@@ -110,12 +121,16 @@ struct ShortVideoPager<Item: Identifiable, Page: View>: UIViewRepresentable {
             let height = scrollView.bounds.height
             guard height > 0 else { return }
             let page = Int((scrollView.contentOffset.y / height).rounded())
-            guard page != current, parent.items.indices.contains(page) else { return }
+            guard page != current, parent.items.indices.contains(page) else {
+                DispatchQueue.main.async { [parent] in parent.onLanding(nil) }
+                return
+            }
             current = page
             pendingIndex = page
             // Not during a SwiftUI update: publish on the next turn of the run loop.
             DispatchQueue.main.async { [weak self, parent] in
                 parent.index = page
+                parent.onLanding(nil)
                 if self?.pendingIndex == page { self?.pendingIndex = nil }
             }
         }

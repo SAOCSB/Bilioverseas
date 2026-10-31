@@ -18,6 +18,11 @@ final class ShortVideoFeedModel: ObservableObject {
     @Published private(set) var errorText: String?
     /// 「只看竖屏」: landscape videos are skipped.
     @Published private(set) var portraitOnly = AppSettings.shared.general.shortVideoOnlyPortrait
+    /// 「N人正在看」 of the video on screen.
+    @Published private(set) var onlineText: String?
+    /// The page a swipe is coming to rest on (nil: none is). `index` follows once it has stopped. Not published: a
+    /// render in the middle of the swipe's deceleration would rebuild the visible pages for nothing.
+    var landingIndex: Int?
 
     /// Entry video (tapped in a list), shown first while page 1 loads; nil starts from the feed's pick.
     let start: ShortVideoItem?
@@ -32,6 +37,8 @@ final class ShortVideoFeedModel: ObservableObject {
     /// Bumped by 换一批 so a page still loading for the old feed is dropped.
     private var generation = 0
     private var loadingGeneration: Int?
+    private var onlineItemID: String?
+    private var onlineTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
 
     init(start: ShortVideoItem?) {
@@ -49,6 +56,12 @@ final class ShortVideoFeedModel: ObservableObject {
 
     var current: ShortVideoItem? { items.indices.contains(index) ? items[index] : nil }
 
+    /// What the bars around the pages act on: while a swipe comes to rest, the video it comes to, not the one leaving.
+    var showing: ShortVideoItem? {
+        if let landingIndex, items.indices.contains(landingIndex) { return items[landingIndex] }
+        return current
+    }
+
     // MARK: Loading
 
     func loadInitialIfNeeded() async {
@@ -62,6 +75,9 @@ final class ShortVideoFeedModel: ObservableObject {
         generation += 1
         closeAll()
         items = []
+        onlineTask?.cancel()
+        onlineItemID = nil
+        onlineText = nil
         cursor = nil
         exhausted = false
         userPaused = false
@@ -212,8 +228,25 @@ final class ShortVideoFeedModel: ObservableObject {
             now.prepare()
         }
         Task { await social(for: current).loadRelationIfNeeded() }
+        Task { await social(for: current).loadFansIfNeeded(mid: current.ownerMid) }
+        loadOnlineIfNeeded(current)
         if index >= items.count - 3 {
             Task { await loadMore() }
+        }
+    }
+
+    /// Asked once per video.
+    private func loadOnlineIfNeeded(_ item: ShortVideoItem) {
+        guard onlineItemID != item.id else { return }
+        onlineItemID = item.id
+        onlineText = nil
+        onlineTask?.cancel()
+        onlineTask = Task { [weak self] in
+            var cid = item.cid
+            if cid == 0 { cid = (try? await VideoAPI.detail(item.videoRef).cid) ?? 0 }
+            guard cid != 0, let text = try? await VideoAPI.onlineCount(aid: item.aid, cid: cid, bvid: item.bvid),
+                  !Task.isCancelled else { return }
+            self?.onlineText = "\(text)人正在看"
         }
     }
 
@@ -249,7 +282,9 @@ final class ShortVideoSocial: ObservableObject {
     @Published var likeCount: Int64
     @Published var coinCount: Int64
     @Published var favoriteCount: Int64
+    @Published private(set) var ownerFans: Int64 = 0
     private var loaded = false
+    private var fansLoaded = false
     private var busy = false
 
     init(item: ShortVideoItem) {
@@ -273,6 +308,17 @@ final class ShortVideoSocial: ObservableObject {
         following = relation.followingUp
     }
 
+    /// The 粉丝 under the uploader's name. `mid`: the entry card's copy of the item may not have had it.
+    func loadFansIfNeeded(mid: Int64) async {
+        guard !fansLoaded, mid > 0 else { return }
+        fansLoaded = true
+        guard let data = try? await BiliHTTP.shared.api(BiliHost.api + "/x/web-interface/card", query: ["mid": mid]) else {
+            fansLoaded = false
+            return
+        }
+        ownerFans = data["follower"].int64 ?? data[path: "card.fans"].int64Value
+    }
+
     /// Like or undo; `onlyLike` (double tap) never undoes.
     func toggleLike(onlyLike: Bool = false) async {
         guard ShortVideoSocial.requireLogin("点赞"), !busy else { return }
@@ -287,6 +333,35 @@ final class ShortVideoSocial: ObservableObject {
         } catch {
             liked = !target
             likeCount = max(0, likeCount + (target ? -1 : 1))
+            ShortVideoSocial.showError(error)
+        }
+    }
+
+    /// 一键三连: a long press on 点赞. `maxCoins`: the entry card's copy of the item does not say it.
+    func triple(maxCoins: Int) async {
+        guard ShortVideoSocial.requireLogin("三连"), !busy else { return }
+        if liked && coins >= maxCoins && favored {
+            ToastCenter.shared.show("已完成三连")
+            return
+        }
+        busy = true
+        defer { busy = false }
+        do {
+            let result = try await VideoAPI.triple(aid: item.aid, bvid: item.bvid)
+            if result.like && !liked {
+                liked = true
+                likeCount += 1
+            }
+            if result.coin && coins < maxCoins {
+                coinCount += Int64(maxCoins - coins)
+                coins = maxCoins
+            }
+            if result.fav && !favored {
+                favored = true
+                favoriteCount += 1
+            }
+            ToastCenter.shared.show(result.coin || coins >= maxCoins ? "三连成功" : "投币失败")
+        } catch {
             ShortVideoSocial.showError(error)
         }
     }

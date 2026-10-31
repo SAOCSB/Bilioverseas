@@ -57,28 +57,42 @@ struct PlayerEpisodeEntry: Identifiable, Equatable {
     static func partID(cid: Int64) -> String { "p\(cid)" }
 }
 
-/// The fullscreen 点赞 / 投币 / 收藏 / 分享 row (features.md §2.2), supplied by the detail page.
+/// The fullscreen 点赞 / 投币 / 收藏 / 分享 row (features.md §2.2), supplied by the detail page, and what the
+/// vertical-video screen shows beside it (`VerticalVideoViews.swift`), where the 短视频 feed supplies it too.
 struct PlayerFullscreenActions: Equatable {
     var liked = false
     var coined = false
     var favored = false
     var likeCount: Int64 = 0
+    var commentCount: Int64 = 0
     var coinCount: Int64 = 0
     var favoriteCount: Int64 = 0
     var shareCount: Int64 = 0
+    var viewCount: Int64 = 0
     var shareURL: URL?
     var shareTitle = ""
+    var ownerName = ""
+    var ownerFace = ""
+    var ownerFans: Int64 = 0
+    var following = false
+    /// There is an uploader, and it is not the viewer.
+    var canFollow = false
     var onLike: () -> Void = {}
     /// Long press on 点赞: 一键三连.
     var onTriple: () -> Void = {}
+    var onComments: () -> Void = {}
     var onCoin: () -> Void = {}
     var onFavorite: () -> Void = {}
+    var onFollow: () -> Void = {}
+    var onUploader: () -> Void = {}
 
     /// The displayed state only (the closures always target the page that built them).
     static func == (a: PlayerFullscreenActions, b: PlayerFullscreenActions) -> Bool {
         a.liked == b.liked && a.coined == b.coined && a.favored == b.favored && a.likeCount == b.likeCount
-            && a.coinCount == b.coinCount && a.favoriteCount == b.favoriteCount && a.shareCount == b.shareCount
-            && a.shareURL == b.shareURL && a.shareTitle == b.shareTitle
+            && a.commentCount == b.commentCount && a.coinCount == b.coinCount && a.favoriteCount == b.favoriteCount
+            && a.shareCount == b.shareCount && a.viewCount == b.viewCount && a.shareURL == b.shareURL
+            && a.shareTitle == b.shareTitle && a.ownerName == b.ownerName && a.ownerFace == b.ownerFace
+            && a.ownerFans == b.ownerFans && a.following == b.following && a.canFollow == b.canFollow
     }
 }
 
@@ -235,7 +249,13 @@ final class PlayerController: ObservableObject {
     /// video goes over as that controller is about to show, and comes back once the screen has turned back
     /// (`PlayerFullscreenPresenter`). The danmaku take the size of the stage they are in.
     @Published private(set) var surfaceInFullscreen = false {
-        didSet { surface.danmaku.isFullscreen = surfaceInFullscreen }
+        didSet {
+            surface.danmaku.isFullscreen = surfaceInFullscreen
+            if !surfaceInFullscreen {
+                surface.danmakuTopInset = 0
+                fullscreenStageIsVertical = false
+            }
+        }
     }
     /// Called when playback reaches the end (after SmartSkip etc.). The detail page decides auto-next.
     var onEnded: (() -> Void)?
@@ -282,6 +302,19 @@ final class PlayerController: ObservableObject {
     private(set) var pageSheet: (id: String, content: AnyView)?
     /// The page's observer that keeps `fullscreenActions` current (lives as long as the player).
     var pageObservation: AnyCancellable?
+    /// The page's navigation stack: search from the vertical-video screen (nil = no such button).
+    weak var pageRouter: TabRouter? {
+        didSet {
+            guard pageRouter !== oldValue else { return }
+            pagePathObservation = pageRouter?.$path.sink { [weak self] path in self?.pagePathChanged(count: path.count) }
+        }
+    }
+    private var pagePathObservation: AnyCancellable?
+    private var fullscreenStageIsVertical = false
+    /// How deep the page's stack stood when fullscreen began.
+    private var fullscreenPathCount = 0
+    /// Fullscreen gave way to a page opened from it (search, the uploader …), and comes back with the player's page.
+    var refullscreenWhenPageReturns = false
 
     // MARK: Stream & menu state
 
@@ -647,6 +680,44 @@ final class PlayerController: ObservableObject {
         }
     }
 
+    // MARK: Vertical-video screen
+
+    /// The official app's screen for a vertical video (`VerticalVideoViews.swift`) is up: such a video fullscreen,
+    /// standing up. `PlayerStageView` decides, and only it can: it knows the window's shape.
+    var isOnVerticalScreen: Bool { isFullscreen && fullscreenStageIsVertical }
+
+    /// The fullscreen stage came on that screen, or left it.
+    func fullscreenStageChanged(verticalScreen: Bool) {
+        guard isFullscreen else { return }
+        fullscreenStageIsVertical = verticalScreen
+        // That screen has no lock button: the lock of an earlier video in another shape must not stay on.
+        if verticalScreen { overlay.unlock() }
+        fullscreenPresenter.setShowsStatusBar(verticalScreen)
+        surface.danmakuTopInset = verticalScreen ? VerticalVideoMetrics.topBarHeight : 0
+        surface.setNeedsLayout()
+    }
+
+    /// A page was opened from fullscreen, and SwiftUI holds the push back for as long as fullscreen covers the stack.
+    private func pagePathChanged(count: Int) {
+        guard isOnVerticalScreen, count > fullscreenPathCount else { return }
+        refullscreenWhenPageReturns = true
+        exitFullscreen()
+    }
+
+    /// A double tap on that screen: 点赞, as on the 短视频 feed, never 取消点赞.
+    func verticalScreenDoubleTap(at location: CGPoint) {
+        guard let actions = fullscreenActions else {
+            togglePlay()
+            return
+        }
+        guard BiliHTTP.shared.isLoggedIn else {
+            ToastCenter.shared.show("请先登录")
+            return
+        }
+        overlay.showLikeBurst(at: location)
+        if !actions.liked { actions.onLike() }
+    }
+
     // MARK: Swiping between vertical videos
 
     /// Up and down swipes on this vertical video go to the next and previous one, in place (「竖屏视频进入短视频」).
@@ -709,6 +780,7 @@ final class PlayerController: ObservableObject {
         if !resume {
             // It counted as playing when the app left (`appDidEnterBackground`), for the video that did not come.
             pausedByBackground = false
+            backgroundTask?.cancel()
         } else if pausedByBackground {
             // Goes on when the app is back (`appWillEnterForeground`).
         } else if isCoveredByPage {
@@ -1905,7 +1977,8 @@ final class PlayerController: ObservableObject {
         autoExitTask?.cancel()
         autoExitTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_200_000_000)
-            guard let self, !Task.isCancelled, self.status == .ended else { return }
+            // Not from under a sheet: leaving fullscreen closes it, with whatever is being typed there.
+            guard let self, !Task.isCancelled, self.status == .ended, self.overlay.sheet == nil else { return }
             self.exitFullscreen()
         }
     }
@@ -2096,6 +2169,8 @@ final class PlayerController: ObservableObject {
             mask = .landscape
         }
         fullscreenByRotation = byRotation
+        fullscreenPathCount = pageRouter?.path.count ?? 0
+        refullscreenWhenPageReturns = false
         isFullscreen = true
         overlay.fullscreenChanged()
         // Out of the way while the player fades in and the screen turns (the presenter turns it once the player is
@@ -2107,8 +2182,8 @@ final class PlayerController: ObservableObject {
         }
         let takeSurface: () -> Void = { [weak self] in self?.surfaceInFullscreen = true }
         let stage = PlayerStageView(controller: self, overlay: overlay, role: .fullscreen)
-        if !fullscreenPresenter.present(stage, mask: mask, orientation: orientation, willPresent: takeSurface,
-                                        onShown: shown) {
+        if !fullscreenPresenter.present(stage, mask: mask, orientation: orientation, showsStatusBar: isVerticalVideo,
+                                        willPresent: takeSurface, onShown: shown) {
             isFullscreen = false
             surfaceInFullscreen = false
             fullscreenByRotation = false

@@ -96,6 +96,10 @@ final class PlayerOverlayModel: ObservableObject {
     @Published private(set) var doubleTapHint: PlayerDoubleTapHint?
     @Published private(set) var levelHUD: PlayerLevelHUD?
     @Published private(set) var hint: String?
+    /// The action bubble of a tapped danmaku: the vertical-video screen's buttons, which stay otherwise, make way for it.
+    @Published var danmakuBubbleOpen = false
+    /// 双击点赞 on the vertical-video screen.
+    @Published private(set) var likeBursts: [VerticalVideoLikeBurst] = []
 
     /// Auto-hide only runs while playback is (about to be) running.
     var isPlayingProvider: (() -> Bool)?
@@ -307,5 +311,14 @@ final class PlayerOverlayModel: ObservableObject {
     func clearHint() {
         hintTask?.cancel()
         hint = nil
+    }
+
+    func showLikeBurst(at location: CGPoint) {
+        let burst = VerticalVideoLikeBurst(location: location)
+        likeBursts.append(burst)
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            self?.likeBursts.removeAll { $0.id == burst.id }
+        }
     }
 }

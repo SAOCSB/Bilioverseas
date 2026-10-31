@@ -13,6 +13,7 @@ import MediaPlayer
 ///   middle third fullscreen — 「中间滑动进入/退出全屏」. A vertical video has neither: the picture follows the finger
 ///   and up goes to the next video, down to the previous one, in place (`PlayerController.videoSwipeMoved`);
 /// - pinch: zoom the picture 0.75–2× (「还原屏幕」 on the surface);
+/// - on the vertical-video screen, whose controls never hide, a tap pauses and a double tap is 点赞, as on the 短视频 feed;
 /// - pans starting within 25 pt of an edge are ignored (system edge gestures); direction lock at 3×.
 final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     weak var controller: PlayerController?
@@ -89,6 +90,8 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+
+    private var onVerticalScreen: Bool { controller?.isOnVerticalScreen == true }
 
     // MARK: Arbitration
 
@@ -193,7 +196,11 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             return
         }
         cancelPendingDanmaku()
-        overlay.toggleControls()
+        if onVerticalScreen {
+            if !controller.isSwitchingBySwipe { controller.togglePlay() }
+        } else {
+            overlay.toggleControls()
+        }
     }
 
     @objc private func handleDoubleTap(_ g: UITapGestureRecognizer) {
@@ -202,7 +209,9 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         controller.surface.dismissDanmakuBubble()
         let p = g.location(in: self)
         let w = bounds.width
-        if AppSettings.shared.player.doubleTapAction == .seek, p.x < w * 0.25 || p.x >= w * 0.75 {
+        if onVerticalScreen {
+            controller.verticalScreenDoubleTap(at: p)
+        } else if AppSettings.shared.player.doubleTapAction == .seek, p.x < w * 0.25 || p.x >= w * 0.75 {
             stepSeek(forward: p.x >= w * 0.75)
         } else {
             controller.togglePlay()

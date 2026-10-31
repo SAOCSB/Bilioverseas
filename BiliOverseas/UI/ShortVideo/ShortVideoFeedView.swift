@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// 短视频: the official app's vertical "story" mode. Full-screen videos with danmaku, swipe up for the next one
-/// and down for the previous; tap to pause, double-tap to like, hold for 倍速. The right column likes,
-/// coins, favourites, opens the comments and shares; the uploader and title sit at the bottom.
+/// 短视频: the official app's vertical "story" mode (`VerticalVideoViews.swift`). Videos with danmaku between the
+/// status bar and the 发弹幕 bar, swipe up for the next one and down for the previous; tap to pause, double-tap to
+/// like, hold for 倍速.
 struct ShortVideoFeedView: View {
     @StateObject private var model: ShortVideoFeedModel
     @EnvironmentObject private var router: TabRouter
@@ -19,31 +19,33 @@ struct ShortVideoFeedView: View {
     }
 
     var body: some View {
-        GeometryReader { geo in
+        VStack(spacing: 0) {
             ZStack(alignment: .top) {
-                Color.black.ignoresSafeArea()
                 if model.items.isEmpty {
                     placeholder
                 } else {
                     ShortVideoPager(items: model.items, index: $model.index,
-                                    onReachEnd: { Task { await model.loadMore() } }) { item, position in
+                                    onReachEnd: { Task { await model.loadMore() } },
+                                    onLanding: { model.landingIndex = $0 }) { item, position in
                         ShortVideoPageView(item: item, isCurrent: position == model.index,
-                                           safeInsets: geo.safeAreaInsets,
                                            playback: model.playback(for: item), social: model.social(for: item),
                                            actions: actions)
                     }
-                    .ignoresSafeArea()
                 }
                 topBar
             }
-            // Dark controls for this screen only: a window-wide color scheme would repaint the pages under it.
-            .environment(\.colorScheme, .dark)
+            bottomBar
         }
+        .padding(.top, -VerticalVideoMetrics.statusBarGap)
+        // Dark controls for this screen only: a window-wide color scheme would repaint the pages under it.
+        .environment(\.colorScheme, .dark)
+        // The keyboard of 发弹幕 comes up in a sheet: the video stays where it is behind that.
+        .ignoresSafeArea(.keyboard)
         .background(Color.black.ignoresSafeArea())
         .background(VideoDetailPopGestureEnabler().frame(width: 0, height: 0))
+        .background(VerticalVideoDarkScreen().frame(width: 0, height: 0))
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .statusBarHidden(true)
         .task { await model.loadInitialIfNeeded() }
         .onAppear { model.setVisible(true) }
         .onDisappear { model.setVisible(false) }
@@ -137,58 +139,39 @@ struct ShortVideoFeedView: View {
     }
 
     private var topBar: some View {
-        HStack {
-            Button { dismiss() } label: {
-                Image(systemName: "chevron.backward")
-                    .font(.system(size: 20, weight: .semibold))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .accessibilityLabel("返回")
-            Spacer()
-            Button {
-                settings.danmaku.enabled.toggle()
-            } label: {
-                PlayerDanmakuToggleIcon(enabled: settings.danmaku.enabled)
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(settings.danmaku.enabled ? "关闭弹幕" : "开启弹幕")
-            Button {
-                showsDanmakuSettings = true
-            } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 18, weight: .semibold))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .accessibilityLabel("弹幕设置")
-            if let item = model.current {
+        VerticalVideoTopBar(online: model.onlineText, onBack: { dismiss() }, onSearch: { router.push(.searchHome) }) {
+            if let item = model.showing {
                 moreMenu(item)
             }
         }
-        .foregroundStyle(.white)
-        .shadow(color: .black.opacity(0.4), radius: 3)
-        .padding(.horizontal, 6)
+    }
+
+    private var bottomBar: some View {
+        VerticalVideoBottomBar(danmakuOn: settings.danmaku.enabled,
+                               onSend: sendDanmaku,
+                               onToggle: { settings.danmaku.enabled.toggle() },
+                               onDetail: {
+                                   if let item = model.showing { actions.fullVideo(item) }
+                               },
+                               onSettings: { showsDanmakuSettings = true })
+    }
+
+    private func sendDanmaku() {
+        guard let item = model.showing, ShortVideoSocial.requireLogin("发弹幕") else { return }
+        if model.playback(for: item).resolvedCid != nil || item.cid != 0 {
+            danmakuFor = item
+        } else {
+            ToastCenter.shared.show("视频加载中，请稍后再试")
+        }
     }
 
     private func moreMenu(_ item: ShortVideoItem) -> some View {
         Menu {
-            Button { router.push(.video(item.videoRef)) } label: {
-                Label("打开完整视频页", systemImage: "rectangle.on.rectangle")
+            Button { showsDanmakuSettings = true } label: {
+                Label("弹幕设置", systemImage: "slider.horizontal.3")
             }
             Button { Task { await model.social(for: item).addToWatchLater() } } label: {
                 Label("稍后再看", systemImage: "clock")
-            }
-            Button {
-                guard ShortVideoSocial.requireLogin("发弹幕") else { return }
-                if model.playback(for: item).resolvedCid != nil || item.cid != 0 {
-                    danmakuFor = item
-                } else {
-                    ToastCenter.shared.show("视频加载中，请稍后再试")
-                }
-            } label: {
-                Label("发弹幕", systemImage: "text.bubble")
             }
             if let url = item.shareURL {
                 Button {
@@ -215,10 +198,7 @@ struct ShortVideoFeedView: View {
                 Label("换一批", systemImage: "arrow.clockwise")
             }
         } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 20, weight: .semibold))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+            VerticalVideoBarIcon(systemName: "ellipsis", upright: true)
         }
         .accessibilityLabel("更多")
     }
@@ -235,19 +215,18 @@ struct ShortVideoActions {
     var dislike: (ShortVideoItem, FeedDislikeReason) -> Void
 }
 
-/// One full-screen video with its overlay. It lays out over the whole cell and keeps its controls inside
-/// `safeInsets` (the screen's), which a reused, moving cell cannot report reliably.
+/// One video with its overlay, filling the area between the status bar and the 发弹幕 bar. The bars themselves stay
+/// where they are while the pages slide.
 struct ShortVideoPageView: View {
     let item: ShortVideoItem
     let isCurrent: Bool
-    let safeInsets: EdgeInsets
     @ObservedObject var playback: ShortVideoPlayback
     @ObservedObject var social: ShortVideoSocial
     let actions: ShortVideoActions
 
     @State private var readyForDisplay = false
     @State private var titleExpanded = false
-    @State private var hearts: [ShortVideoHeart] = []
+    @State private var bursts: [VerticalVideoLikeBurst] = []
     @State private var scrubbing: Double?
 
     var body: some View {
@@ -261,8 +240,8 @@ struct ShortVideoPageView: View {
                         .clipped()
                         .allowsHitTesting(false)
                 }
-                LinearGradient(colors: [.black.opacity(0.45), .clear], startPoint: .top, endPoint: .center)
-                    .frame(height: 160)
+                LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 110)
                     .frame(maxHeight: .infinity, alignment: .top)
                     .allowsHitTesting(false)
                 LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
@@ -271,12 +250,12 @@ struct ShortVideoPageView: View {
                     .allowsHitTesting(false)
                 // Below the top bar; the controls below it stay readable over the danmaku.
                 ShortVideoDanmakuLayer(danmaku: playback.danmaku)
-                    .padding(.top, safeInsets.top + 44)
+                    .padding(.top, VerticalVideoMetrics.topBarHeight)
                     .allowsHitTesting(false)
                 statusOverlay
-                ForEach(hearts) { heart in
-                    ShortVideoHeartView(heart: heart)
-                        .position(heart.location)
+                ForEach(bursts) { burst in
+                    VerticalVideoLikeBurstView(burst: burst)
+                        .position(burst.location)
                 }
                 overlay
             }
@@ -299,9 +278,8 @@ struct ShortVideoPageView: View {
         }
     }
 
-    /// Portrait videos fill a portrait screen like the official app; anything else is letterboxed.
     private func fills(in size: CGSize) -> Bool {
-        item.isPortrait && size.height > size.width
+        VerticalVideoMetrics.fills(video: CGSize(width: item.width, height: item.height), area: size)
     }
 
     @ViewBuilder private var statusOverlay: some View {
@@ -329,18 +307,17 @@ struct ShortVideoPageView: View {
                     .padding(.vertical, 6)
                     .background(.black.opacity(0.45), in: Capsule())
                     .frame(maxHeight: .infinity, alignment: .top)
-                    .padding(.top, safeInsets.top + 52)
+                    .padding(.top, 52)
+                    .allowsHitTesting(false)
+            } else if let scrubbing {
+                PlayerPill { Text("\(PlayerFormat.time(scrubbing))/\(PlayerFormat.time(playback.duration))").monospacedDigit() }
                     .allowsHitTesting(false)
             } else if isCurrent && (playback.isBuffering || playback.phase == .loading) {
                 ProgressView()
                     .tint(.white)
                     .allowsHitTesting(false)
             } else if isCurrent && playback.isPaused && playback.phase == .ready {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 54))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .shadow(radius: 6)
-                    .allowsHitTesting(false)
+                VerticalVideoPausedHint(time: "\(PlayerFormat.time(playback.position)) / \(PlayerFormat.time(playback.duration))")
             }
         }
     }
@@ -353,195 +330,59 @@ struct ShortVideoPageView: View {
     private var overlay: some View {
         VStack(spacing: 0) {
             Spacer(minLength: 0)
-            HStack(alignment: .bottom, spacing: 12) {
-                info
-                actionColumn
+            HStack(alignment: .bottom, spacing: 8) {
+                VerticalVideoInfoView(actions: videoActions, title: item.title, expanded: $titleExpanded)
+                VerticalVideoActionColumn(actions: videoActions)
             }
-            .padding(.leading, 14 + safeInsets.leading)
-            .padding(.trailing, 14 + safeInsets.trailing)
-            progress
-                .padding(.top, 10)
+            .padding(.leading, 14)
+            .padding(.trailing, 6)
+            PlayerProgressBar(timeline: playback.timeline, chapters: [], segments: [], clips: [], barHeight: 2,
+                              height: 22, verticalScreenStyle: true,
+                              onScrubBegan: {},
+                              onScrubChanged: { scrubbing = $0 },
+                              onScrubEnded: { target in
+                                  scrubbing = nil
+                                  playback.seek(to: target)
+                              },
+                              onScrubCancelled: { scrubbing = nil })
+                .padding(.horizontal, 12)
+                .offset(y: VerticalVideoMetrics.progressOverhang)
         }
-        .padding(.bottom, max(safeInsets.bottom, 8))
     }
 
-    private var info: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button { actions.uploader(item) } label: {
-                Text("@\(item.ownerName)")
-                    .font(.system(size: 16, weight: .semibold))
-                    .lineLimit(1)
-            }
-            .buttonStyle(.plain)
-            .disabled(item.ownerMid == 0)
-            Text(item.title)
-                .font(.system(size: 15))
-                .lineLimit(titleExpanded ? 6 : 2)
-                .multilineTextAlignment(.leading)
-                .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { titleExpanded.toggle() } }
-            HStack(spacing: 10) {
-                if item.viewCount > 0 {
-                    Label(Fmt.count(item.viewCount), systemImage: "play.rectangle")
-                        .accessibilityLabel("\(Fmt.count(item.viewCount))播放")
-                }
-                Button { actions.fullVideo(item) } label: {
-                    Label("完整视频页", systemImage: "rectangle.on.rectangle")
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.white.opacity(0.18), in: Capsule())
-                }
-                .buttonStyle(.plain)
-            }
-            .font(.caption)
-            .foregroundStyle(.white.opacity(0.8))
-        }
-        .foregroundStyle(.white)
-        .shadow(color: .black.opacity(0.5), radius: 2)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var actionColumn: some View {
-        VStack(spacing: 18) {
-            ZStack(alignment: .bottom) {
-                Button { actions.uploader(item) } label: {
-                    AvatarView(url: item.ownerFace, size: 46)
-                        .overlay(Circle().stroke(.white, lineWidth: 1.5))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(item.ownerName)
-                if !social.following && item.ownerMid != 0 {
-                    Button { Task { await social.follow() } } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 20, height: 20)
-                            .background(Color.biliPink, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .offset(y: 10)
-                    .accessibilityLabel("关注")
-                }
-            }
-            .padding(.bottom, 6)
-            actionButton("hand.thumbsup.fill", count: social.likeCount, label: "点赞", active: social.liked) {
-                Task { await social.toggleLike() }
-            }
-            actionButton("bitcoinsign.circle.fill", count: social.coinCount, label: "投币", active: social.coins > 0) {
-                actions.coin(item)
-            }
-            actionButton("star.fill", count: social.favoriteCount, label: "收藏", active: social.favored) {
-                actions.favorite(item)
-            }
-            actionButton("text.bubble.fill", count: item.replyCount, label: "评论", active: false) {
-                actions.comments(item)
-            }
-            if let url = item.shareURL {
-                ShareLink(item: url, subject: Text(item.title), message: Text(item.title)) {
-                    actionLabel("arrowshape.turn.up.right.fill", count: item.shareCount, label: "分享", active: false)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("分享")
-            }
-        }
-        .frame(width: 58)
-    }
-
-    private func actionButton(_ symbol: String, count: Int64, label: String, active: Bool,
-                              action: @escaping () -> Void) -> some View {
-        Button(action: action) { actionLabel(symbol, count: count, label: label, active: active) }
-            .buttonStyle(.plain)
-            .accessibilityLabel(label)
-            .accessibilityValue(count > 0 ? Fmt.count(count) : "")
-            .accessibilityAddTraits(active ? .isSelected : [])
-    }
-
-    private func actionLabel(_ symbol: String, count: Int64, label: String, active: Bool) -> some View {
-        VStack(spacing: 4) {
-            Image(systemName: symbol)
-                .font(.system(size: 30))
-                .foregroundStyle(active ? Color.biliPink : .white)
-            Text(count > 0 ? Fmt.count(count) : label)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white)
-        }
-        .shadow(color: .black.opacity(0.45), radius: 2)
-    }
-
-    /// A thin bar while playing; a draggable slider with times while paused. Both take the same height, so
-    /// pausing does not move the overlay.
-    private var progress: some View {
-        let duration = max(playback.duration, 0.1)
-        return ZStack(alignment: .bottom) {
-            if playback.isPaused && playback.phase == .ready {
-                HStack(spacing: 10) {
-                    Text(Self.time(scrubbing ?? playback.position))
-                    Slider(value: Binding(get: { scrubbing ?? playback.position },
-                                          set: { scrubbing = $0 }),
-                           in: 0...duration) { editing in
-                        if !editing, let target = scrubbing {
-                            playback.seek(to: target)
-                            scrubbing = nil
-                        }
-                    }
-                    .tint(.white)
-                    Text(Self.time(duration))
-                }
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14 + max(safeInsets.leading, safeInsets.trailing))
-            } else {
-                GeometryReader { bar in
-                    ZStack(alignment: .leading) {
-                        Rectangle().fill(.white.opacity(0.25))
-                        Rectangle().fill(.white.opacity(0.85))
-                            .frame(width: bar.size.width * min(1, max(0, playback.position / duration)))
-                    }
-                }
-                .frame(height: 2)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            }
-        }
-        .frame(height: 32, alignment: .bottom)
-    }
-
-    private static func time(_ seconds: Double) -> String {
-        let s = max(0, Int(seconds.rounded()))
-        return String(format: "%d:%02d", s / 60, s % 60)
+    private var videoActions: PlayerFullscreenActions {
+        var a = PlayerFullscreenActions()
+        a.liked = social.liked
+        a.coined = social.coins > 0
+        a.favored = social.favored
+        a.likeCount = social.likeCount
+        a.commentCount = item.replyCount
+        a.coinCount = social.coinCount
+        a.favoriteCount = social.favoriteCount
+        a.shareCount = item.shareCount
+        a.viewCount = item.viewCount
+        a.shareURL = item.shareURL
+        a.shareTitle = item.title
+        a.ownerName = item.ownerName
+        a.ownerFace = item.ownerFace
+        a.ownerFans = social.ownerFans
+        a.following = social.following
+        a.canFollow = item.ownerMid != 0 && item.ownerMid != BiliHTTP.shared.mid
+        a.onLike = { Task { await social.toggleLike() } }
+        a.onTriple = { Task { await social.triple(maxCoins: item.maxCoins) } }
+        a.onComments = { actions.comments(item) }
+        a.onCoin = { actions.coin(item) }
+        a.onFavorite = { actions.favorite(item) }
+        a.onFollow = { Task { await social.follow() } }
+        a.onUploader = { actions.uploader(item) }
+        return a
     }
 
     private func doubleTap(at location: CGPoint) {
         guard ShortVideoSocial.requireLogin("点赞") else { return }
-        let heart = ShortVideoHeart(location: location)
-        hearts.append(heart)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { hearts.removeAll { $0.id == heart.id } }
+        let burst = VerticalVideoLikeBurst(location: location)
+        bursts.append(burst)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { bursts.removeAll { $0.id == burst.id } }
         Task { await social.toggleLike(onlyLike: true) }
-    }
-}
-
-struct ShortVideoHeart: Identifiable {
-    let id = UUID()
-    let location: CGPoint
-    let tilt = Double.random(in: -18...18)
-}
-
-/// The double-tap 点赞 burst.
-private struct ShortVideoHeartView: View {
-    let heart: ShortVideoHeart
-    @State private var shown = false
-
-    var body: some View {
-        Image(systemName: "hand.thumbsup.fill")
-            .font(.system(size: 72))
-            .foregroundStyle(Color.biliPink)
-            .shadow(color: .black.opacity(0.3), radius: 4)
-            .rotationEffect(.degrees(heart.tilt))
-            .scaleEffect(shown ? 1.15 : 0.4)
-            .opacity(shown ? 0 : 1)
-            .offset(y: shown ? -60 : 0)
-            .allowsHitTesting(false)
-            .onAppear {
-                withAnimation(.easeOut(duration: 0.85)) { shown = true }
-            }
     }
 }

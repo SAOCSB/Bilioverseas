@@ -2,18 +2,27 @@ import UIKit
 import SwiftUI
 
 /// Hosting controller of a fullscreen player: fixed orientation, no status bar, auto-hidden home indicator,
-/// deferred edge gestures (an edge swipe needs two swipes, so drags near the edges reach the player).
+/// deferred edge gestures (an edge swipe needs two swipes, so drags near the edges reach the player). The vertical-video
+/// screen (`showsStatusBar`) keeps the status bar above its picture and leaves the edges to the system.
 final class PlayerFullscreenHostingController: UIHostingController<AnyView> {
     var orientationMask: UIInterfaceOrientationMask = .landscape {
         didSet { setNeedsUpdateOfSupportedInterfaceOrientations() }
     }
     var preferredOrientation: UIInterfaceOrientation = .landscapeRight
+    var showsStatusBar = false {
+        didSet {
+            guard showsStatusBar != oldValue else { return }
+            setNeedsStatusBarAppearanceUpdate()
+            setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
+        }
+    }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { orientationMask }
     override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { preferredOrientation }
-    override var prefersStatusBarHidden: Bool { true }
+    override var prefersStatusBarHidden: Bool { !showsStatusBar }
+    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
     override var prefersHomeIndicatorAutoHidden: Bool { true }
-    override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .all }
+    override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { showsStatusBar ? [] : .all }
     override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation { .fade }
 
     private var rotationWaiters: [(id: Int, run: () -> Void)] = []
@@ -55,9 +64,7 @@ struct PlayerFullscreenRootView<Content: View>: View {
     var body: some View {
         content
             .background(Color.black.ignoresSafeArea())
-            .statusBarHidden(true)
             .persistentSystemOverlays(.hidden)
-            .defersSystemGestures(on: .all)
             .preferredColorScheme(.dark)
             // Not under the app root: sheets presented from here would otherwise lose the app tint.
             .tint(.biliPink)
@@ -79,18 +86,23 @@ final class PlayerFullscreenPresenter {
     /// A dismissed fullscreen controller is still on screen, turning back or fading out.
     var isLeaving: Bool { leaving != nil }
 
+    /// What the fullscreen stage shows changed (another video, on the vertical-video screen or off it).
+    func setShowsStatusBar(_ shows: Bool) {
+        hosting?.showsStatusBar = shows
+    }
+
     /// `willPresent`: right before the controller goes on screen, which waits for one still leaving to have gone (not
     /// called when the presentation is dropped). `onShown`: the player is in place and the screen stands still.
     func present<Content: View>(_ content: Content, mask: UIInterfaceOrientationMask,
-                                orientation: UIInterfaceOrientation, willPresent: (() -> Void)? = nil,
-                                onShown: @escaping () -> Void) -> Bool {
+                                orientation: UIInterfaceOrientation, showsStatusBar: Bool = false,
+                                willPresent: (() -> Void)? = nil, onShown: @escaping () -> Void) -> Bool {
         guard hosting == nil else { return false }
         if leaving != nil {
             // Once that one is gone (`finishLeaving`); a `dismiss` meanwhile drops it.
             pendingPresent = { [weak self] in
                 guard let self else { return }
-                if !self.present(content, mask: mask, orientation: orientation, willPresent: willPresent,
-                                 onShown: onShown) {
+                if !self.present(content, mask: mask, orientation: orientation, showsStatusBar: showsStatusBar,
+                                 willPresent: willPresent, onShown: onShown) {
                     OrientationManager.shared.restorePortrait()
                 }
             }
@@ -101,6 +113,7 @@ final class PlayerFullscreenPresenter {
         let current = Self.interfaceOrientation()
         vc.orientationMask = Self.mask(for: current)
         vc.preferredOrientation = current
+        vc.showsStatusBar = showsStatusBar
         vc.modalPresentationStyle = .fullScreen
         vc.modalTransitionStyle = .crossDissolve
         vc.view.backgroundColor = .black

@@ -255,6 +255,23 @@ struct PlayerMenuBuilder {
 
     private func moreRows() -> [PlayerMenuRow] {
         var rows: [PlayerMenuRow] = []
+        // The vertical-video screen has no bar for them.
+        if controller.isOnVerticalScreen {
+            if controller.hasPrevious {
+                rows.append(PlayerMenuRow(id: "more.previous", title: "上一集",
+                                          kind: .action {
+                                              close()
+                                              controller.onPrevious?()
+                                          }))
+            }
+            if controller.hasNext {
+                rows.append(PlayerMenuRow(id: "more.next", title: "下一集",
+                                          kind: .action {
+                                              close()
+                                              controller.onNext?()
+                                          }))
+            }
+        }
         let qualityTitle = controller.qualityEntries.first { $0.qn == controller.currentQuality }?.title
         if !controller.qualityEntries.isEmpty {
             rows.append(PlayerMenuRow(id: "more.quality", title: "画质", detail: qualityTitle, chevron: true,

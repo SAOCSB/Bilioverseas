@@ -1,18 +1,21 @@
 import SwiftUI
 
-/// 短视频: the official app's vertical "story" mode. Full-screen videos, swipe up for the next one and
-/// down for the previous; tap to pause, double-tap to like, hold for 倍速. The right column likes,
+/// 短视频: the official app's vertical "story" mode. Full-screen videos with danmaku, swipe up for the next one
+/// and down for the previous; tap to pause, double-tap to like, hold for 倍速. The right column likes,
 /// coins, favourites, opens the comments and shares; the uploader and title sit at the bottom.
 struct ShortVideoFeedView: View {
     @StateObject private var model: ShortVideoFeedModel
     @EnvironmentObject private var router: TabRouter
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var settings = AppSettings.shared
     @State private var commentsFor: ShortVideoItem?
     @State private var coinFor: ShortVideoItem?
     @State private var favoriteFor: ShortVideoItem?
+    @State private var danmakuFor: ShortVideoItem?
+    @State private var showsDanmakuSettings = false
 
-    init(start: ShortVideoItem? = nil, startsAfterEntry: Bool = false) {
-        _model = StateObject(wrappedValue: ShortVideoFeedModel(start: start, startsAfterEntry: startsAfterEntry))
+    init(start: ShortVideoItem? = nil) {
+        _model = StateObject(wrappedValue: ShortVideoFeedModel(start: start))
     }
 
     var body: some View {
@@ -42,13 +45,7 @@ struct ShortVideoFeedView: View {
         .toolbar(.hidden, for: .tabBar)
         .statusBarHidden(true)
         .task { await model.loadInitialIfNeeded() }
-        .onAppear {
-            if router.advanceShortVideos {
-                router.advanceShortVideos = false
-                model.advance()
-            }
-            model.setVisible(true)
-        }
+        .onAppear { model.setVisible(true) }
         .onDisappear { model.setVisible(false) }
         // A push from inside the comments (a commenter's space, login…) lands under the sheet: close it.
         .onChange(of: router.path.count) { _ in
@@ -74,6 +71,16 @@ struct ShortVideoFeedView: View {
             VideoFavFolderSheet(rid: item.aid, resourceType: 2) { favored in
                 social.favoriteChanged(favored)
             }
+        }
+        .sheet(item: $danmakuFor) { item in
+            let playback = model.playback(for: item)
+            DanmakuSendSheet(aid: item.aid, cid: playback.resolvedCid ?? item.cid,
+                             currentTime: { playback.position }, isClosed: playback.danmaku.isClosedByUploader,
+                             onSent: { playback.danmaku.insertLocal($0) })
+        }
+        // The video keeps playing above the sheet, so a change shows at once.
+        .sheet(isPresented: $showsDanmakuSettings) {
+            DanmakuQuickPanel(fullscreen: true)
         }
     }
 
@@ -118,8 +125,6 @@ struct ShortVideoFeedView: View {
             } else if model.isLoading {
                 ProgressView()
                     .tint(.white)
-                Text("正在加载短视频…")
-                    .font(.footnote)
             } else {
                 Text("暂时没有短视频")
                 Button("刷新") { Task { await model.reload() } }
@@ -141,6 +146,23 @@ struct ShortVideoFeedView: View {
             }
             .accessibilityLabel("返回")
             Spacer()
+            Button {
+                settings.danmaku.enabled.toggle()
+            } label: {
+                PlayerDanmakuToggleIcon(enabled: settings.danmaku.enabled)
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(settings.danmaku.enabled ? "关闭弹幕" : "开启弹幕")
+            Button {
+                showsDanmakuSettings = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("弹幕设置")
             if let item = model.current {
                 moreMenu(item)
             }
@@ -157,6 +179,16 @@ struct ShortVideoFeedView: View {
             }
             Button { Task { await model.social(for: item).addToWatchLater() } } label: {
                 Label("稍后再看", systemImage: "clock")
+            }
+            Button {
+                guard ShortVideoSocial.requireLogin("发弹幕") else { return }
+                if model.playback(for: item).resolvedCid != nil || item.cid != 0 {
+                    danmakuFor = item
+                } else {
+                    ToastCenter.shared.show("视频加载中，请稍后再试")
+                }
+            } label: {
+                Label("发弹幕", systemImage: "text.bubble")
             }
             if let url = item.shareURL {
                 Button {
@@ -236,6 +268,10 @@ struct ShortVideoPageView: View {
                 LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
                     .frame(height: 300)
                     .frame(maxHeight: .infinity, alignment: .bottom)
+                    .allowsHitTesting(false)
+                // Below the top bar; the controls below it stay readable over the danmaku.
+                ShortVideoDanmakuLayer(danmaku: playback.danmaku)
+                    .padding(.top, safeInsets.top + 44)
                     .allowsHitTesting(false)
                 statusOverlay
                 ForEach(hearts) { heart in

@@ -83,7 +83,8 @@ extension PlayerController {
         restoreBrightness()
         backgroundTask?.cancel()
         guard item != nil, !(pipCoordinator.isActive || pipCoordinator.isStarting) else { return }
-        let intended = wantsToPlay
+        // A swipe under way has paused the old video, but the one it goes to will play.
+        let intended = wantsToPlay || isSwitchingBySwipe
         guard intended else { return }
         let settings = AppSettings.shared.player
         if settings.autoPiP, pip != nil, isPiPPossible {
@@ -104,7 +105,7 @@ extension PlayerController {
         if AppSettings.shared.player.backgroundPlay {
             // QA1668: a player attached to a visible layer is paused in the background; detach it to keep audio.
             surface.videoView.playerLayer.player = nil
-            if !wantsToPlay { play() }
+            if !wantsToPlay, !isSwitchingBySwipe { play() }
         } else {
             if wantsToPlay { pause() }
             pausedByBackground = true

@@ -73,14 +73,15 @@ struct RemoteImage: View {
 
     @State private var loaded: Loaded?
 
-    private var resolvedURL: String {
+    /// What a `RemoteImage` of that `width` asks for: the same URL shares its download and its cache.
+    static func resolvedURL(_ url: String, width: CGFloat?) -> String {
         guard let width, AppSettings.shared.general.compactImages else { return url.biliHTTPS }
         let px = Int(width * UIScreen.main.scale)
         return Fmt.thumb(url, width: min(max(px, 80), 1280))
     }
 
     var body: some View {
-        let u = resolvedURL
+        let u = Self.resolvedURL(url, width: width)
         // A memory-cached image shows in the very first frame (no placeholder flash when a row is
         // rebuilt), and an image already loaded for this URL stays even if the cache evicted it.
         let shown = loaded?.url == u ? loaded?.image : ImagePipeline.shared.cached(u)

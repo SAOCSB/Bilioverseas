@@ -41,7 +41,7 @@ struct ShortVideoItem: Identifiable, Hashable {
 
     var maxCoins: Int { copyright == 2 ? 1 : 2 }
 
-    var videoRef: VideoRef { VideoRef(aid: aid, bvid: bvid, cid: cid, title: title, cover: cover, fromShortVideos: true) }
+    var videoRef: VideoRef { VideoRef(aid: aid, bvid: bvid, cid: cid, title: title, cover: cover) }
 
     var shareURL: URL? {
         URL(string: bvid.isEmpty ? "https://www.bilibili.com/video/av\(aid)" : "https://www.bilibili.com/video/\(bvid)")

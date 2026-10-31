@@ -119,9 +119,11 @@ struct DanmakuSettingsView: View {
     }
 }
 
-/// Compact danmaku sheet for the player: on/off, opacity, size, area, speed, link to everything.
-/// Present it with `.sheet { DanmakuQuickPanel() }`.
+/// Compact danmaku sheet for the player and the 短视频 feed: on/off, opacity, size, area, speed, link to everything.
+/// Present it with `.sheet { DanmakuQuickPanel() }`. `fullscreen`: the danmaku on screen use 「全屏字体大小」, so that
+/// is the size offered here (the other would change nothing in sight).
 struct DanmakuQuickPanel: View {
+    var fullscreen = false
     @ObservedObject private var settings = AppSettings.shared
     @Environment(\.dismiss) private var dismiss
 
@@ -131,8 +133,9 @@ struct DanmakuQuickPanel: View {
                 Toggle("显示弹幕", isOn: $settings.danmaku.enabled)
                 DanmakuSliderRow(title: "不透明度", value: $settings.danmaku.opacity, range: 0...1, step: 0.01,
                                  format: DanmakuSliderRow.percent)
-                DanmakuSliderRow(title: "字体大小", value: $settings.danmaku.fontScale, range: 0.5...2.5, step: 0.05,
-                                 format: DanmakuSliderRow.percent)
+                DanmakuSliderRow(title: fullscreen ? "全屏字体大小" : "字体大小",
+                                 value: fullscreen ? $settings.danmaku.fontScaleFullscreen : $settings.danmaku.fontScale,
+                                 range: 0.5...2.5, step: 0.05, format: DanmakuSliderRow.percent)
                 Toggle("粗体", isOn: $settings.danmaku.bold)
                 VStack(alignment: .leading, spacing: 8) {
                     Text("显示区域")

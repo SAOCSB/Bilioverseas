@@ -19,6 +19,11 @@ import VideoToolbox
 // MARK: - Contract types
 
 /// What to play. Built by the detail page from VideoDetail / VideoPart / UgcEpisode / PGCEpisode.
+/// A swipe on a vertical video: on to the next one (finger up), or back to the one before.
+enum PlayerVideoSwipe {
+    case next, previous
+}
+
 struct PlaybackItem: Equatable {
     var aid: Int64
     var bvid: String
@@ -244,9 +249,20 @@ final class PlayerController: ObservableObject {
     }
     @Published private(set) var hasNext = false
 
-    /// Set by a page that can go on to another video when a vertical video is swiped up (nil: offline files).
-    var onSwipeToNextVideo: (() -> Void)?
-    private var lastNextVideoSwipe: CFTimeInterval = 0
+    /// Set by a page that can move on from a vertical video (not offline files): the cover of the video a swipe would
+    /// go to, nil when there is none (yet).
+    var videoSwipeCover: ((PlayerVideoSwipe) -> String?)?
+    /// The page switches to that video in place. It ends with `load`, or with `videoSwipeFailed` when it cannot.
+    var onVideoSwipe: ((PlayerVideoSwipe) -> Void)?
+    /// A swipe is under way: the picture is moving, or the video it goes to is on its way. What is drawn with the
+    /// picture (cover, subtitles, loading) steps aside until then.
+    @Published private(set) var isVideoSwipeActive = false
+    /// The swipe has been decided; the page is switching and no new one starts.
+    private(set) var isSwitchingBySwipe = false
+    private var playAfterFailedSwipe = false
+    private var controlsBeforeSwipe = false
+    /// The item playing came from a swipe: a position it was given is the one it was left at, nothing to point out.
+    private var itemCameFromSwipe = false
 
     /// Optional: when set, the fullscreen bar shows 「上一集」 and the lock screen offers "previous track".
     var onPrevious: (() -> Void)? {
@@ -492,11 +508,16 @@ final class PlayerController: ObservableObject {
         if let current = item, current == newItem {
             switch status {
             case .idle, .failed: break
-            default: return
+            default:
+                videoSwipeFailed()
+                return
             }
         }
-        // Auto-next (or another part tapped while playing) keeps playing even with 「自动播放」 off.
-        let continuing = item != nil && (wantsToPlay || status == .ended)
+        let swiped = isSwitchingBySwipe
+        itemCameFromSwipe = swiped
+        // Auto-next (or another part tapped while playing) keeps playing even with 「自动播放」 off, and so does a
+        // swipe from a paused video (the swipe itself paused it).
+        let continuing = item != nil && (wantsToPlay || status == .ended || swiped)
         autoExitTask?.cancel()
         teardown(reportHeartbeat: true)
         item = newItem
@@ -508,6 +529,8 @@ final class PlayerController: ObservableObject {
         timeline.reset(duration: duration)
         status = .loading
         wantsToPlay = AppSettings.shared.player.autoPlay || continuing
+        // Without 后台播放, in the background (the app left during a swipe): it starts once the app is back.
+        if pausedByBackground { wantsToPlay = false }
         if wantsToPlay, containerHidden, !isPiPBusy {
             // Loaded while another page covers this one (e.g. the detail request finished late): start when visible.
             wantsToPlay = false
@@ -519,6 +542,12 @@ final class PlayerController: ObservableObject {
         // paused by the system (QA1668); `appWillEnterForeground` re-attaches it.
         if UIApplication.shared.applicationState != .background { surface.reattachPlayerIfNeeded() }
         overlay.prepareForNewItem()
+        if swiped {
+            // Swiping through videos: the controls would cover each one for its first seconds.
+            overlay.hideControls()
+            endVideoSwipe()
+            surface.finishVideoSwipe()
+        }
         startTicking()
         let gen = loadGeneration
         loadTask = Task { [weak self] in await self?.performInitialLoad(newItem, generation: gen) }
@@ -528,6 +557,11 @@ final class PlayerController: ObservableObject {
 
     func play() {
         guard item != nil else { return }
+        if isSwitchingBySwipe {
+            // The old video stays silent behind the cover: this only decides what happens if the switch fails.
+            playAfterFailedSwipe = true
+            return
+        }
         if case .failed = status {
             retry()
             return
@@ -557,6 +591,7 @@ final class PlayerController: ObservableObject {
     }
 
     func pause() {
+        if isSwitchingBySwipe { playAfterFailedSwipe = false }
         wantsToPlay = false
         pausedByBackground = false
         pausedByInterruption = false
@@ -577,6 +612,10 @@ final class PlayerController: ObservableObject {
     }
 
     func togglePlay() {
+        if isSwitchingBySwipe {
+            playAfterFailedSwipe.toggle()
+            return
+        }
         switch status {
         case .ended, .failed: play()
         default: wantsToPlay ? pause() : play()
@@ -595,36 +634,93 @@ final class PlayerController: ObservableObject {
         enterFullscreen(byRotation: false, deviceOrientation: nil)
     }
 
-    /// `then`: the fullscreen player has gone, and fullscreen was not entered again meanwhile.
-    func exitFullscreen(then done: (() -> Void)? = nil) {
+    func exitFullscreen() {
         guard isFullscreen else { return }
         overlay.unlock()
         fullscreenByRotation = false
         isFullscreen = false
         overlay.fullscreenChanged()
-        fullscreenPresenter.dismiss(releasingSurface: { [weak self] in
+        fullscreenPresenter.dismiss { [weak self] in
             // Back inline before the fade, also when fullscreen was entered again meanwhile: the page then shows
             // the current picture until the new fullscreen controller takes it (`willPresent`).
             self?.surfaceInFullscreen = false
-        }, completion: { [weak self] in
-            guard let self, !self.isFullscreen else { return }
-            done?()
-        })
+        }
     }
 
-    /// A swipe up on this vertical video goes on to the next one (「竖屏视频进入短视频」). Not for bangumi episodes,
-    /// and not while the video plays in Picture in Picture.
-    var canSwipeToNextVideo: Bool {
-        onSwipeToNextVideo != nil && isVerticalVideo && item?.epId == 0 && !isPiPActive
+    // MARK: Swiping between vertical videos
+
+    /// Up and down swipes on this vertical video go to the next and previous one, in place (「竖屏视频进入短视频」).
+    /// Not for bangumi episodes, and not while the video plays in Picture in Picture.
+    var canSwipeVideos: Bool {
+        videoSwipeCover != nil && isVerticalVideo && item?.epId == 0 && !isPiPActive
             && AppSettings.shared.general.portraitOpensShortVideo
     }
 
-    func swipeToNextVideo() {
-        // Touches can still arrive while the page is leaving; the one swipe is enough.
-        let now = CACurrentMediaTime()
-        guard now - lastNextVideoSwipe > 1 else { return }
-        lastNextVideoSwipe = now
-        onSwipeToNextVideo?()
+    /// The finger moved: `offset` from where it started (negative is up, towards the next video).
+    func videoSwipeMoved(offset: CGFloat) {
+        if !isVideoSwipeActive {
+            isVideoSwipeActive = true
+            controlsBeforeSwipe = overlay.controlsVisible
+            overlay.hideControls()
+            surface.beginVideoSwipe(leavingCover: hasFirstFrame ? nil : item?.cover)
+        }
+        surface.moveVideoSwipe(offset: offset, targetCover: videoSwipeCover?(offset < 0 ? .next : .previous))
+    }
+
+    /// The finger lifted (offset and velocity 0: the gesture was cancelled). Far or fast enough goes to that video,
+    /// anything else springs back, and so does a flick back the other way, however far it had gone.
+    func videoSwipeEnded(offset: CGFloat, velocity: CGFloat) {
+        guard isVideoSwipeActive else { return }
+        let swipe: PlayerVideoSwipe = offset < 0 ? .next : .previous
+        let fast = abs(velocity) > 600
+        let flickedBack = fast && (velocity < 0) != (offset < 0)
+        let far = !flickedBack && (fast || abs(offset) > max(surface.bounds.height, 1) * 0.2)
+        guard far, let cover = videoSwipeCover?(swipe) else {
+            if far { ToastCenter.shared.show(swipe == .next ? "下一个视频还在加载，稍后再滑" : "已经是第一个了") }
+            surface.cancelVideoSwipe()
+            endVideoSwipe()
+            if controlsBeforeSwipe { overlay.showControls() }
+            return
+        }
+        let wasPlaying = wantsToPlay
+        pause()
+        isSwitchingBySwipe = true
+        playAfterFailedSwipe = wasPlaying
+        surface.commitVideoSwipe(toNext: swipe == .next, targetCover: cover) { [weak self] in
+            guard let self, self.isSwitchingBySwipe else { return }
+            self.onVideoSwipe?(swipe)
+        }
+    }
+
+    /// The page goes on by itself to the video a swipe would go to (this one ended): it comes up the same way.
+    func beginAutomaticVideoSwipe() {
+        isSwitchingBySwipe = true
+        playAfterFailedSwipe = false
+        controlsBeforeSwipe = overlay.controlsVisible
+    }
+
+    /// The page could not switch: back to the video that was showing, as it was.
+    func videoSwipeFailed() {
+        guard isSwitchingBySwipe else { return }
+        let resume = playAfterFailedSwipe
+        endVideoSwipe()
+        surface.cancelVideoSwipe()
+        if controlsBeforeSwipe { overlay.showControls() }
+        if !resume {
+            // It counted as playing when the app left (`appDidEnterBackground`), for the video that did not come.
+            pausedByBackground = false
+        } else if pausedByBackground {
+            // Goes on when the app is back (`appWillEnterForeground`).
+        } else if isCoveredByPage {
+            resumeOnContainerAppear = true
+        } else {
+            play()
+        }
+    }
+
+    private func endVideoSwipe() {
+        isSwitchingBySwipe = false
+        isVideoSwipeActive = false
     }
 
     /// Stop & release. While Picture in Picture runs the player keeps going (kept alive) and stops when PiP ends.
@@ -642,6 +738,8 @@ final class PlayerController: ObservableObject {
         autoExitTask?.cancel()
         if isFullscreen { exitFullscreen() }
         teardown(reportHeartbeat: true)
+        endVideoSwipe()
+        surface.finishVideoSwipe()
         item = nil
         status = .idle
         currentTime = 0
@@ -1027,7 +1125,7 @@ final class PlayerController: ObservableObject {
         if start > 0 {
             timeline.update(time: start, duration: duration, buffered: 0)
             currentTime = start
-            if userStart == nil { showResumeChip(at: start) }
+            if userStart == nil, !(itemCameFromSwipe && target.startTime != nil) { showResumeChip(at: start) }
         }
         if userStart == nil, target.startTime == nil, AppSettings.shared.player.resumeProgress,
            info.lastPlayCid > 0, info.lastPlayCid != target.cid {
@@ -1797,7 +1895,8 @@ final class PlayerController: ObservableObject {
             return
         }
         onEnded?()
-        scheduleAutoExitFullscreen()
+        // Swiping through vertical videos: the end of one is no reason to leave fullscreen.
+        if !canSwipeVideos { scheduleAutoExitFullscreen() }
     }
 
     /// 「自动退出全屏」 when nothing new was loaded after the end.

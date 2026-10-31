@@ -63,7 +63,6 @@ struct VideoDetailView: View {
             }
             model.pageAppeared()
             model.attach(player)
-            connectSwipeToNextVideo()
             model.startIfNeeded()
             if resumeOnAppear {
                 resumeOnAppear = false
@@ -95,31 +94,6 @@ struct VideoDetailView: View {
             if player.wantsToPlay {
                 resumeOnAppear = true
                 player.pause()
-            }
-        }
-    }
-
-    /// A swipe up on a vertical video goes on to the next one: in the 播放全部 list while it has more, else in the
-    /// 短视频 feed, the one this page was opened from or a new one continuing from this video. Weak: the player
-    /// keeps this closure.
-    private func connectSwipeToNextVideo() {
-        player.onSwipeToNextVideo = { [weak model, weak player, weak router] in
-            guard let model, let player, let router, !model.swipeUpInPlaylist(),
-                  let entry = model.shortVideoEntry else { return }
-            let leave = {
-                if model.openedFromShortVideos {
-                    // The feed starts its next video as this page slides away.
-                    player.pause()
-                    router.advanceShortVideos = true
-                    router.pop()
-                } else {
-                    router.push(.shortVideos(start: entry, startsAfterEntry: true))
-                }
-            }
-            if player.isFullscreen {
-                player.exitFullscreen(then: leave)
-            } else {
-                leave()
             }
         }
     }
@@ -505,8 +479,20 @@ final class VideoDetailModel: ObservableObject {
     private var playedAids: Set<Int64> = []
     /// 播放全部 list this page was opened with (稍后再看 / 收藏夹); kept across in-place switches.
     private let playlist: VideoPlaylist?
-    /// Opened from the 短视频 feed (完整视频页); kept across in-place switches.
-    let openedFromShortVideos: Bool
+    /// The videos swiped through on this page, the one showing included (`syncSwipeTrail`), each with where it was left.
+    private var swipeTrail: [VideoRef] = []
+    private var swipeIndex = 0
+    /// `swipeIndex` before a switch still loading: where it goes back to when that does not happen.
+    private var swipeIndexBeforeSwitch: Int?
+    /// The feed's video that switch is opening (it was added to the trail for it).
+    private var swipeItemBeingOpened: ShortVideoItem?
+    /// Portrait videos the next swipes go to: the 短视频 feed, continuing from the first vertical video of this page.
+    private var swipeQueue: [ShortVideoItem] = []
+    private var swipeQueueAnchor: ShortVideoItem?
+    private var swipeQueueCursor: ShortVideoCursor?
+    private var swipeQueueTask: Task<Void, Never>?
+    private var swipeSeenIDs: Set<String> = []
+    private var swipeFetchNotBefore = Date.distantPast
     /// Bumped by every content load; stale responses are dropped.
     private var generation = 0
     /// Bumped by every content / part / episode change; stale side data is dropped.
@@ -520,7 +506,6 @@ final class VideoDetailModel: ObservableObject {
         let aid = ref.aid > 0 ? ref.aid : (BVConverter.bv2av(ref.bvid) ?? 0)
         comments = VideoCommentsModel(oid: ref.isPGC ? 0 : aid, type: 1)
         playlist = ref.playlist
-        openedFromShortVideos = ref.fromShortVideos
     }
 
     // MARK: Derived state
@@ -560,16 +545,6 @@ final class VideoDetailModel: ObservableObject {
         guard let d = detail else { return false }
         if let p = currentPart, p.width > 0, p.height > 0 { return p.isVertical }
         return d.isVertical
-    }
-
-    /// What the 短视频 feed continues from when this video is swiped away (nil for bangumi).
-    var shortVideoEntry: ShortVideoItem? {
-        guard season == nil, let d = detail, d.aid != 0 || !d.bvid.isEmpty else { return nil }
-        var item = ShortVideoItem(id: !d.bvid.isEmpty ? d.bvid : "av\(d.aid)")
-        item.aid = d.aid
-        item.bvid = d.bvid
-        item.title = d.title
-        return item
     }
 
     var shareURL: URL? {
@@ -645,6 +620,8 @@ final class VideoDetailModel: ObservableObject {
 
     /// The page was popped: stop background work.
     func pageClosed() {
+        swipeQueueTask?.cancel()
+        swipeQueueTask = nil
         loadTask?.cancel()
         cancelSideTasks()
     }
@@ -653,12 +630,15 @@ final class VideoDetailModel: ObservableObject {
     /// 合集 episode) must not replace the page afterwards.
     private func cancelPendingSwitch() {
         guard isSwitching else { return }
+        undoSwipeStep(requeue: true)
         loadTask?.cancel()
         generation += 1
         isSwitching = false
     }
 
     private func load(_ target: VideoRef, inPlace: Bool) {
+        // This replaces a switch still loading: if that one was a swipe's, it did not happen.
+        if isSwitching { undoSwipeStep(requeue: true) }
         loadTask?.cancel()
         generation += 1
         let gen = generation
@@ -673,12 +653,16 @@ final class VideoDetailModel: ObservableObject {
                 let content = try await VideoDetailModel.fetch(target)
                 guard let self, gen == self.generation else { return }
                 self.ref = target
+                self.swipeIndexBeforeSwitch = nil
+                self.swipeItemBeingOpened = nil
                 self.apply(content, target: target)
                 self.isSwitching = false
                 self.phase = .loaded
             } catch {
                 guard let self, gen == self.generation else { return }
                 self.isSwitching = false
+                self.undoSwipeStep(requeue: false)
+                self.player?.videoSwipeFailed()
                 if VideoDetailModel.isCancellation(error) { return }
                 if inPlace && self.hasContent {
                     ToastCenter.shared.show(error: error)
@@ -778,7 +762,11 @@ final class VideoDetailModel: ObservableObject {
 
     private func playCurrent(startTime: Double?) {
         refreshNextAvailability()
-        guard let item = makeItem(startTime: startTime) else { return }
+        guard let item = makeItem(startTime: startTime) else {
+            player?.videoSwipeFailed()
+            return
+        }
+        if item.isVertical { prefetchSwipeQueueIfNeeded() }
         // A content switch that finishes while another page covers this one (auto-next, lock-screen 下一集)
         // is loaded on the next appearance instead of auto-playing behind that page.
         if let player, !isCovered {
@@ -952,8 +940,169 @@ final class VideoDetailModel: ObservableObject {
         }
     }
 
+    // MARK: Swiping between vertical videos
+
+    /// Where a swipe goes: within the 播放全部 list, along the videos already swiped through, or on to a new one.
+    private enum SwipeStep {
+        case list(NextStep)
+        case trail(VideoRef)
+        case queue(ShortVideoItem)
+    }
+
+    private func swipeStep(_ swipe: PlayerVideoSwipe) -> SwipeStep? {
+        // With a switch under way `detail` is still the old video, which the trail would take for a new step.
+        guard let d = detail, season == nil, !isSwitching else { return nil }
+        let position = playlistPosition(aid: d.aid, bvid: d.bvid)
+        syncSwipeTrail(d)
+        switch swipe {
+        case .next:
+            if position != nil, let step = nextStep(includeRelated: false) { return .list(step) }
+            // The rest of the list comes first, once it is loaded.
+            if case .pending? = position { return nil }
+            if case .end? = position, AppSettings.shared.player.playRepeat == .listCycle, let first = firstListStep() {
+                return .list(first)
+            }
+            if swipeTrail.indices.contains(swipeIndex + 1) { return .trail(swipeTrail[swipeIndex + 1]) }
+            // A list, 合集 or auto-next may have played these since they were queued.
+            swipeQueue.removeAll { playedAids.contains($0.aid) }
+            return swipeQueue.first.map { .queue($0) }
+        case .previous:
+            if position != nil, let step = previousStep() { return .list(step) }
+            guard swipeIndex > 0 else { return nil }
+            let before = swipeTrail[swipeIndex - 1]
+            // On a list's first entry, a step back along the trail that lands in the list would only bounce around it.
+            if position != nil, playlist?.index(aid: before.aid, bvid: before.bvid) != nil { return nil }
+            return .trail(before)
+        }
+    }
+
+    /// The trail's current entry is the video showing: auto-next or a 合集 tap may have moved on without a swipe.
+    private func syncSwipeTrail(_ d: VideoDetail) {
+        if swipeTrail.indices.contains(swipeIndex) {
+            let entry = swipeTrail[swipeIndex]
+            if (entry.aid != 0 && entry.aid == d.aid) || (!entry.bvid.isEmpty && entry.bvid == d.bvid) { return }
+            swipeTrail.removeSubrange((swipeIndex + 1)...)
+        }
+        swipeTrail.append(VideoRef(aid: d.aid, bvid: d.bvid, cid: currentCid, title: d.title, cover: d.cover))
+        swipeIndex = swipeTrail.count - 1
+    }
+
+    /// The cover of the video a swipe would go to; nil when there is none (yet), which also asks for more.
+    fileprivate func swipeCover(_ swipe: PlayerVideoSwipe) -> String? {
+        switch swipeStep(swipe) {
+        case .list(.part)?: return detail?.cover
+        case .list(.episode(let episode))?: return episode.cover
+        case .list(.video(let ref))?: return ref.cover
+        case .trail(let ref)?: return ref.cover
+        case .queue(let item)?: return item.cover
+        case nil:
+            // Asked on every frame of a drag: a failing request is not repeated at that pace.
+            if swipe == .next, Date() >= swipeFetchNotBefore {
+                swipeFetchNotBefore = Date().addingTimeInterval(2)
+                if isPlaylistPending { prefetchPlaylistIfNeeded() } else { prefetchSwipeQueueIfNeeded() }
+            }
+            return nil
+        }
+    }
+
+    fileprivate func performSwipe(_ swipe: PlayerVideoSwipe) {
+        guard let step = swipeStep(swipe) else {
+            player?.videoSwipeFailed()
+            return
+        }
+        // Coming back continues where it was left, in that part (from the start when that was about the end). A video
+        // left before it started has no position of its own: the one it was given still stands.
+        if let player, swipeTrail.indices.contains(swipeIndex) {
+            swipeTrail[swipeIndex].cid = currentCid
+            if player.startupDone {
+                let time = player.displayTime()
+                swipeTrail[swipeIndex].startTime = player.duration > 0 && time > player.duration - 3 ? 0 : time
+            }
+        }
+        switch step {
+        case .list(.part(let part)):
+            selectPart(part)
+        case .list(.episode(let episode)):
+            selectEpisode(episode)
+        case .list(.video(let ref)):
+            replace(with: ref)
+        case .trail(let ref):
+            swipeIndexBeforeSwitch = swipeIndex
+            swipeIndex += swipe == .next ? 1 : -1
+            replace(with: ref)
+        case .queue(let item):
+            swipeQueue.removeFirst()
+            var ref = item.videoRef
+            ref.startTime = 0
+            swipeIndexBeforeSwitch = swipeIndex
+            swipeItemBeingOpened = item
+            swipeTrail.append(ref)
+            swipeIndex = swipeTrail.count - 1
+            replace(with: ref)
+            prefetchSwipeQueueIfNeeded()
+        }
+    }
+
+    /// A switch along the swipes did not happen: the trail goes back to the video still showing. A feed video it was
+    /// opening comes next again with `requeue`, else it is dropped (it failed, and would keep blocking those behind it).
+    private func undoSwipeStep(requeue: Bool) {
+        guard let index = swipeIndexBeforeSwitch else { return }
+        swipeIndexBeforeSwitch = nil
+        swipeIndex = index
+        guard let item = swipeItemBeingOpened else { return }
+        swipeItemBeingOpened = nil
+        swipeTrail.removeLast()
+        if requeue { swipeQueue.insert(item, at: 0) }
+    }
+
+    /// A vertical video also goes on to the next video a swipe would go to.
+    private var hasVerticalNext: Bool {
+        season == nil && isVerticalVideo && AppSettings.shared.general.portraitOpensShortVideo
+            && (swipeTrail.indices.contains(swipeIndex + 1) || !swipeQueue.isEmpty)
+    }
+
+    /// Keeps a few portrait videos ready, so a swipe has somewhere to go at once. Pages of the feed can hold none.
+    private func prefetchSwipeQueueIfNeeded() {
+        guard swipeQueue.count < 3, swipeQueueTask == nil, season == nil, let d = detail,
+              AppSettings.shared.general.portraitOpensShortVideo else { return }
+        if swipeQueueAnchor == nil {
+            var anchor = ShortVideoItem(id: !d.bvid.isEmpty ? d.bvid : "av\(d.aid)")
+            anchor.aid = d.aid
+            anchor.bvid = d.bvid
+            swipeQueueAnchor = anchor
+            swipeSeenIDs.insert(anchor.id)
+        }
+        swipeQueueTask = Task { [weak self] in
+            defer { self?.swipeQueueTask = nil }
+            for _ in 0..<3 {
+                guard let self, let anchor = self.swipeQueueAnchor,
+                      let page = try? await ShortVideoAPI.feed(start: anchor, cursor: self.swipeQueueCursor),
+                      !Task.isCancelled else { return }
+                self.swipeQueueCursor = page.next
+                // Known to be portrait: an unknown size could turn out landscape, with no swipe to leave it.
+                let fresh = page.items.filter {
+                    $0.width > 0 && $0.height > $0.width && !self.swipeSeenIDs.contains($0.id)
+                        && !self.playedAids.contains($0.aid)
+                }
+                self.swipeSeenIDs.formUnion(fresh.map(\.id))
+                self.swipeQueue.append(contentsOf: fresh)
+                if !fresh.isEmpty { self.refreshNextAvailability() }
+                for item in fresh.prefix(2) {
+                    Task { _ = await ImagePipeline.shared.image(for: RemoteImage.resolvedURL(item.cover, width: 640)) }
+                }
+                if !fresh.isEmpty || page.next == nil { return }
+            }
+        }
+    }
+
     /// Automatic advancing at the end follows 「播放顺序」; the 下一集 button always advances.
     private func advance(manual: Bool) {
+        let vertical = player?.canSwipeVideos == true
+        // The next vertical video is on its way: a second 下一集 must not replace it with a related one.
+        if manual, vertical, isSwitching { return }
+        // A vertical video goes on to another vertical one, not to a related video of any shape.
+        let toVertical = (manual || AppSettings.shared.player.playRepeat == .autoPlayRelated) && vertical
+            && nextStep(includeRelated: false) == nil && swipeStep(.next) != nil
         var next = nextStep()
         if !manual {
             // 「播放顺序」 (the player replays 单个循环 itself).
@@ -973,10 +1122,17 @@ final class VideoDetailModel: ObservableObject {
                     next = first
                 }
             case .autoPlayRelated:
-                if next == nil, !isPlaylistPending, relatedLoaded || season != nil {
+                if next == nil, !toVertical, !isPlaylistPending, relatedLoaded || season != nil {
                     ToastCenter.shared.show("暂无相关视频，停止连播")
                 }
             }
+        }
+        if toVertical {
+            // Going to another comment area would close the open composer (losing the draft) or reply thread.
+            guard manual || (comments.composerTarget == nil && comments.subRepliesRoot == nil) else { return }
+            if !manual { player?.beginAutomaticVideoSwipe() }
+            performSwipe(.next)
+            return
         }
         guard let step = next else {
             // The rest of the 播放全部 list is not loaded yet: a failed page request would otherwise end the
@@ -1000,22 +1156,10 @@ final class VideoDetailModel: ObservableObject {
         }
     }
 
-    /// A swipe up on a vertical video in a 播放全部 list stays in the list: on to its next entry (or this entry's
-    /// next part) in place, or, with the list's next page not loaded yet, asks for it. false: this video is not in
-    /// a list, or the list has ended; the swipe goes to the 短视频 feed.
-    fileprivate func swipeUpInPlaylist() -> Bool {
-        guard let d = detail, let position = playlistPosition(aid: d.aid, bvid: d.bvid) else { return false }
-        let hasNext = nextStep(includeRelated: false) != nil
-        if case .end = position, !hasNext { return false }
-        if case .pending = position, !hasNext { ToastCenter.shared.show("列表下一页加载中，稍后再滑") }
-        advance(manual: true)
-        return true
-    }
-
     /// 「下一集」 (fullscreen bar, lock screen next-track) only when there is something to advance to.
     private func refreshNextAvailability() {
         guard let player else { return }
-        if nextStep() == nil {
+        if nextStep() == nil, !hasVerticalNext {
             if player.onNext != nil { player.onNext = nil }
         } else if player.onNext == nil {
             player.onNext = { [weak self] in
@@ -1468,6 +1612,8 @@ extension VideoDetailModel {
         }
         // 列表循环 with nothing else to play: the player loops the item itself (the screen lock stays).
         player.loopsAtEnd = { [weak self] in self?.replaysItselfAtEnd ?? false }
+        player.videoSwipeCover = { [weak self] swipe in self?.swipeCover(swipe) }
+        player.onVideoSwipe = { [weak self] swipe in self?.performSwipe(swipe) }
     }
 
     /// With every 下一集 refresh (content, part or episode change): 选集 rows, 上一集 and the fullscreen row.

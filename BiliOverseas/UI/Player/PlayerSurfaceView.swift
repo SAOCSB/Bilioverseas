@@ -33,6 +33,14 @@ final class PlayerSurfaceView: UIView {
     private var chromeLocked = false
     private var zoomedCid: Int64?
     private var cancellables: [AnyCancellable] = []
+    /// The video a swipe goes to: its cover comes in with the finger and stays until the player's own cover is up.
+    private let swipeCover = PlayerSwipeCoverView()
+    /// The video a swipe leaves, while it has no picture of its own yet.
+    private let leavingCover = PlayerSwipeCoverView()
+    /// Bumped by every swipe, so a late clean-up of the last one leaves the new one alone.
+    private var swipeGeneration = 0
+    /// Which edge the target's cover is coming in from.
+    private var swipeCoverFromBelow = true
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -43,6 +51,8 @@ final class PlayerSurfaceView: UIView {
         videoView.playerLayer.videoGravity = .resizeAspect
         addSubview(videoView)
         addSubview(danmaku)
+        addSubview(leavingCover)
+        addSubview(swipeCover)
         addSubview(gestureView)
         setUpRestoreButton()
         danmaku.onSuspendedLost = { [weak self] in self?.removeBubbleView() }
@@ -97,9 +107,86 @@ final class PlayerSurfaceView: UIView {
         let video = videoFrame()
         videoView.bounds = CGRect(origin: .zero, size: video.size)
         videoView.center = CGPoint(x: video.midX, y: video.midY)
-        danmaku.frame = bounds
+        // Bounds and centre here too: a swipe moves these with a transform.
+        for moving in [danmaku, leavingCover, swipeCover] as [UIView] {
+            moving.bounds = CGRect(origin: .zero, size: bounds.size)
+            moving.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        }
         gestureView.frame = bounds
         layoutRestoreButton()
+    }
+
+    // MARK: Swiping to another video
+
+    func beginVideoSwipe(leavingCover cover: String?) {
+        swipeGeneration += 1
+        dismissDanmakuBubble()
+        swipeCover.showsSpinner = false
+        leavingCover.setCover(cover ?? "")
+        leavingCover.isHidden = cover == nil
+    }
+
+    /// `targetCover` nil: nothing to go to (yet), so the picture only gives a little.
+    func moveVideoSwipe(offset: CGFloat, targetCover: String?) {
+        swipeCover.isHidden = targetCover == nil
+        if let targetCover { swipeCover.setCover(targetCover) }
+        setVideoSwipe(offset: targetCover == nil ? offset * 0.3 : offset, coverFromBelow: offset < 0)
+    }
+
+    private func setVideoSwipe(offset: CGFloat, coverFromBelow: Bool) {
+        swipeCoverFromBelow = coverFromBelow
+        let moved = CGAffineTransform(translationX: 0, y: offset)
+        // A pinch zoom stays: a swipe that springs back leaves the picture as it was.
+        videoView.transform = moved.scaledBy(x: zoomScale, y: zoomScale)
+        danmaku.transform = moved
+        leavingCover.transform = moved
+        swipeCover.transform = CGAffineTransform(translationX: 0, y: offset + (coverFromBelow ? bounds.height : -bounds.height))
+    }
+
+    /// The picture leaves and the cover takes its place; `completion` then switches the video.
+    func commitVideoSwipe(toNext: Bool, targetCover: String, completion: @escaping () -> Void) {
+        swipeCover.setCover(targetCover)
+        // The target may have arrived after the finger's last move: then the cover is not in place yet.
+        if swipeCover.isHidden {
+            swipeCover.isHidden = false
+            setVideoSwipe(offset: videoView.transform.ty, coverFromBelow: toNext)
+        }
+        swipeCover.showsSpinner = true
+        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+            self.setVideoSwipe(offset: toNext ? -self.bounds.height : self.bounds.height, coverFromBelow: toNext)
+        } completion: { _ in
+            completion()
+        }
+    }
+
+    /// Back to the video that was showing.
+    func cancelVideoSwipe() {
+        swipeGeneration += 1
+        let generation = swipeGeneration
+        swipeCover.showsSpinner = false
+        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+            self.setVideoSwipe(offset: 0, coverFromBelow: self.swipeCoverFromBelow)
+        } completion: { _ in
+            guard generation == self.swipeGeneration else { return }
+            self.swipeCover.isHidden = true
+            self.leavingCover.isHidden = true
+        }
+    }
+
+    /// The new video is loading: the picture is back in place behind the cover, which goes once the player's own
+    /// (the same image) has taken over.
+    func finishVideoSwipe() {
+        swipeGeneration += 1
+        let generation = swipeGeneration
+        videoView.transform = CGAffineTransform(scaleX: zoomScale, y: zoomScale)
+        danmaku.transform = .identity
+        leavingCover.transform = .identity
+        leavingCover.isHidden = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, generation == self.swipeGeneration else { return }
+            self.swipeCover.isHidden = true
+            self.swipeCover.showsSpinner = false
+        }
     }
 
     // MARK: Pinch zoom (双指缩放, 「还原屏幕」)
@@ -304,6 +391,55 @@ final class PlayerSurfaceView: UIView {
             w = h * ratio
         }
         return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+    }
+}
+
+/// A cover drawn like the player's own while a video loads (`PlayerChromeView.coverLayer`).
+final class PlayerSwipeCoverView: UIView {
+    private let imageView = UIImageView()
+    private let spinner = UIActivityIndicatorView(style: .medium)
+    private var url = ""
+
+    var showsSpinner = false {
+        didSet { showsSpinner ? spinner.startAnimating() : spinner.stopAnimating() }
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isHidden = true
+        isUserInteractionEnabled = false
+        backgroundColor = .black
+        clipsToBounds = true
+        imageView.contentMode = .scaleAspectFill
+        imageView.frame = bounds
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(imageView)
+        let dim = UIView(frame: bounds)
+        dim.backgroundColor = UIColor.black.withAlphaComponent(0.25)
+        dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(dim)
+        spinner.color = .white
+        spinner.hidesWhenStopped = true
+        spinner.autoresizingMask = [.flexibleLeftMargin, .flexibleRightMargin, .flexibleTopMargin, .flexibleBottomMargin]
+        spinner.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        addSubview(spinner)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setCover(_ cover: String) {
+        let next = cover.isEmpty ? "" : RemoteImage.resolvedURL(cover, width: 640)
+        guard next != url else { return }
+        url = next
+        imageView.image = ImagePipeline.shared.cached(next)
+        guard imageView.image == nil, !next.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            let image = await ImagePipeline.shared.image(for: next)
+            guard let self, self.url == next else { return }
+            self.imageView.image = image
+        }
     }
 }
 

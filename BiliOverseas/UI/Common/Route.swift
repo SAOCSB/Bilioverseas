@@ -42,8 +42,7 @@ enum Route: Hashable {
     case messageFeed(MessageFeedKind)
     case whisper(WhisperPeer)
     /// 短视频 (vertical swipe feed), entered by opening a portrait video, as in the official app.
-    /// `startsAfterEntry`: `start` was swiped away on its video page, the feed opens on what comes after it.
-    case shortVideos(start: ShortVideoItem?, startsAfterEntry: Bool = false)
+    case shortVideos(start: ShortVideoItem?)
 }
 
 extension VideoCard {
@@ -70,8 +69,6 @@ extension VideoCard {
 /// Navigation state for one tab's `NavigationStack`.
 final class TabRouter: ObservableObject {
     @Published var path = NavigationPath()
-    /// A page going back to the 短视频 feed under it with a swipe up: the feed moves on to its next video.
-    var advanceShortVideos = false
 
     func push(_ route: Route) { path.append(route) }
     func pop() { if !path.isEmpty { path.removeLast() } }
@@ -156,8 +153,8 @@ struct RouteView: View {
             MessageFeedView(kind: kind)
         case .whisper(let peer):
             WhisperChatView(peer: peer)
-        case .shortVideos(let start, let startsAfterEntry):
-            ShortVideoFeedView(start: start, startsAfterEntry: startsAfterEntry)
+        case .shortVideos(let start):
+            ShortVideoFeedView(start: start)
         }
     }
 }

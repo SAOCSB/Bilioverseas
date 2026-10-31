@@ -41,7 +41,8 @@ struct PlayerStageView: View {
                     .ignoresSafeArea(edges: ignoredEdges)
                 if isActive || holdsSurface {
                     PlayerChromeView(controller: controller, overlay: overlay, size: geo.size,
-                                     fullscreen: role == .fullscreen, showsPicture: holdsSurface,
+                                     fullscreen: role == .fullscreen,
+                                     showsPicture: holdsSurface && !controller.isVideoSwipeActive,
                                      showsControls: isActive)
                 }
             }
@@ -65,7 +66,7 @@ struct PlayerSheetHost: View {
     var body: some View {
         switch sheet {
         case .danmakuSettings:
-            DanmakuQuickPanel()
+            DanmakuQuickPanel(fullscreen: controller.isFullscreen)
         case .danmakuSend:
             if let item = controller.item {
                 DanmakuSendSheet(aid: item.aid, cid: item.cid,

@@ -16,6 +16,8 @@ final class ShortVideoPlayback: ObservableObject {
 
     let item: ShortVideoItem
     let player = AVPlayer()
+    /// The danmaku over this video. It lives here, not in the page: cells are reused and rebuilt.
+    let danmaku = DanmakuOverlayView(frame: .zero)
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var isPlaying = false
     /// Waiting for data while it should be playing.
@@ -46,6 +48,14 @@ final class ShortVideoPlayback: ObservableObject {
         duration = Double(item.duration)
         player.actionAtItemEnd = .none
         player.automaticallyWaitsToMinimizeStalling = true
+        danmaku.isFullscreen = true
+        // Swiping through videos: a toast for each one whose uploader closed danmaku would only get in the way.
+        danmaku.onClosedByUploader = {}
+        danmaku.configure { [weak self] in
+            guard let self else { return (time: 0, rate: 1, isPlaying: false) }
+            return (time: self.player.currentTime().seconds, rate: self.player.rate,
+                    isPlaying: self.player.timeControlStatus == .playing)
+        }
         observePlayer()
     }
 
@@ -95,6 +105,7 @@ final class ShortVideoPlayback: ObservableObject {
         session?.playerWillSeek(to: target, outsideBuffer: !isBuffered(target))
         seeking = true
         position = target
+        danmaku.seek(to: target)
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero,
                     toleranceAfter: .zero) { [weak self] _ in
             Task { @MainActor in self?.seeking = false }
@@ -141,7 +152,8 @@ final class ShortVideoPlayback: ObservableObject {
 
     // MARK: Loading
 
-    private var resolvedCid: Int64?
+    /// The video's cid, once `load` knows it (the feed does not always say).
+    private(set) var resolvedCid: Int64?
 
     private func load() async {
         do {
@@ -156,6 +168,7 @@ final class ShortVideoPlayback: ObservableObject {
             try Task.checkCancellation()
             guard let segment = info.durl.first else { throw BiliError.other("视频资源不存在") }
             if info.duration > 0 { duration = info.duration }
+            danmaku.load(cid: cid, aid: aid, duration: duration)
 
             let refresher = AccelerationEngine.progressiveRefresher(for: segment) {
                 try await VideoAPI.progressivePlayInfo(aid: aid, bvid: bvid, cid: cid, qn: qn).durl
@@ -262,6 +275,7 @@ final class ShortVideoPlayback: ObservableObject {
     private func statusChanged(_ status: AVPlayer.TimeControlStatus) {
         isPlaying = status == .playing
         isBuffering = wantsPlay && status == .waitingToPlayAtSpecifiedRate
+        danmaku.playbackStateDidChange()
         if status == .playing { startedPlaying = true }
         if status == .waitingToPlayAtSpecifiedRate, startedPlaying, !seeking,
            player.reasonForWaitingToPlay == .toMinimizeStalls {
@@ -301,6 +315,27 @@ final class ShortVideoPlayback: ObservableObject {
 
     deinit {
         if let timeObserver { player.removeTimeObserver(timeObserver) }
+    }
+}
+
+/// Puts a playback's danmaku over its video.
+struct ShortVideoDanmakuLayer: UIViewRepresentable {
+    let danmaku: DanmakuOverlayView
+
+    func makeUIView(context: Context) -> UIView {
+        let host = UIView()
+        host.isUserInteractionEnabled = false
+        return host
+    }
+
+    func updateUIView(_ host: UIView, context: Context) {
+        // The page's playback can be replaced while the cell stays: the old overlay must not stay in the window.
+        for view in host.subviews where view !== danmaku { view.removeFromSuperview() }
+        guard danmaku.superview !== host else { return }
+        danmaku.removeFromSuperview()
+        danmaku.frame = host.bounds
+        danmaku.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        host.addSubview(danmaku)
     }
 }
 

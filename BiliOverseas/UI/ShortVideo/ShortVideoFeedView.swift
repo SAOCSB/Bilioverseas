@@ -323,7 +323,7 @@ struct ShortVideoPageView: View {
             .padding(24)
         default:
             if playback.isFastForward {
-                Label("\(Self.speedText)倍速播放中", systemImage: "forward.fill")
+                Label("\(speedText)倍速播放中", systemImage: "forward.fill")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
@@ -345,8 +345,8 @@ struct ShortVideoPageView: View {
         }
     }
 
-    private static var speedText: String {
-        let speed = AppSettings.shared.player.longPressSpeed
+    private var speedText: String {
+        let speed = playback.fastSpeed
         return speed == speed.rounded() ? String(Int(speed)) : String(format: "%.2g", speed)
     }
 

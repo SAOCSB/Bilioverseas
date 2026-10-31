@@ -71,6 +71,7 @@ struct LoginView: View {
         .onChange(of: scenePhase) { phase in
             LoginTrace.log("scene \(phase)")
             if phase == .active { model.pollNow() }
+            if phase == .background { model.appLeft() }
         }
         .onChange(of: model.didLogin) { done in
             if done { dismiss() }
@@ -336,6 +337,11 @@ final class LoginQRViewModel: ObservableObject {
         }
     }
 
+    /// A tap on 在哔哩哔哩 App 中打开 still waiting for its new code must not take the user away when they are back.
+    func appLeft() {
+        openWhenReady = false
+    }
+
     // MARK: Actions
 
     func openInBiliApp() {
@@ -409,7 +415,8 @@ final class LoginQRViewModel: ObservableObject {
             phase = .waitingScan
             if openWhenReady {
                 openWhenReady = false
-                openCodeInBiliApp()
+                // iOS refuses it from the background, and what the user asked for has gone by then.
+                if UIApplication.shared.applicationState == .active { openCodeInBiliApp() }
             }
         } catch {
             guard s == session, !Task.isCancelled else { return }

@@ -1190,8 +1190,9 @@ final class VideoDetailModel: ObservableObject {
     fileprivate func resumeAutoNextIfHeld() {
         guard autoNextHeldBySheet else { return }
         autoNextHeldBySheet = false
-        // Replayed or moved on meanwhile: nothing was waiting any more.
-        if player?.status == .ended { advance(manual: false) }
+        // Replayed or moved on meanwhile, or the sheet closed because a page was opened from it: nothing is waiting.
+        guard player?.status == .ended, player?.refullscreenWhenPageReturns != true, !isSwitching else { return }
+        advance(manual: false)
     }
 
     /// 「下一集」 (fullscreen bar, lock screen next-track) only when there is something to advance to.

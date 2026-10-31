@@ -450,9 +450,11 @@ final class PlayerController: ObservableObject {
     /// A `rebuild` is preparing its new item (reset when it installs or gives up).
     private var rebuildPending = false
     private var pendingSwitchToast: String?
-    /// An acceleration switch was flipped while a stream was being prepared or starting, whose path was chosen before
-    /// that: looked at again once it has started.
+    /// An acceleration switch was flipped when it could not be acted on (`accelerationSwitchesChanged`).
     private var accelerationSwitchPending = false
+    /// Whether the switches wanted acceleration for this item when its stream was last chosen. It can differ from
+    /// `isAccelerated`, which says what it got: a video that fell back to direct wants it still.
+    private var accelerationWanted: Bool?
     private var switchRevert: (quality: Int?, audio: Int?, codec: VideoCodecPreference?, forceAVC: Bool)?
     private var tickCount = 0
     private var itemObservations: [NSKeyValueObservation] = []
@@ -611,6 +613,7 @@ final class PlayerController: ObservableObject {
             performSeek(to: 0, origin: .user)
             // With a lost endpoint the seek became a rebuild, which starts playback itself.
             if !isEndpointLost { startPlayback() }
+            applyPendingAccelerationSwitch()
             return
         }
         if isEndpointLost {
@@ -908,27 +911,40 @@ final class PlayerController: ObservableObject {
 
     // MARK: Acceleration switches & re-take
 
-    /// 启用海外加速 / 剧集加速 changed: the playing item is rebuilt on the matching path (btr-core §3).
+    /// 启用海外加速 / 剧集加速 / 竖屏视频禁用加速 changed: the playing item is rebuilt on the matching path (btr-core §3).
+    /// Later if it is not on screen (it would open a session and show its toasts over the page on top), its path was
+    /// chosen before the flip, or it has ended: see `applyPendingAccelerationSwitch`.
     private func accelerationSwitchesChanged() {
-        guard let target = item, target.localFileURL == nil, playInfo != nil, !forceNoProxy else { return }
-        guard startupDone, !rebuildPending else {
+        guard let target = item, target.localFileURL == nil, playInfo != nil else { return }
+        guard !isCoveredByPage, startupDone, !rebuildPending, status != .ended else {
             accelerationSwitchPending = true
             return
         }
         switch status {
-        case .failed, .ended, .idle: return
+        case .failed, .idle: return
         default: break
         }
         let want = AppSettings.shared.acceleration.accelerates(pgc: target.epId != 0, vertical: target.isVertical)
+        // A flip that does not concern this video: one that fell back to direct stays there.
+        guard want != accelerationWanted else { return }
+        accelerationWanted = want
         guard want != isAccelerated else { return }
         if want {
             // A manual switch gives acceleration a fresh chance (also after an earlier fallback).
             forceDirect = false
-            fallbackSteps.remove(.direct)
+            forceNoProxy = false
+            fallbackSteps.subtract([.direct, .noProxy])
             resetRetake()
         }
         beginSwitch(message: want ? "正在开启加速…" : "正在关闭加速…", toast: want ? "已开启加速" : "已关闭加速")
         rebuild(position: nil, reason: .switchStreams)
+    }
+
+    /// A flip that had to wait: its moment has come. Cleared first, so a switch that fails cannot go round again.
+    private func applyPendingAccelerationSwitch() {
+        guard accelerationSwitchPending else { return }
+        accelerationSwitchPending = false
+        accelerationSwitchesChanged()
     }
 
     /// Fell back to direct because of acceleration (prepare failure, item failure or the buffering watchdog).
@@ -1264,6 +1280,7 @@ final class PlayerController: ObservableObject {
         let pgc = target.epId > 0
         let retake = reason == .retake
         let accelerationOn = settings.acceleration.accelerates(pgc: pgc, vertical: target.isVertical)
+        accelerationWanted = accelerationOn
         let wantAccel = accelerationOn && (!forceDirect || retake)
         let allowHDR = settings.player.allowHDR && PlayerDeviceSupport.hdrEligible
         let total = info.duration > 0 ? info.duration : target.duration
@@ -1442,6 +1459,11 @@ final class PlayerController: ObservableObject {
             pendingSwitchToast = nil
             // 听视频 follows the item that keeps playing.
             audioOnly = audioOnlyStream != nil
+            // An acceleration switch cleared this, for an item that stays without the proxy.
+            if session == nil {
+                forceNoProxy = true
+                fallbackSteps.formUnion([.direct, .noProxy])
+            }
             refreshStreamMenus()
             ToastCenter.shared.show("切换失败：\(Self.describe(lastError ?? PlayerLoadError.noStream))")
             keepCurrentItem()
@@ -1566,6 +1588,7 @@ final class PlayerController: ObservableObject {
                 itemDidPlayToEnd(generation: streamGeneration)
             }
         }
+        applyPendingAccelerationSwitch()
     }
 
     /// The item's proxy session can no longer serve it: the listener moved to another port, or the engine closed
@@ -1642,6 +1665,7 @@ final class PlayerController: ObservableObject {
         isProgressive = false
         audioOnlyStream = nil
         accelerationSwitchPending = false
+        accelerationWanted = nil
         resetRetake()
         resetFeatureState()
     }
@@ -1774,12 +1798,9 @@ final class PlayerController: ObservableObject {
             ToastCenter.shared.show(toast)
             pendingSwitchToast = nil
         }
-        if accelerationSwitchPending {
-            accelerationSwitchPending = false
-            accelerationSwitchesChanged()
-        }
         transientMessage = nil
         switchRevert = nil
+        applyPendingAccelerationSwitch()
         smartSkipTick(time: lastKnownPosition, playing: isActuallyPlaying)
         PlayerNowPlayingCenter.shared.playbackChanged(self)
     }
@@ -2235,6 +2256,7 @@ final class PlayerController: ObservableObject {
             resumeOnContainerAppear = false
             if item != nil { play() }
         }
+        applyPendingAccelerationSwitch()
     }
 
     func containerDidDisappear() {

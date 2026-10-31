@@ -34,6 +34,8 @@ final class ShortVideoPlayback: ObservableObject {
     private var session: PlaybackSession?
     /// Whether the stream was loaded for acceleration.
     private var usesAcceleration = false
+    /// AVPlayer refused the DASH item, a codec it cannot play for instance, which only shows once it has it: the MP4.
+    private var dashFailed = false
     private var loadTask: Task<Void, Never>?
     private var timeObserver: Any?
     private var observers: Set<AnyCancellable> = []
@@ -132,11 +134,18 @@ final class ShortVideoPlayback: ObservableObject {
         if wantsPlay, phase == .ready { player.rate = on ? fastRate : 1 }
     }
 
-    private var fastRate: Float { Float(max(1.25, AppSettings.shared.player.longPressSpeed)) }
+    /// The long-press 倍速 as it plays. HLS goes above 2× only with I-frame playlists, as in `PlayerController.playerRate`.
+    var fastSpeed: Double {
+        let speed = max(1.25, AppSettings.shared.player.longPressSpeed)
+        return speed > 2 && session?.isHLS == true && player.currentItem?.canPlayFastForward != true ? 2 : speed
+    }
+
+    private var fastRate: Float { Float(fastSpeed) }
 
     /// 重试: loads again and goes on where it was, or where it was dragged to while it loaded.
     func retry() {
         if resumeAt == nil, position > 1 { resumeAt = position }
+        dashFailed = false
         teardown()
         play()
     }
@@ -200,7 +209,7 @@ final class ShortVideoPlayback: ObservableObject {
             let accelerate = wantsAcceleration
             usesAcceleration = accelerate
             let routeKey = (bvid.isEmpty ? "av\(aid)" : bvid) + ":short"
-            if let dash = await prepareDash(cid: cid, qn: qn, routeKey: routeKey, accelerate: accelerate) {
+            if !dashFailed, let dash = await prepareDash(cid: cid, qn: qn, routeKey: routeKey, accelerate: accelerate) {
                 if Task.isCancelled {
                     dash.session.close()
                     return
@@ -319,7 +328,7 @@ final class ShortVideoPlayback: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self, weak playerItem] status in
                 guard status == .failed, let self, playerItem === self.player.currentItem else { return }
-                self.phase = .failed(playerItem?.error?.localizedDescription ?? "播放失败")
+                self.itemFailed(message: playerItem?.error?.localizedDescription)
             }
             .store(in: &itemObservers)
         playerItem.publisher(for: \.duration)
@@ -330,6 +339,17 @@ final class ShortVideoPlayback: ObservableObject {
                 self.timeline.update(time: self.position, duration: d.seconds, buffered: self.timeline.snapshot.buffered)
             }
             .store(in: &itemObservers)
+    }
+
+    private func itemFailed(message: String?) {
+        guard let session, session.isHLS, session.isEndpointValid, !dashFailed else {
+            phase = .failed(message ?? "播放失败")
+            return
+        }
+        dashFailed = true
+        if resumeAt == nil, position > 1 { resumeAt = position }
+        teardown()
+        prepare()
     }
 
     private func tick(_ seconds: Double) {

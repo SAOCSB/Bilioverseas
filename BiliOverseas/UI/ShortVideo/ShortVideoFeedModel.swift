@@ -191,7 +191,7 @@ final class ShortVideoFeedModel: ObservableObject {
 
     func setVisible(_ isVisible: Bool) {
         visible = isVisible
-        if isVisible { PlayerNowPlayingCenter.shared.shortVideosAppeared() }
+        PlayerNowPlayingCenter.shared.shortVideosVisible = isVisible
         if !isVisible { reportCurrentHistory() }
         activate()
     }

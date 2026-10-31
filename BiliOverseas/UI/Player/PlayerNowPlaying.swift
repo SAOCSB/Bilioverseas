@@ -18,6 +18,8 @@ final class PlayerNowPlayingCenter {
     private var artwork: MPMediaItemArtwork?
     private var artworkURL = ""
     private var artworkTask: Task<Void, Never>?
+    /// The 短视频 feed is on screen. It plays by itself and has no Now Playing of its own.
+    var shortVideosVisible = false
 
     /// The controller started playing: it now owns Now Playing and the remote commands.
     func claim(_ controller: PlayerController) {
@@ -44,13 +46,6 @@ final class PlayerNowPlayingCenter {
     func pauseForLive() {
         if let owner, owner.wantsToPlay { owner.pause() }
         PlayerPiPKeeper.stopOthers(than: nil)
-    }
-
-    /// The 短视频 feed comes on screen. It plays by itself and has no Now Playing of its own, so a video page it
-    /// covers gives up the commands: the lock screen or a headset would otherwise start that page's video over the
-    /// feed. The page claims them again when it next plays. A video in Picture in Picture keeps them.
-    func shortVideosAppeared() {
-        if let owner, !owner.isPiPBusy { release(owner) }
     }
 
     func release(_ controller: PlayerController) {
@@ -152,10 +147,13 @@ final class PlayerNowPlayingCenter {
 
     private func perform(_ command: Command) {
         guard let owner else { return }
+        // A headset or the lock screen must not start the video of a page under the 短视频 feed: it would play over
+        // the feed. That page goes on by itself when it is back.
+        let staysPaused = shortVideosVisible && owner.isCoveredByPage && !owner.wantsToPlay
         switch command {
-        case .play: owner.play()
+        case .play: if !staysPaused { owner.play() }
         case .pause: owner.pause()
-        case .toggle: owner.togglePlay()
+        case .toggle: if !staysPaused { owner.togglePlay() }
         case .skipForward: owner.seek(by: 10)
         case .skipBackward: owner.seek(by: -10)
         case .next: owner.onNext?()

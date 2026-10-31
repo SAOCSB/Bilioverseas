@@ -2061,6 +2061,9 @@ final class PlayerController: ObservableObject {
     /// Picture in Picture is running or starting (the player must keep going without the page).
     var isPiPBusy: Bool { isPiPActive || pipCoordinator.isActive || pipCoordinator.isStarting }
 
+    /// Another page covers this player's page, and it is not going on in Picture in Picture.
+    var isCoveredByPage: Bool { containerHidden && !isPiPBusy }
+
     func startOrientationObserving() {
         guard !generatingOrientation else { return }
         generatingOrientation = true

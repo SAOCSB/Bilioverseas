@@ -144,14 +144,13 @@ final class SearchResultModel: ObservableObject {
     }
 }
 
-/// Search results (pushed): the keyword stays editable in the navigation bar (submitting
+/// Search results (pushed): the keyword stays editable in the top bar (submitting
 /// re-searches in place), tabs 视频 | 番剧 | 用户 | 直播 | 专栏 with swipe paging. A tab loads the first time
 /// it becomes visible, so one search does not fire five requests at once (search is risk-controlled).
 struct SearchResultView: View {
     @StateObject private var model: SearchResultModel
     @ObservedObject private var history = SearchHistoryStore.shared
     @State private var text: String
-    @State private var barWidth: CGFloat = 375
     @FocusState private var fieldFocused: Bool
 
     init(keyword: String) {
@@ -180,57 +179,23 @@ struct SearchResultView: View {
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
         }
-        .background(SearchWidthReader(width: $barWidth))
-        .background(Color(.systemBackground))
-        .navigationTitle(model.keyword)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarRole(.editor)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                searchField
-                    .frame(width: max(160, barWidth - 140))
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button("搜索") { submit() }
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(Color.biliPink)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            SearchTopBar(placeholder: "搜索", text: $text, focus: $fieldFocused,
+                         showsClear: fieldFocused && !text.isEmpty) {
+                submit()
             }
         }
+        .background(Color(.systemBackground))
+        .navigationTitle(model.keyword)
+        .toolbar(.hidden, for: .navigationBar)
+        .background(VideoDetailPopGestureEnabler().frame(width: 0, height: 0))
         .onChange(of: model.keyword) { newValue in
             if !fieldFocused { text = newValue }
         }
     }
 
-    private var searchField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.secondary)
-            TextField("搜索", text: $text)
-                .font(.subheadline)
-                .focused($fieldFocused)
-                .submitLabel(.search)
-                .onSubmit { submit() }
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled(true)
-            if fieldFocused && !text.isEmpty {
-                Button {
-                    text = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text(verbatim: "清除"))
-            }
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 32)
-        .background(Color(.secondarySystemBackground), in: Capsule())
-    }
-
     private func submit() {
-        let keyword = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keyword = SearchTopBar.keyword(text)
         fieldFocused = false
         guard !keyword.isEmpty else {
             text = model.keyword

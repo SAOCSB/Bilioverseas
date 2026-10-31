@@ -67,7 +67,7 @@ final class SearchHotWordsModel: ObservableObject {
     }
 }
 
-/// Search page (pushed): auto-focused field in the navigation bar, suggestions while typing,
+/// Search page (pushed): auto-focused field in its own top bar, suggestions while typing,
 /// 搜索历史 chips and the 大家都在搜 trending list. Submitting pushes `Route.search(keyword:)`.
 struct SearchView: View {
     @EnvironmentObject private var router: TabRouter
@@ -80,40 +80,32 @@ struct SearchView: View {
     @State private var didAutoFocus = false
     @State private var showAllHot = false
     @State private var confirmClear = false
-    @State private var barWidth: CGFloat = 375
     @FocusState private var fieldFocused: Bool
 
     init() {}
 
-    private var trimmed: String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    private var trimmed: String { SearchTopBar.keyword(text) }
 
     var body: some View {
-        Group {
+        // One scroll view for both: replacing it when the first character comes in closed the keyboard.
+        ScrollView {
             if trimmed.isEmpty {
                 landing
             } else {
                 suggestionList
             }
         }
+        .scrollDismissesKeyboard(.immediately)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(SearchWidthReader(width: $barWidth))
-        .background(Color(.systemBackground))
-        .navigationTitle("搜索")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarRole(.editor)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                searchField
-                    .frame(width: max(160, barWidth - 140))
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button("搜索") { submit(text) }
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(Color.biliPink)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            SearchTopBar(placeholder: placeholderText, text: $text, focus: $fieldFocused, showsClear: !text.isEmpty) {
+                submit(text)
             }
         }
+        .background(Color(.systemBackground))
+        .navigationTitle("搜索")
+        .toolbar(.hidden, for: .navigationBar)
+        .background(VideoDetailPopGestureEnabler().frame(width: 0, height: 0))
         .task { await autoFocusOnce() }
         .task { await hot.loadIfNeeded() }
         .task(id: trimmed) { await loadSuggestions(for: trimmed) }
@@ -129,49 +121,17 @@ struct SearchView: View {
         hot.placeholderWord?.showName ?? "搜索"
     }
 
-    private var searchField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.secondary)
-            TextField(placeholderText, text: $text)
-                .font(.subheadline)
-                .focused($fieldFocused)
-                .submitLabel(.search)
-                .onSubmit { submit(text) }
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled(true)
-            if !text.isEmpty {
-                Button {
-                    text = ""
-                    fieldFocused = true
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text(verbatim: "清除"))
-            }
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 32)
-        .background(Color(.secondarySystemBackground), in: Capsule())
-    }
-
     // MARK: - Landing (history + trending)
 
     private var landing: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                if !history.keywords.isEmpty || !settings.general.saveSearchHistory {
-                    historySection
-                }
-                hotSection
+        VStack(alignment: .leading, spacing: 24) {
+            if !history.keywords.isEmpty || !settings.general.saveSearchHistory {
+                historySection
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            hotSection
         }
-        .scrollDismissesKeyboard(.immediately)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
     }
 
     private var recordTitle: String { settings.general.saveSearchHistory ? "记录搜索" : "无痕搜索" }
@@ -309,15 +269,12 @@ struct SearchView: View {
     }
 
     private var suggestionList: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(displayedSuggestions, id: \.self) { suggestion in
-                    suggestionRow(suggestion)
-                    Divider().padding(.leading, 42)
-                }
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(displayedSuggestions, id: \.self) { suggestion in
+                suggestionRow(suggestion)
+                Divider().padding(.leading, 42)
             }
         }
-        .scrollDismissesKeyboard(.immediately)
     }
 
     private func suggestionRow(_ suggestion: String) -> some View {
@@ -368,7 +325,7 @@ struct SearchView: View {
     // MARK: - Actions
 
     private func submit(_ raw: String) {
-        var keyword = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var keyword = SearchTopBar.keyword(raw)
         if keyword.isEmpty, let fallback = hot.placeholderWord?.keyword {
             keyword = fallback
         }
@@ -480,16 +437,83 @@ private struct SearchHistoryChip: View {
     }
 }
 
-/// Reports the width of the view it is a background of (for sizing the navigation-bar search field).
-struct SearchWidthReader: View {
-    @Binding var width: CGFloat
+/// The search pages' top bar: back, field, 搜索. It is a plain view instead of navigation-bar items
+/// on purpose: a TextField in a toolbar item lost focus as soon as its text changed, which closed the
+/// keyboard after one character, and a field sized by hand ran under the system's two capsules.
+struct SearchTopBar: View {
+    let placeholder: String
+    @Binding var text: String
+    let focus: FocusState<Bool>.Binding
+    let showsClear: Bool
+    let onSubmit: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    /// What the field holds as a search term. Pinyin still being composed has thin spaces between its syllables.
+    static func keyword(_ text: String) -> String {
+        text.replacingOccurrences(of: "\u{2006}", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
-        GeometryReader { geo in
-            Color.clear
-                .onAppear { width = geo.size.width }
-                .onChange(of: geo.size.width) { width = $0 }
+        HStack(spacing: 4) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: 40, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(verbatim: "返回"))
+
+            field
+
+            Button(action: onSubmit) {
+                Text("搜索")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Color.biliPink)
+                    .padding(.horizontal, 8)
+                    .frame(height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
+        .padding(.leading, 4)
+        .padding(.trailing, 6)
+        .padding(.bottom, 2)
+        .background(Color(.systemBackground))
+    }
+
+    private var field: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: $text)
+                .font(.subheadline)
+                .focused(focus)
+                .submitLabel(.search)
+                .onSubmit(onSubmit)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+            if showsClear {
+                Button {
+                    text = ""
+                    focus.wrappedValue = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(verbatim: "清除"))
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 34)
+        .background(Color(.secondarySystemBackground), in: Capsule())
+        .contentShape(Capsule())
+        .onTapGesture { focus.wrappedValue = true }
     }
 }
 

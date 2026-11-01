@@ -4,7 +4,8 @@ import UIKit
 // The official app's vertical-video screen, shared by the 短视频 feed and the player's vertical fullscreen. The status
 // bar stays and the picture sits between it and a black bar with 发弹幕 and the 弹幕 switch. Over the picture: back and
 // 「N人正在看」 top left, search and ⋮ top right, 点赞 / 评论 / 投币 / 收藏 / 转发 down the right, the uploader and title
-// bottom left, the progress line along the bottom edge.
+// bottom left, the progress line along the bottom edge. Swipes also bring landscape videos here, which show whole
+// (`wholePictureFrame`), and for which the bar offers 全屏.
 
 enum VerticalVideoMetrics {
     /// The bar below the picture, not counting the home indicator's inset.
@@ -20,10 +21,19 @@ enum VerticalVideoMetrics {
 
     /// How far the safe area starts below the status bar (some points on Dynamic Island phones). The picture starts
     /// right under the status bar, so the screen reaches this far above its safe area.
-    @MainActor static var statusBarGap: CGFloat {
-        guard let window = PlayerFullscreenPresenter.keyWindow(),
-              let height = window.windowScene?.statusBarManager?.statusBarFrame.height, height > 0 else { return 0 }
-        return max(window.safeAreaInsets.top - height, 0)
+    @MainActor private(set) static var statusBarGap: CGFloat = 0
+
+    /// Outside SwiftUI's updates only: reading a window's safe area from a view's body can lay the window out in the
+    /// middle of one, and the cycle that makes leaves the view as it is, whatever changes later.
+    @MainActor static func measureStatusBarGap() {
+        guard let window = PlayerFullscreenPresenter.keyWindow(), window.windowScene?.interfaceOrientation.isPortrait == true,
+              let height = window.windowScene?.statusBarManager?.statusBarFrame.height, height > 0 else { return }
+        statusBarGap = max(window.safeAreaInsets.top - height, 0)
+    }
+
+    /// Where a landscape video goes in the picture area `bounds`: whole in what the uploader and title leave of it.
+    static func wholePictureFrame(in bounds: CGRect) -> CGRect {
+        CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: max(bounds.height - infoHeight, 0))
     }
 
     /// A video about the shape of the picture area fills it, like the official app (a sliver of it is cut off); anything
@@ -258,68 +268,155 @@ struct VerticalVideoInfoView: View {
     }
 }
 
-/// Below the picture: 发弹幕 with the 弹幕 switch inside it, then 详情页 and 弹幕设置.
+/// Below the picture: 发弹幕 with the 弹幕 switch inside it (held: 弹幕设置), then 详情页 and 清屏 for a vertical video and
+/// 全屏 for a landscape one. With the screen cleared, only the way back.
 struct VerticalVideoBottomBar: View {
     let danmakuOn: Bool
+    let landscape: Bool
+    let cleared: Bool
     let onSend: () -> Void
     let onToggle: () -> Void
-    let onDetail: () -> Void
     let onSettings: () -> Void
+    let onDetail: () -> Void
+    let onClear: () -> Void
+    let onFullscreen: () -> Void
 
     var body: some View {
         HStack(spacing: 2) {
-            HStack(spacing: 0) {
-                Button(action: onSend) {
-                    Text("发弹幕")
-                        .font(.system(size: 14))
-                        .foregroundColor(.white.opacity(0.55))
-                        .padding(.leading, 16)
-                        .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+            if cleared {
+                Spacer(minLength: 0)
+                Button(action: onClear) {
+                    Text("退出清屏")
+                        .font(.system(size: 13))
+                        .padding(.horizontal, 14)
+                        .frame(height: 32)
+                        .background(.white.opacity(0.14), in: Capsule())
+                        .frame(height: VerticalVideoMetrics.bottomBarHeight)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(Text("发弹幕"))
-                Rectangle()
-                    .fill(.white.opacity(0.15))
-                    .frame(width: 1, height: 18)
-                Button(action: onToggle) {
-                    VerticalVideoDanmakuSwitch(on: danmakuOn)
-                        .frame(width: 50, height: 32)
-                        .contentShape(Rectangle())
+                .padding(.trailing, 8)
+            } else {
+                danmakuField
+                if landscape {
+                    glyphButton("全屏", action: onFullscreen) {
+                        VerticalVideoFullscreenGlyph()
+                            .stroke(style: Self.glyphStroke)
+                            .frame(width: 18, height: 18)
+                    }
+                } else {
+                    detailButton
+                    glyphButton("清屏", action: onClear) {
+                        VerticalVideoClearGlyph()
+                            .stroke(style: Self.glyphStroke)
+                            .frame(width: 23, height: 18)
+                    }
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text(danmakuOn ? "关闭弹幕" : "开启弹幕"))
             }
-            .background(.white.opacity(0.14), in: Capsule())
-            .padding(.trailing, 6)
-            Button(action: onDetail) {
-                VStack(spacing: 1) {
-                    Text("详情页")
-                        .font(.system(size: 9))
-                        .foregroundColor(.white.opacity(0.85))
-                        .padding(.horizontal, 4)
-                        .overlay(Capsule().stroke(.white.opacity(0.35), lineWidth: 0.5))
-                    Image(systemName: "arrow.down.right.and.arrow.up.left")
-                        .font(.system(size: 17, weight: .medium))
-                }
-                .frame(width: 44, height: VerticalVideoMetrics.bottomBarHeight)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Text("详情页"))
-            Button(action: onSettings) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 18, weight: .medium))
-                    .frame(width: 44, height: VerticalVideoMetrics.bottomBarHeight)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Text("弹幕设置"))
         }
         .foregroundColor(.white)
         .padding(.leading, 6)
         .padding(.trailing, 4)
         .frame(height: VerticalVideoMetrics.bottomBarHeight)
+    }
+
+    private static let glyphStroke = StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round)
+
+    private var danmakuField: some View {
+        HStack(spacing: 0) {
+            Button(action: onSend) {
+                Text("发弹幕")
+                    .font(.system(size: 14))
+                    .foregroundColor(.white.opacity(0.55))
+                    .padding(.leading, 16)
+                    .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("发弹幕"))
+            Rectangle()
+                .fill(.white.opacity(0.15))
+                .frame(width: 1, height: 18)
+            VerticalVideoDanmakuSwitch(on: danmakuOn)
+                .frame(width: 50, height: 32)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onToggle)
+                .onLongPressGesture(minimumDuration: 0.5) {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    onSettings()
+                }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(Text(danmakuOn ? "关闭弹幕" : "开启弹幕"))
+                .accessibilityAction(named: Text("弹幕设置"), onSettings)
+        }
+        .background(.white.opacity(0.14), in: Capsule())
+        .padding(.trailing, 6)
+    }
+
+    private var detailButton: some View {
+        Button(action: onDetail) {
+            VStack(spacing: 1) {
+                Text("详情页")
+                    .font(.system(size: 9))
+                    .foregroundColor(.white.opacity(0.85))
+                    .padding(.horizontal, 4)
+                    .overlay(Capsule().stroke(.white.opacity(0.35), lineWidth: 0.5))
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .font(.system(size: 17, weight: .medium))
+            }
+            .frame(width: 44, height: VerticalVideoMetrics.bottomBarHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text("详情页"))
+    }
+
+    private func glyphButton<Glyph: View>(_ label: String, action: @escaping () -> Void,
+                                          @ViewBuilder glyph: () -> Glyph) -> some View {
+        Button(action: action) {
+            glyph()
+                .frame(width: 44, height: VerticalVideoMetrics.bottomBarHeight)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(label))
+    }
+}
+
+/// 全屏: two corners of the screen.
+private struct VerticalVideoFullscreenGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        let arm = rect.width * 0.45
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY + arm))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX + arm, y: rect.minY))
+        path.move(to: CGPoint(x: rect.maxX, y: rect.maxY - arm))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.maxX - arm, y: rect.maxY))
+        return path
+    }
+}
+
+/// 清屏: a phone with its lines of text, and the rest of the screen empty.
+private struct VerticalVideoClearGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        let corner: CGFloat = 2.5
+        let phone = CGRect(x: rect.minX, y: rect.minY, width: rect.width * 0.5, height: rect.height)
+        var path = Path()
+        path.addRoundedRect(in: phone, cornerSize: CGSize(width: corner, height: corner))
+        for (y, length) in [(rect.height * 0.62, 0.5), (rect.height * 0.8, 0.28)] {
+            path.move(to: CGPoint(x: phone.minX + phone.width * 0.25, y: rect.minY + y))
+            path.addLine(to: CGPoint(x: phone.minX + phone.width * (0.25 + length), y: rect.minY + y))
+        }
+        let start = phone.maxX + corner
+        path.move(to: CGPoint(x: start, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - corner, y: rect.minY))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY + corner), control: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - corner))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX - corner, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: start, y: rect.maxY))
+        return path
     }
 }
 

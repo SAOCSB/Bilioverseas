@@ -13,6 +13,8 @@ struct ShortVideoFeedView: View {
     @State private var favoriteFor: ShortVideoItem?
     @State private var danmakuFor: ShortVideoItem?
     @State private var showsDanmakuSettings = false
+    /// 清屏: nothing but the picture, also on the videos swiped to; a tap brings the rest back.
+    @State private var cleared = false
 
     init(start: ShortVideoItem? = nil) {
         _model = StateObject(wrappedValue: ShortVideoFeedModel(start: start))
@@ -29,10 +31,10 @@ struct ShortVideoFeedView: View {
                                     onLanding: { model.setLanding($0) }) { item, position in
                         ShortVideoPageView(item: item, isCurrent: position == model.index,
                                            playback: model.playback(for: item), social: model.social(for: item),
-                                           actions: actions)
+                                           actions: actions, cleared: cleared)
                     }
                 }
-                topBar
+                if !cleared { topBar }
             }
             bottomBar
         }
@@ -89,6 +91,7 @@ struct ShortVideoFeedView: View {
     private var actions: ShortVideoActions {
         ShortVideoActions(
             togglePlay: { model.togglePlay($0) },
+            restoreControls: { cleared = false },
             comments: { commentsFor = $0 },
             coin: { item in
                 guard ShortVideoSocial.requireLogin("投币") else { return }
@@ -149,13 +152,18 @@ struct ShortVideoFeedView: View {
     }
 
     private var bottomBar: some View {
-        VerticalVideoBottomBar(danmakuOn: settings.danmaku.enabled,
-                               onSend: sendDanmaku,
-                               onToggle: { settings.danmaku.enabled.toggle() },
-                               onDetail: {
-                                   if let item = model.showing { actions.fullVideo(item) }
-                               },
-                               onSettings: { showsDanmakuSettings = true })
+        ShortVideoLandingReader(landing: model.landing) {
+            VerticalVideoBottomBar(danmakuOn: settings.danmaku.enabled, landscape: model.showing?.isPortrait == false,
+                                   cleared: cleared,
+                                   onSend: sendDanmaku,
+                                   onToggle: { settings.danmaku.enabled.toggle() },
+                                   onSettings: { showsDanmakuSettings = true },
+                                   onDetail: {
+                                       if let item = model.showing { actions.fullVideo(item) }
+                                   },
+                                   onClear: { cleared.toggle() },
+                                   onFullscreen: { model.showLandscape() })
+        }
     }
 
     private func sendDanmaku() {
@@ -225,6 +233,7 @@ private struct ShortVideoLandingReader<Content: View>: View {
 /// What the page's buttons do; navigation, sheets and the play state belong to the feed screen.
 struct ShortVideoActions {
     var togglePlay: (ShortVideoItem) -> Void
+    var restoreControls: () -> Void
     var comments: (ShortVideoItem) -> Void
     var coin: (ShortVideoItem) -> Void
     var favorite: (ShortVideoItem) -> Void
@@ -241,6 +250,7 @@ struct ShortVideoPageView: View {
     @ObservedObject var playback: ShortVideoPlayback
     @ObservedObject var social: ShortVideoSocial
     let actions: ShortVideoActions
+    let cleared: Bool
 
     @State private var readyForDisplay = false
     @State private var titleExpanded = false
@@ -264,23 +274,30 @@ struct ShortVideoPageView: View {
     private func page(in geo: GeometryProxy) -> some View {
         ZStack {
             Color.black
+            let pictureHeight = item.isPortrait ? geo.size.height
+                : VerticalVideoMetrics.wholePictureFrame(in: CGRect(origin: .zero, size: geo.size)).height
             ShortVideoSurface(player: playback.player, fill: fills(in: geo.size), readyForDisplay: $readyForDisplay)
+                .frame(height: pictureHeight)
+                .frame(maxHeight: .infinity, alignment: .top)
             if !readyForDisplay || playback.phase != .ready {
                 RemoteImage(url: item.cover, contentMode: fills(in: geo.size) ? .fill : .fit)
-                    .frame(width: geo.size.width, height: geo.size.height)
+                    .frame(width: geo.size.width, height: pictureHeight)
                     .clipped()
+                    .frame(maxHeight: .infinity, alignment: .top)
                     .allowsHitTesting(false)
             }
-            LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
-                .frame(height: 110)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .allowsHitTesting(false)
-            LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
-                .frame(height: 300)
-                .frame(maxHeight: .infinity, alignment: .bottom)
-                .allowsHitTesting(false)
+            if !cleared {
+                LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 110)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .allowsHitTesting(false)
+                LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
+                    .frame(height: 300)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                    .allowsHitTesting(false)
+            }
             // Below the top bar; the controls below it stay readable over the danmaku.
-            ShortVideoDanmakuLayer(danmaku: playback.danmaku)
+            ShortVideoDanmakuLayer(playback: playback)
                 .padding(.top, VerticalVideoMetrics.topBarHeight)
                 .allowsHitTesting(false)
             statusOverlay
@@ -288,12 +305,18 @@ struct ShortVideoPageView: View {
                 VerticalVideoLikeBurstView(burst: burst)
                     .position(burst.location)
             }
-            overlay
+            if !cleared { overlay }
         }
         .frame(width: geo.size.width, height: geo.size.height)
         .contentShape(Rectangle())
         .onTapGesture(count: 2, coordinateSpace: .local) { location in doubleTap(at: location) }
-        .onTapGesture { actions.togglePlay(item) }
+        .onTapGesture {
+            if cleared {
+                actions.restoreControls()
+            } else {
+                actions.togglePlay(item)
+            }
+        }
         .onLongPressGesture(minimumDuration: 0.4, maximumDistance: 12, perform: {
             guard AppSettings.shared.player.longPressSpeedEnabled, !playback.isPaused else { return }
             playback.setFastForward(true)

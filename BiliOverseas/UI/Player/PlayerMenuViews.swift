@@ -271,6 +271,9 @@ struct PlayerMenuBuilder {
                                               controller.onNext?()
                                           }))
             }
+            rows.append(PlayerMenuRow(id: "more.portraitOnly", title: "只看竖屏",
+                                      kind: .toggle(Binding(get: { settings.general.swipesOnlyPortrait },
+                                                            set: { settings.general.swipesOnlyPortrait = $0 }))))
         }
         let qualityTitle = controller.qualityEntries.first { $0.qn == controller.currentQuality }?.title
         if !controller.qualityEntries.isEmpty {

@@ -329,6 +329,8 @@ final class PlayerController: ObservableObject {
     private var fullscreenPathCount = 0
     /// Fullscreen gave way to a page opened from it (search, the uploader …), and comes back with the player's page.
     var refullscreenWhenPageReturns = false
+    /// That fullscreen was the vertical-video screen, which comes back whatever the shape of the video on it.
+    private var storyWhenPageReturns = false
 
     // MARK: Stream & menu state
 
@@ -582,6 +584,9 @@ final class PlayerController: ObservableObject {
         item = newItem
         isVerticalVideo = newItem.isVertical
         aspectMode = .stored(forVertical: newItem.isVertical)
+        // The other shape takes another place on the vertical-video screen.
+        surface.setNeedsLayout()
+        if storyTurned, newItem.isVertical { turnBackToStory() }
         duration = max(0, newItem.duration)
         currentTime = 0
         lastKnownPosition = 0
@@ -694,11 +699,19 @@ final class PlayerController: ObservableObject {
         enterFullscreen(byRotation: false, deviceOrientation: nil)
     }
 
+    /// Back from the page fullscreen gave way to (`pagePathChanged`).
+    func reenterFullscreen() {
+        enterFullscreen(byRotation: false, deviceOrientation: nil, story: storyWhenPageReturns)
+    }
+
     func exitFullscreen() {
         guard isFullscreen else { return }
         overlay.unlock()
         fullscreenByRotation = false
         isFullscreen = false
+        fullscreenIsStory = false
+        storyTurned = false
+        storyCleared = false
         overlay.fullscreenChanged()
         fullscreenPresenter.dismiss { [weak self] in
             // Back inline before the fade, also when fullscreen was entered again meanwhile: the page then shows
@@ -709,9 +722,48 @@ final class PlayerController: ObservableObject {
 
     // MARK: Vertical-video screen
 
-    /// The official app's screen for a vertical video (`VerticalVideoViews.swift`) is up: such a video fullscreen,
-    /// standing up. `PlayerStageView` decides, and only it can: it knows the window's shape.
+    /// This fullscreen began as the official app's screen for a vertical video (`VerticalVideoViews.swift`), and stays
+    /// that for the videos swiped to on it, whatever their shape: a landscape one shows whole on the same screen, with 全屏
+    /// to turn the phone for it.
+    @Published private(set) var fullscreenIsStory = false
+    /// That landscape video is showing landscape (全屏, or the phone turned); back comes back to that screen.
+    @Published private(set) var storyTurned = false
+    /// 清屏: nothing but the picture on that screen, also for the videos swiped to; a tap brings the rest back.
+    @Published private(set) var storyCleared = false
+
+    /// That screen is up. `PlayerStageView` decides, and only it can: it knows the window's shape.
     var isOnVerticalScreen: Bool { isFullscreen && fullscreenStageIsVertical }
+
+    func setStoryCleared(_ cleared: Bool) {
+        storyCleared = cleared
+    }
+
+    /// 全屏 on a landscape video on that screen, or the phone turned with one on it.
+    func turnStoryLandscape(byRotation: Bool = false, deviceOrientation: UIDeviceOrientation? = nil) {
+        guard isOnVerticalScreen, !isVerticalVideo else { return }
+        // Device landscapeRight (home button left) = interface landscapeLeft.
+        let device = deviceOrientation ?? UIDevice.current.orientation
+        fullscreenByRotation = byRotation
+        storyTurned = true
+        turnStoryScreen(to: .landscape, orientation: device == .landscapeRight ? .landscapeLeft : .landscapeRight)
+    }
+
+    func turnBackToStory() {
+        guard storyTurned else { return }
+        fullscreenByRotation = false
+        storyTurned = false
+        turnStoryScreen(to: .portrait, orientation: .portrait)
+    }
+
+    private func turnStoryScreen(to mask: UIInterfaceOrientationMask, orientation: UIInterfaceOrientation) {
+        overlay.panel = nil
+        // Out of the way while the screen turns, as on entering fullscreen.
+        overlay.hideControls()
+        fullscreenPresenter.turn(to: mask, orientation: orientation) { [weak self] in
+            guard let self, self.isFullscreen else { return }
+            self.overlay.showControls()
+        }
+    }
 
     /// The fullscreen stage came on that screen, or left it.
     func fullscreenStageChanged(verticalScreen: Bool) {
@@ -728,6 +780,7 @@ final class PlayerController: ObservableObject {
     private func pagePathChanged(count: Int) {
         guard isOnVerticalScreen, count > fullscreenPathCount else { return }
         refullscreenWhenPageReturns = true
+        storyWhenPageReturns = true
         exitFullscreen()
     }
 
@@ -745,13 +798,21 @@ final class PlayerController: ObservableObject {
         if !actions.liked { actions.onLike() }
     }
 
-    // MARK: Swiping between vertical videos
+    // MARK: Swiping between videos
 
-    /// Up and down swipes on this vertical video go to the next and previous one, in place (「竖屏视频进入短视频」).
-    /// Not for bangumi episodes, and not while the video plays in Picture in Picture.
+    /// Up and down swipes go to the next and previous video, in place (「竖屏视频进入短视频」): on a vertical video, and on
+    /// a landscape one reached that way, unless the phone is turned for it. Not for bangumi episodes, and not while the
+    /// video plays in Picture in Picture.
     var canSwipeVideos: Bool {
-        videoSwipeCover != nil && isVerticalVideo && item?.epId == 0 && !isPiPActive
-            && AppSettings.shared.general.portraitOpensShortVideo
+        guard videoSwipeCover != nil, item?.epId == 0, !isPiPActive,
+              AppSettings.shared.general.portraitOpensShortVideo else { return false }
+        if storyTurned { return false }
+        return isVerticalVideo || (isFullscreen ? fullscreenIsStory : itemCameFromSwipe)
+    }
+
+    /// The videos go on along the swipes, as they do on the vertical-video screen also while it is turned.
+    var goesOnBySwipes: Bool {
+        canSwipeVideos || (storyTurned && item?.epId == 0)
     }
 
     /// The finger moved: `offset` from where it started (negative is up, towards the next video).
@@ -2176,7 +2237,7 @@ final class PlayerController: ObservableObject {
             return
         }
         onEnded?()
-        // Swiping through vertical videos: the end of one is no reason to leave fullscreen.
+        // Swiping through videos: the end of one is no reason to leave fullscreen.
         if !canSwipeVideos { scheduleAutoExitFullscreen() }
     }
 
@@ -2195,7 +2256,11 @@ final class PlayerController: ObservableObject {
             }
             if waited { try? await Task.sleep(nanoseconds: 1_200_000_000) }
             guard let self, !Task.isCancelled, self.status == .ended, self.overlay.sheet == nil else { return }
-            self.exitFullscreen()
+            if self.storyTurned {
+                self.turnBackToStory()
+            } else {
+                self.exitFullscreen()
+            }
         }
     }
 
@@ -2372,12 +2437,14 @@ final class PlayerController: ObservableObject {
 
     // MARK: Fullscreen
 
-    func enterFullscreen(byRotation: Bool, deviceOrientation: UIDeviceOrientation?) {
+    func enterFullscreen(byRotation: Bool, deviceOrientation: UIDeviceOrientation?, story keepStory: Bool = false) {
         guard !isFullscreen, item != nil else { return }
         autoExitTask?.cancel()
+        let story = isVerticalVideo || keepStory
+        storyWhenPageReturns = false
         let mask: UIInterfaceOrientationMask
         let orientation: UIInterfaceOrientation
-        if isVerticalVideo {
+        if story {
             mask = .portrait
             orientation = .portrait
         } else {
@@ -2390,6 +2457,9 @@ final class PlayerController: ObservableObject {
         fullscreenPathCount = pageRouter?.path.count ?? 0
         refullscreenWhenPageReturns = false
         isFullscreen = true
+        fullscreenIsStory = story
+        storyTurned = false
+        storyCleared = false
         overlay.fullscreenChanged()
         // Out of the way while the player fades in and the screen turns (the presenter turns it once the player is
         // on screen); back once it stands still.
@@ -2399,10 +2469,12 @@ final class PlayerController: ObservableObject {
             self.overlay.showControls()
         }
         let takeSurface: () -> Void = { [weak self] in self?.surfaceInFullscreen = true }
+        VerticalVideoMetrics.measureStatusBarGap()
         let stage = PlayerStageView(controller: self, overlay: overlay, role: .fullscreen)
-        if !fullscreenPresenter.present(stage, mask: mask, orientation: orientation, showsStatusBar: isVerticalVideo,
+        if !fullscreenPresenter.present(stage, mask: mask, orientation: orientation, showsStatusBar: story,
                                         willPresent: takeSurface, onShown: shown) {
             isFullscreen = false
+            fullscreenIsStory = false
             surfaceInFullscreen = false
             fullscreenByRotation = false
             overlay.fullscreenChanged()
@@ -2414,13 +2486,15 @@ final class PlayerController: ObservableObject {
     func fullscreenBack() {
         if overlay.isLocked {
             overlay.toggleLock()
+        } else if storyTurned {
+            turnBackToStory()
         } else {
             exitFullscreen()
         }
     }
 
     func toggleFullscreen() {
-        isFullscreen ? exitFullscreen() : enterFullscreen()
+        isFullscreen ? fullscreenBack() : enterFullscreen()
     }
 
     // MARK: Container visibility & rotation
@@ -2491,7 +2565,14 @@ final class PlayerController: ObservableObject {
         if case .failed = status { return }
         if isFullscreen {
             // Not while a sheet is open over the fullscreen player (e.g. typing in 发弹幕): exiting would close it.
-            if orientation == .portrait, fullscreenByRotation, !isVerticalVideo, overlay.sheet == nil { exitFullscreen() }
+            guard overlay.sheet == nil else { return }
+            if storyTurned {
+                if orientation == .portrait, fullscreenByRotation { turnBackToStory() }
+            } else if isOnVerticalScreen {
+                if orientation.isLandscape { turnStoryLandscape(byRotation: true, deviceOrientation: orientation) }
+            } else if orientation == .portrait, fullscreenByRotation, !isVerticalVideo {
+                exitFullscreen()
+            }
         } else if containerVisible, orientation.isLandscape, !isVerticalVideo, overlay.sheet == nil,
                   fullscreenPresenter.isLeaving || !PlayerFullscreenPresenter.isModalPresented() {
             // Still leaving (turned back the other way meanwhile): shown again once that is done. Dropped, it

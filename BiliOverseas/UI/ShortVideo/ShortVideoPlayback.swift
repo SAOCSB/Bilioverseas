@@ -19,6 +19,10 @@ final class ShortVideoPlayback: ObservableObject {
     let player = AVPlayer()
     /// The danmaku over this video. It lives here, not in the page: cells are reused and rebuilt.
     let danmaku = DanmakuOverlayView(frame: .zero)
+    /// Its place on the page.
+    weak var danmakuHost: ShortVideoDanmakuHost?
+    /// 全屏 has it, and the page's place waits for it to come back.
+    var danmakuInLandscape = false
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var isPlaying = false
     /// Waiting for data while it should be playing.
@@ -486,22 +490,31 @@ final class ShortVideoPlayback: ObservableObject {
 
 /// Puts a playback's danmaku over its video.
 struct ShortVideoDanmakuLayer: UIViewRepresentable {
-    let danmaku: DanmakuOverlayView
+    let playback: ShortVideoPlayback
+    /// In 全屏 (`ShortVideoLandscapeView`), not on the page.
+    var landscape = false
 
-    func makeUIView(context: Context) -> UIView {
-        let host = UIView()
+    func makeUIView(context: Context) -> ShortVideoDanmakuHost {
+        let host = ShortVideoDanmakuHost()
         host.isUserInteractionEnabled = false
         return host
     }
 
-    func updateUIView(_ host: UIView, context: Context) {
+    func updateUIView(_ host: ShortVideoDanmakuHost, context: Context) {
+        if !landscape { playback.danmakuHost = host }
+        if landscape == playback.danmakuInLandscape { host.claim(playback.danmaku) }
+    }
+}
+
+final class ShortVideoDanmakuHost: UIView {
+    func claim(_ danmaku: DanmakuOverlayView) {
         // The page's playback can be replaced while the cell stays: the old overlay must not stay in the window.
-        for view in host.subviews where view !== danmaku { view.removeFromSuperview() }
-        guard danmaku.superview !== host else { return }
+        for view in subviews where view !== danmaku { view.removeFromSuperview() }
+        guard danmaku.superview !== self else { return }
         danmaku.removeFromSuperview()
-        danmaku.frame = host.bounds
+        danmaku.frame = bounds
         danmaku.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        host.addSubview(danmaku)
+        addSubview(danmaku)
     }
 }
 

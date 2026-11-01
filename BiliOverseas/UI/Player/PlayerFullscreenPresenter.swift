@@ -144,6 +144,16 @@ final class PlayerFullscreenPresenter {
         top.present(vc, animated: true, completion: shown)
     }
 
+    /// Turns the screen under the fullscreen player that stays: a landscape video on the vertical-video screen going
+    /// 全屏, and back.
+    func turn(to mask: UIInterfaceOrientationMask, orientation: UIInterfaceOrientation, then done: @escaping () -> Void) {
+        guard let hosting else {
+            done()
+            return
+        }
+        turn(hosting, to: mask, orientation: orientation, then: done)
+    }
+
     /// Turns the screen to `mask` (to `orientation` when it has to turn), then calls `done`.
     private func turn(_ vc: PlayerFullscreenHostingController, to mask: UIInterfaceOrientationMask,
                       orientation: UIInterfaceOrientation, then done: @escaping () -> Void) {

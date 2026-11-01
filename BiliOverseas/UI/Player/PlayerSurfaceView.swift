@@ -121,7 +121,8 @@ final class PlayerSurfaceView: UIView {
         videoView.bounds = CGRect(origin: .zero, size: video.size)
         videoView.center = CGPoint(x: video.midX, y: video.midY)
         // Bounds and centre here too: a swipe moves these with a transform.
-        for moving in [leavingCover, swipeCover] as [UIView] {
+        for moving in [leavingCover, swipeCover] {
+            moving.isOnVerticalScreen = onVerticalScreen
             moving.bounds = CGRect(origin: .zero, size: bounds.size)
             moving.center = CGPoint(x: bounds.midX, y: bounds.midY)
         }
@@ -395,10 +396,14 @@ final class PlayerSurfaceView: UIView {
         setNeedsLayout()
     }
 
+    /// A landscape video on the vertical-video screen shows whole, above the uploader and title, whatever 「画面比例」
+    /// says for landscape fullscreen.
+    private var showsWholeOnVerticalScreen: Bool { onVerticalScreen && controller?.isVerticalVideo == false }
+
     /// 自适应 on the vertical-video screen goes by the video's shape (`VerticalVideoMetrics.fills`).
     private func updateVideoGravity() {
         let gravity: AVLayerVideoGravity
-        switch aspectMode {
+        switch showsWholeOnVerticalScreen ? .fit : aspectMode {
         case .fit: gravity = onVerticalScreen && VerticalVideoMetrics.fills(video: videoSize, area: bounds.size) ? .resizeAspectFill : .resizeAspect
         case .fill: gravity = .resizeAspectFill
         case .stretch, .ratio16x9, .ratio4x3: gravity = .resize
@@ -411,6 +416,7 @@ final class PlayerSurfaceView: UIView {
     }
 
     private func videoFrame() -> CGRect {
+        if showsWholeOnVerticalScreen { return VerticalVideoMetrics.wholePictureFrame(in: bounds) }
         switch aspectMode {
         case .ratio16x9: return fitted(ratio: 16.0 / 9.0)
         case .ratio4x3: return fitted(ratio: 4.0 / 3.0)
@@ -439,6 +445,10 @@ final class PlayerSwipeCoverView: UIView {
     var showsSpinner = false {
         didSet { showsSpinner ? spinner.startAnimating() : spinner.stopAnimating() }
     }
+    /// A landscape cover shows there as a landscape video does (`PlayerSurfaceView.videoFrame`).
+    var isOnVerticalScreen = false {
+        didSet { if isOnVerticalScreen != oldValue { setNeedsLayout() } }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -447,8 +457,6 @@ final class PlayerSwipeCoverView: UIView {
         backgroundColor = .black
         clipsToBounds = true
         imageView.contentMode = .scaleAspectFill
-        imageView.frame = bounds
-        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         addSubview(imageView)
         let dim = UIView(frame: bounds)
         dim.backgroundColor = UIColor.black.withAlphaComponent(0.25)
@@ -465,16 +473,25 @@ final class PlayerSwipeCoverView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let whole = isOnVerticalScreen && imageView.image.map { $0.size.width > $0.size.height } == true
+        imageView.contentMode = whole ? .scaleAspectFit : .scaleAspectFill
+        imageView.frame = whole ? VerticalVideoMetrics.wholePictureFrame(in: bounds) : bounds
+    }
+
     func setCover(_ cover: String) {
         let next = cover.isEmpty ? "" : RemoteImage.resolvedURL(cover, width: 640)
         guard next != url else { return }
         url = next
         imageView.image = ImagePipeline.shared.cached(next)
+        setNeedsLayout()
         guard imageView.image == nil, !next.isEmpty else { return }
         Task { @MainActor [weak self] in
             let image = await ImagePipeline.shared.image(for: next)
             guard let self, self.url == next else { return }
             self.imageView.image = image
+            self.setNeedsLayout()
         }
     }
 }

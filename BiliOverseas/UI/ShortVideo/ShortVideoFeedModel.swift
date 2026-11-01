@@ -17,7 +17,7 @@ final class ShortVideoFeedModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var errorText: String?
     /// 「只看竖屏」: landscape videos are skipped.
-    @Published private(set) var portraitOnly = AppSettings.shared.general.shortVideoOnlyPortrait
+    @Published private(set) var portraitOnly = AppSettings.shared.general.swipesOnlyPortrait
     /// 「N人正在看」 of the video on screen.
     @Published private(set) var onlineText: String?
     /// Where a swipe is coming to rest. An object of its own (`ShortVideoLanding`).
@@ -41,6 +41,9 @@ final class ShortVideoFeedModel: ObservableObject {
     private var onlineItemID: String?
     private var onlineTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
+    /// 全屏 of a landscape video (`ShortVideoLandscapeView`).
+    private let landscapePresenter = PlayerFullscreenPresenter()
+    private var isLandscape = false
 
     init(start: ShortVideoItem?) {
         self.start = start
@@ -184,10 +187,36 @@ final class ShortVideoFeedModel: ObservableObject {
     /// 「只看竖屏」 on drops the landscape videos ahead (the one on screen stays); off affects later pages.
     func setPortraitOnly(_ on: Bool) {
         portraitOnly = on
-        AppSettings.shared.general.shortVideoOnlyPortrait = on
+        AppSettings.shared.general.swipesOnlyPortrait = on
         guard on else { return }
         items = items.enumerated().filter { $0.offset <= index || $0.element.isPortrait }.map(\.element)
         activate()
+    }
+
+    // MARK: 全屏
+
+    /// The landscape video on screen, turned with the phone: the same player and danmaku, so it just goes on.
+    func showLandscape() {
+        guard !isLandscape, let item = showing else { return }
+        let playback = playback(for: item)
+        isLandscape = true
+        playback.danmakuInLandscape = true
+        let screen = ShortVideoLandscapeView(playback: playback, title: item.title,
+                                             onTogglePlay: { [weak self] in self?.togglePlay(item) },
+                                             onBack: { [weak self] in self?.closeLandscape(playback) })
+        if !landscapePresenter.present(screen, mask: .landscape, orientation: .landscapeRight, onShown: {}) {
+            isLandscape = false
+            playback.danmakuInLandscape = false
+        }
+    }
+
+    private func closeLandscape(_ playback: ShortVideoPlayback) {
+        guard isLandscape else { return }
+        landscapePresenter.dismiss(releasingSurface: {}) { [weak self] in
+            self?.isLandscape = false
+            playback.danmakuInLandscape = false
+            playback.danmakuHost?.claim(playback.danmaku)
+        }
     }
 
     // MARK: Players
@@ -209,6 +238,8 @@ final class ShortVideoFeedModel: ObservableObject {
     }
 
     func setVisible(_ isVisible: Bool) {
+        // The fullscreen presentation covers this page, and the video goes on there.
+        if !isVisible, isLandscape { return }
         visible = isVisible
         PlayerNowPlayingCenter.shared.shortVideosVisible = isVisible
         if !isVisible { reportCurrentHistory() }

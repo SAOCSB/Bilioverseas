@@ -65,7 +65,7 @@ private struct PlayerStageContent: View {
     var body: some View {
         // The vertical-video screen: the picture stays between the status bar and the bar below it. This goes by
         // the whole window, as the safe area depends on that status bar.
-        let verticalScreen = role == .fullscreen && controller.isVerticalVideo
+        let verticalScreen = role == .fullscreen && controller.fullscreenIsStory && !controller.storyTurned
             && measured.height + safeArea.top + safeArea.bottom > measured.width
         let gap = verticalScreen ? VerticalVideoMetrics.statusBarGap : 0
         let size = CGSize(width: measured.width, height: measured.height + gap)
@@ -174,6 +174,7 @@ struct PlayerChromeView: View {
         .frame(width: size.width, height: size.height)
         .onChange(of: controller.item?.cid) { _ in verticalTitleExpanded = false }
         .animation(.easeOut(duration: 0.15), value: controller.isVideoSwipeActive)
+        .animation(.easeInOut(duration: 0.2), value: controller.storyCleared)
         .animation(.easeOut(duration: 0.15), value: overlay.danmakuBubbleOpen)
         .animation(.easeInOut(duration: 0.2), value: overlay.controlsVisible)
         .animation(.easeInOut(duration: 0.15), value: controller.isBoosting)
@@ -197,9 +198,12 @@ struct PlayerChromeView: View {
     private var coverLayer: some View {
         let listening = controller.audioOnlyStream != nil
         if !controller.hasFirstFrame || listening, let cover = controller.item?.cover, !cover.isEmpty {
-            RemoteImage(url: cover, width: 640, contentMode: .fill)
-                .frame(width: size.width, height: pictureHeight)
+            // Where the picture comes (`PlayerSurfaceView.videoFrame`).
+            let whole = verticalScreen && !controller.isVerticalVideo
+            RemoteImage(url: cover, width: 640, contentMode: whole ? .fit : .fill)
+                .frame(width: size.width, height: whole ? max(pictureHeight - VerticalVideoMetrics.infoHeight, 0) : pictureHeight)
                 .clipped()
+                .frame(height: pictureHeight, alignment: .top)
                 .overlay(Color.black.opacity(listening ? 0.45 : 0.25))
                 .allowsHitTesting(false)
                 .transition(.opacity)
@@ -243,7 +247,7 @@ struct PlayerChromeView: View {
                 if !overlay.isLocked { replayButton }
             case .loading, .buffering:
                 if controller.status == .loading || controller.wantsToPlay {
-                    if controller.isVerticalVideo {
+                    if controller.isVerticalVideo || verticalScreen {
                         PlayerQuietSpinner(waitBegan: controller.status == .loading ? controller.waitBegan : nil)
                     } else {
                         PlayerBufferingView(text: bufferingText)
@@ -470,23 +474,27 @@ struct PlayerChromeView: View {
     /// `VerticalVideoViews.swift`. Nothing here hides by itself; while a swipe goes to another video only the top bar stays.
     private var verticalControls: some View {
         ZStack {
-            LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
-                .frame(height: 110)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .allowsHitTesting(false)
-            LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
-                .frame(height: 260)
-                .frame(maxHeight: .infinity, alignment: .bottom)
-                .allowsHitTesting(false)
-                .opacity(controller.isVideoSwipeActive ? 0 : 1)
+            if !controller.storyCleared {
+                LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 110)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .allowsHitTesting(false)
+                LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 260)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                    .allowsHitTesting(false)
+                    .opacity(controller.isVideoSwipeActive ? 0 : 1)
+            }
             VStack(spacing: 0) {
-                VerticalVideoTopBar(online: controller.onlineCount, onBack: { controller.fullscreenBack() },
-                                    onSearch: controller.pageRouter.map { router in { router.push(.searchHome) } }) {
-                    Button { open(.more) } label: {
-                        VerticalVideoBarIcon(systemName: "ellipsis", upright: true)
+                if !controller.storyCleared {
+                    VerticalVideoTopBar(online: controller.onlineCount, onBack: { controller.fullscreenBack() },
+                                        onSearch: controller.pageRouter.map { router in { router.push(.searchHome) } }) {
+                        Button { open(.more) } label: {
+                            VerticalVideoBarIcon(systemName: "ellipsis", upright: true)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(Text("更多设置"))
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(Text("更多设置"))
                 }
                 Spacer(minLength: 0)
                 verticalPageControls
@@ -496,17 +504,19 @@ struct PlayerChromeView: View {
 
     private var verticalPageControls: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .bottom, spacing: 8) {
-                // A downloaded video has no page behind it: only its title.
-                VerticalVideoInfoView(actions: controller.fullscreenActions ?? PlayerFullscreenActions(),
-                                      title: controller.item?.title ?? "", expanded: $verticalTitleExpanded)
-                if let actions = controller.fullscreenActions {
-                    VerticalVideoActionColumn(actions: actions)
+            if !controller.storyCleared {
+                HStack(alignment: .bottom, spacing: 8) {
+                    // A downloaded video has no page behind it: only its title.
+                    VerticalVideoInfoView(actions: controller.fullscreenActions ?? PlayerFullscreenActions(),
+                                          title: controller.item?.title ?? "", expanded: $verticalTitleExpanded)
+                    if let actions = controller.fullscreenActions {
+                        VerticalVideoActionColumn(actions: actions)
+                    }
                 }
+                .padding(.leading, 12)
+                .padding(.bottom, -VerticalVideoMetrics.progressOverlap)
+                .modifier(PlayerVerticalSwipeThrough(controller: controller))
             }
-            .padding(.leading, 12)
-            .padding(.bottom, -VerticalVideoMetrics.progressOverlap)
-            .modifier(PlayerVerticalSwipeThrough(controller: controller))
             makeProgressBar(barHeight: 2, height: 22, verticalScreenStyle: true)
                 // A drag under way ends with its video.
                 .id(controller.item?.cid)
@@ -518,11 +528,14 @@ struct PlayerChromeView: View {
     }
 
     private var verticalBottomBar: some View {
-        VerticalVideoBottomBar(danmakuOn: settings.danmaku.enabled,
+        VerticalVideoBottomBar(danmakuOn: settings.danmaku.enabled, landscape: !controller.isVerticalVideo,
+                               cleared: controller.storyCleared,
                                onSend: { overlay.sheet = .danmakuSend },
                                onToggle: { controller.toggleDanmaku() },
+                               onSettings: { overlay.sheet = .danmakuSettings },
                                onDetail: { controller.exitFullscreen() },
-                               onSettings: { overlay.sheet = .danmakuSettings })
+                               onClear: { controller.setStoryCleared(!controller.storyCleared) },
+                               onFullscreen: { controller.turnStoryLandscape() })
     }
 
     // MARK: Bars
@@ -649,7 +662,7 @@ struct PlayerChromeView: View {
                     PlayerTextButton(title: quality.shortTitle) { open(.quality) }
                 }
                 PlayerIconButton(systemName: "arrow.down.right.and.arrow.up.left", size: 15, label: "退出全屏") {
-                    act { controller.exitFullscreen() }
+                    act { controller.fullscreenBack() }
                 }
             }
         }

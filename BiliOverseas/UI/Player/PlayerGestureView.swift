@@ -197,7 +197,11 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         }
         cancelPendingDanmaku()
         if onVerticalScreen {
-            if !controller.isSwitchingBySwipe { controller.togglePlay() }
+            if controller.storyCleared {
+                controller.setStoryCleared(false)
+            } else if !controller.isSwitchingBySwipe {
+                controller.togglePlay()
+            }
         } else {
             overlay.toggleControls()
         }
@@ -375,12 +379,10 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             let w = bounds.width
             let settings = AppSettings.shared.player
             let inSideZone = panStartPoint.x < w / 3 || panStartPoint.x > w * 2 / 3
-            if controller.isVerticalVideo {
-                if controller.canSwipeVideos {
-                    panMode = .swipeVideo
-                } else {
-                    panMode = !inSideZone && settings.slideFullscreen ? .fullscreen : .ignored
-                }
+            if controller.canSwipeVideos {
+                panMode = .swipeVideo
+            } else if controller.isVerticalVideo {
+                panMode = !inSideZone && settings.slideFullscreen ? .fullscreen : .ignored
             } else if inSideZone {
                 if !settings.slideVolumeBrightness {
                     panMode = .ignored
@@ -442,7 +444,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             guard !fullscreenFired else { break }
             if t.y > 2.5, controller.isFullscreen {
                 fullscreenFired = true
-                controller.exitFullscreen()
+                controller.fullscreenBack()
             } else if t.y < -2.5, !controller.isFullscreen {
                 fullscreenFired = true
                 controller.enterFullscreen()

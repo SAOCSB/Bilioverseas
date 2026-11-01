@@ -58,6 +58,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // Downloads interrupted by the last exit resume right away instead of when 离线缓存 is first opened.
         _ = OfflineDownloadManager.shared
         let center = NotificationCenter.default
+        center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { VerticalVideoMetrics.measureStatusBarGap() }
+        }
         center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { _ in
             AccelerationEngine.shared.applicationWillEnterForeground()
         }

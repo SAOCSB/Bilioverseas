@@ -31,6 +31,9 @@ final class PlayerStreamPreload {
     private var closed = false
     /// Still getting its answer and its session.
     private(set) var isPreparing = false
+    /// When that came to nothing, which trying again a while later may change.
+    private var cameToNothingAt: Date?
+    private static let tryAgainAfter: TimeInterval = 30
 
     /// Starts on the video a swipe would go to. `start` says where it would start, once the answer is in.
     init(item: PlaybackItem, constraints: PlayerStreamConstraints, quality: Int, accelerate: Bool, allowHDR: Bool,
@@ -64,7 +67,10 @@ final class PlayerStreamPreload {
 
     private func prepare(_ item: PlaybackItem, constraints: PlayerStreamConstraints, quality: Int, accelerate: Bool,
                          allowHDR: Bool, start: (PlayInfo) -> Double) async {
-        defer { isPreparing = false }
+        defer {
+            isPreparing = false
+            if session == nil { cameToNothingAt = Date() }
+        }
         let began = ProcessInfo.processInfo.systemUptime
         func elapsed() -> Int { Int((ProcessInfo.processInfo.systemUptime - began) * 1000) }
         let answer: PlayInfo
@@ -116,6 +122,7 @@ final class PlayerStreamPreload {
     func matches(_ item: PlaybackItem) -> Bool {
         guard item.epId == 0, item.cid == cid, !closed, session?.isEndpointValid != false,
               (aid != 0 && item.aid == aid) || (!bvid.isEmpty && item.bvid == bvid) else { return false }
+        if let cameToNothingAt, Date().timeIntervalSince(cameToNothingAt) > Self.tryAgainAfter { return false }
         return fetchedAt.map { Date().timeIntervalSince($0) < Self.maxAge } ?? true
     }
 

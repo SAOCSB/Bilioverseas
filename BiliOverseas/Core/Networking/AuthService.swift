@@ -225,10 +225,11 @@ final class AuthService: ObservableObject, @unchecked Sendable {
                                 refreshToken: refreshToken.isEmpty ? nil : refreshToken)
     }
 
-    /// Whether a TV login joins the login there is, which keeps its cookies and web refresh token: the same account.
-    /// Anything else (no login, another account, a result that does not say) takes the cookies that came with it.
-    static func tvLoginJoinsWebLogin(isLoggedIn: Bool, currentMid: Int64?, tvMid: Int64) -> Bool {
-        isLoggedIn && tvMid != 0 && currentMid == tvMid
+    /// Whether a TV login joins the login there is, keeping its cookies and web refresh token: the same account, with a
+    /// refresh token worth keeping. Anything else (no login, another account, a result that does not say, cookies that
+    /// nothing can renew) takes the cookies that came with it.
+    static func tvLoginJoinsWebLogin(isLoggedIn: Bool, hasWebRefreshToken: Bool, currentMid: Int64?, tvMid: Int64) -> Bool {
+        isLoggedIn && hasWebRefreshToken && tvMid != 0 && currentMid == tvMid
     }
 
     /// A TV login stands next to a web login, whichever came first (`session(after:)` for the other order).
@@ -238,15 +239,23 @@ final class AuthService: ObservableObject, @unchecked Sendable {
 
     /// TV QR success: `access_key` (minted for `AppKey.tv`), and cookie_info cookies unless it joins a web login.
     func completeTVLogin(_ result: TVLoginResult) async {
-        let joins = AuthService.tvLoginJoinsWebLogin(isLoggedIn: http.isLoggedIn, currentMid: http.mid, tvMid: result.mid)
+        let joins = AuthService.tvLoginJoinsWebLogin(isLoggedIn: http.isLoggedIn, hasWebRefreshToken: hasWebRefreshToken,
+                                                     currentMid: http.mid, tvMid: result.mid)
         let webRefreshToken = locked { tokens.refreshToken }
-        await applyLogin(cookies: joins ? [] : result.cookies, replaceExisting: !joins) { t in
-            if joins { t.refreshToken = webRefreshToken }
+        func storeTVLogin(_ t: inout StoredSession) {
             t.accessKey = result.accessToken
             t.accessKeyAppKey = AppKey.tv.key
             t.accessKeyMid = result.mid != 0 ? result.mid : nil
             t.appRefreshToken = result.refreshToken.isEmpty ? nil : result.refreshToken
             t.accessKeyExpiresAt = result.expiresIn > 0 ? Date().timeIntervalSince1970 + Double(result.expiresIn) : nil
+        }
+        await applyLogin(cookies: joins ? [] : result.cookies, replaceExisting: !joins) { t in
+            if joins { t.refreshToken = webRefreshToken }
+            storeTVLogin(&t)
+        }
+        // The web login it joined turned out to be dead, and was cleared with this one: this one stands alone then.
+        if joins, !http.isLoggedIn {
+            await applyLogin(cookies: result.cookies, replaceExisting: true, tokens: storeTVLogin)
         }
     }
 

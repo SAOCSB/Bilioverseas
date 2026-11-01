@@ -82,6 +82,7 @@ extension PlayerController {
     func appDidEnterBackground() {
         restoreBrightness()
         backgroundTask?.cancel()
+        forgetSwipeAfterLanding()
         guard item != nil, !(pipCoordinator.isActive || pipCoordinator.isStarting) else { return }
         // A swipe under way has paused the old video, but the one it goes to will play.
         let intended = wantsToPlay || isSwitchingBySwipe

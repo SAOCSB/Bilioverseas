@@ -34,7 +34,8 @@ struct PlayerVideoSwipeTarget {
     var firstFrame = ""
     /// Its own shape (zero: not known), for placing that frame as the video will be.
     var videoSize = CGSize.zero
-    /// The video as it was left, when it goes on from there.
+    /// It may go on from where a swipe left it: then that is what comes in.
+    var goesOnFromWhereLeft = false
     var still: PlayerPictureStill?
 }
 
@@ -303,8 +304,15 @@ final class PlayerController: ObservableObject {
     private var streamPreloads: [PlayerStreamPreload] = []
     /// The page's wish for more of them, nearest first, until this video has enough of its own to share the connection.
     private var streamPreloadsWanted: [PlaybackItem] = []
-    /// The video the next swipe goes to, the first to be made ready.
+    /// The video the next swipe goes to, the one made ready first and furthest.
     private var nextStream: PlaybackItem?
+    /// What the page's `refreshSwipePreload` needs to hear: nothing else says this video is back on the swipes.
+    var onBackOnTheSwipes: (() -> Void)?
+    private var wasOnTheSwipes = false
+    /// Why a swipe has nowhere to go, when that is more than a matter of waiting.
+    var videoSwipeNothingNext: (() -> String?)?
+    /// The picture has been sent off by a swipe that went through (not a video going on by itself at its end).
+    private var swipeSlid = false
     private var swipeAfterLanding: PlayerVideoSwipe?
     /// Fewer once the system said it is short of memory.
     private var swipeWindowLimit = Int.max
@@ -605,7 +613,7 @@ final class PlayerController: ObservableObject {
         // swipe from a paused video (the swipe itself paused it).
         let continuing = item != nil && (wantsToPlay || status == .ended || swiped)
         autoExitTask?.cancel()
-        let preload = swapStreamPreloads(for: newItem, swiped: swiped)
+        let preload = swapStreamPreloads(for: newItem)
         teardown(reportHeartbeat: true)
         takenPreload = preload
         trace("load \(newItem.bvid) cid=\(newItem.cid) vertical=\(newItem.isVertical) swiped=\(swiped) "
@@ -644,12 +652,11 @@ final class PlayerController: ObservableObject {
         if swiped {
             // Swiping through videos: the controls would cover each one for its first seconds.
             overlay.hideControls()
-            surface.finishVideoSwipe()
+            surface.finishVideoSwipe(holdingPicture: swipeSlid)
             isHoldingSwipePicture = surface.isHoldingSwipePicture
             endVideoSwipe()
             goOnAfterLanding()
         } else {
-            swipeAfterLanding = nil
             releaseSwipePicture()
         }
         startTicking()
@@ -857,6 +864,12 @@ final class PlayerController: ObservableObject {
         canSwipeVideos || (storyTurned && item?.epId == 0)
     }
 
+    /// This video is on the swipes, whatever Picture in Picture is doing for now.
+    var isOnTheSwipes: Bool {
+        guard videoSwipeTarget != nil, item?.epId == 0, AppSettings.shared.general.portraitOpensShortVideo else { return false }
+        return storyTurned || isVerticalVideo || (isFullscreen ? fullscreenIsStory : itemCameFromSwipe)
+    }
+
     /// The finger moved: `offset` from where it started (negative is up, towards the next video). A drag that began
     /// while the last swipe was still landing takes over once that is done.
     func videoSwipeMoved(offset: CGFloat) {
@@ -874,13 +887,19 @@ final class PlayerController: ObservableObject {
 
     private func swipeTarget(_ swipe: PlayerVideoSwipe) -> PlayerVideoSwipeTarget? {
         guard var target = videoSwipeTarget?(swipe) else { return nil }
-        target.still = swipeStills.last { $0.aid == target.aid }?.still
+        if target.goesOnFromWhereLeft { target.still = swipeStills.last { $0.aid == target.aid }?.still }
         return target
     }
 
-    /// A swipe is leaving this video, which goes on from here if it comes back (not from about its end, which starts over).
-    private func keepSwipeStill() {
-        guard hasFirstFrame, audioOnlyStream == nil, let item, duration <= 0 || displayTime() <= duration - 3,
+    /// A swipe left a video this close to its end: coming back starts it over (`resolveStartPosition` takes nothing
+    /// within 5 s of the end, by a duration that can differ a little).
+    static let startsOverNearEnd = 6.0
+
+    /// A swipe is leaving `aid`, which goes on from here if it comes back. It takes a moment on this thread, which a slide
+    /// under way does not feel.
+    private func keepSwipeStill(of aid: Int64) {
+        guard isSwitchingBySwipe, hasFirstFrame, audioOnlyStream == nil, let item, item.aid == aid,
+              duration <= 0 || displayTime() < duration - Self.startsOverNearEnd,
               let still = surface.pictureStill() else { return }
         swipeStills.removeAll { $0.aid == item.aid }
         swipeStills.append((item.aid, still))
@@ -901,31 +920,45 @@ final class PlayerController: ObservableObject {
             return
         }
         guard far, let target = swipeTarget(swipe) else {
-            if far { ToastCenter.shared.show(swipe == .next ? "下一个视频还在加载，稍后再滑" : "已经是第一个了") }
-            surface.cancelVideoSwipe()
+            if far {
+                ToastCenter.shared.show(swipe == .next ? videoSwipeNothingNext?() ?? "下一个视频还在加载，稍后再滑" : "已经是第一个了")
+            }
+            surface.cancelVideoSwipe(holdingPicture: !hasFirstFrame)
+            isHoldingSwipePicture = surface.isHoldingSwipePicture
             endVideoSwipe()
             if controlsBeforeSwipe { overlay.showControls() }
             return
         }
         trace("swipe \(swipe) picture=\(target.still != nil ? "still" : target.firstFrame.isEmpty ? "cover" : "frame")")
         let wasPlaying = wantsToPlay
-        pause()
-        keepSwipeStill()
-        isSwitchingBySwipe = true
-        playAfterFailedSwipe = wasPlaying
         waitBegan = ProcessInfo.processInfo.systemUptime
+        // The slide goes first: asked for the time right after a pause, AVPlayer holds this thread for some 30 ms, which
+        // the finger would feel as the picture stopping as it lifts.
         surface.commitVideoSwipe(toNext: swipe == .next, target: target) { [weak self] in
             guard let self, self.isSwitchingBySwipe else { return }
             self.onVideoSwipe?(swipe)
+        }
+        pause()
+        isSwitchingBySwipe = true
+        swipeSlid = true
+        playAfterFailedSwipe = wasPlaying
+        if let aid = item?.aid {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in self?.keepSwipeStill(of: aid) }
         }
     }
 
     /// The page goes on by itself to the video a swipe would go to (this one ended): it comes up the same way.
     func beginAutomaticVideoSwipe() {
         waitBegan = ProcessInfo.processInfo.systemUptime
+        // It ended under a finger: the picture goes back, and that drag is over.
+        if isVideoSwipeActive {
+            surface.cancelVideoSwipe(holdingPicture: false)
+            isVideoSwipeActive = false
+        } else {
+            controlsBeforeSwipe = overlay.controlsVisible
+        }
         isSwitchingBySwipe = true
         playAfterFailedSwipe = false
-        controlsBeforeSwipe = overlay.controlsVisible
     }
 
     /// A swipe made while the last one was landing.
@@ -934,11 +967,27 @@ final class PlayerController: ObservableObject {
         swipeAfterLanding = nil
         // The page is done with the switch once it has handed over: only then does it know what comes next.
         Task { @MainActor [weak self] in
-            guard let self, self.canSwipeVideos, !self.isVideoSwipeActive, !self.isSwitchingBySwipe else { return }
+            guard let self, self.canSwipeVideos, !self.isVideoSwipeActive, !self.isSwitchingBySwipe, !self.isCoveredByPage,
+                  UIApplication.shared.applicationState == .active else { return }
             let direction: CGFloat = swipe == .next ? -1 : 1
             self.videoSwipeMoved(offset: direction)
             self.videoSwipeEnded(offset: direction, velocity: direction * 1000)
         }
+    }
+
+    /// The app or the page is going away: one swipe made just before is not meant to go off when it comes back.
+    func forgetSwipeAfterLanding() {
+        swipeAfterLanding = nil
+    }
+
+    /// Something else took over from a swipe that was still landing or loading (a part or episode tapped, a related
+    /// video): what it would have brought in has no place over that.
+    func videoSwipeAbandoned() {
+        guard isSwitchingBySwipe else { return }
+        swipeAfterLanding = nil
+        endVideoSwipe()
+        surface.finishVideoSwipe(holdingPicture: false)
+        isHoldingSwipePicture = false
     }
 
     /// The page could not switch: back to the video that was showing, as it was.
@@ -947,7 +996,8 @@ final class PlayerController: ObservableObject {
         swipeAfterLanding = nil
         let resume = playAfterFailedSwipe
         endVideoSwipe()
-        surface.cancelVideoSwipe()
+        surface.cancelVideoSwipe(holdingPicture: !hasFirstFrame)
+        isHoldingSwipePicture = surface.isHoldingSwipePicture
         if controlsBeforeSwipe { overlay.showControls() }
         if !resume {
             // It counted as playing when the app left (`appDidEnterBackground`), for the video that did not come.
@@ -967,13 +1017,14 @@ final class PlayerController: ObservableObject {
     private func endVideoSwipe() {
         isSwitchingBySwipe = false
         isVideoSwipeActive = false
+        swipeSlid = false
     }
 
     // MARK: Preloading for swipes
 
     /// The videos around this one on the swipes, nearest first: `ahead` the next swipes' and `behind` those going back.
     /// They are made ready once this video has some buffer of its own, and whatever else was kept goes.
-    func preloadStreams(ahead: [PlaybackItem], behind: [PlaybackItem]) {
+    func preloadStreams(next: PlaybackItem?, ahead: [PlaybackItem], behind: [PlaybackItem]) {
         let ahead = ahead.prefix(swipeWindowLimit), behind = behind.prefix(swipeWindowLimit)
         var window: [PlaybackItem] = []
         for index in 0..<max(ahead.count, behind.count) {
@@ -985,7 +1036,7 @@ final class PlayerController: ObservableObject {
             preload.close()
             return true
         }
-        nextStream = ahead.first
+        nextStream = next
         for preload in streamPreloads { preload.setPrefetch(seconds: prefetchSeconds(for: preload.matches)) }
         streamPreloadsWanted = window.filter { wanted in !streamPreloads.contains { $0.matches(wanted) } }
     }
@@ -1039,18 +1090,13 @@ final class PlayerController: ObservableObject {
             start: { [weak self] info in self?.resolveStartPosition(item, info) ?? 0 })
     }
 
-    /// `newItem` is about to load: its preload is taken. Along the swipes the others stay and the video left joins them,
-    /// until the page says what it wants around the new one. Anywhere else none of them is of use any more.
-    private func swapStreamPreloads(for newItem: PlaybackItem, swiped: Bool) -> PlayerStreamPreload? {
+    /// `newItem` is about to load: its preload is taken, and the others stay with the video left among them, until the page
+    /// says what it wants around the new one (`preloadStreams`, or `closeStreamPreloads` off the swipes).
+    private func swapStreamPreloads(for newItem: PlaybackItem) -> PlayerStreamPreload? {
         let taken = streamPreloads.first { $0.matches(newItem) }
         streamPreloads.removeAll { $0 === taken }
-        streamPreloadsWanted = []
-        if swiped || taken != nil {
-            if let left = leaveStreamBehind() { streamPreloads.append(left) }
-        } else {
-            streamPreloads.forEach { $0.close() }
-            streamPreloads = []
-        }
+        // The same video again (重试) leaves nothing behind.
+        if item?.cid != newItem.cid, let left = leaveStreamBehind() { streamPreloads.append(left) }
         swipeStills.removeAll { $0.aid == newItem.aid }
         return taken
     }
@@ -1096,9 +1142,10 @@ final class PlayerController: ObservableObject {
         teardown(reportHeartbeat: true)
         closeStreamPreloads()
         swipeStills = []
+        swipeAfterLanding = nil
         endVideoSwipe()
-        surface.finishVideoSwipe()
-        releaseSwipePicture()
+        surface.finishVideoSwipe(holdingPicture: false)
+        isHoldingSwipePicture = false
         item = nil
         status = .idle
         currentTime = 0
@@ -1841,7 +1888,8 @@ final class PlayerController: ObservableObject {
                              choice picked: PlayerStreamChoice?, audioOnly audio: DashStream? = nil,
                              accelerated: Bool, progressive: Bool,
                              position: Double?, generation sgen: Int) {
-        let start = max(0, position ?? displayTime())
+        // A seek made while this was being prepared wins over what it was asked to open at.
+        let start = max(0, pendingStartTime ?? position ?? displayTime())
         let initial = !heartbeatStarted
         removeItemObservers()
         startupDone = false
@@ -1850,8 +1898,9 @@ final class PlayerController: ObservableObject {
         seekToken += 1
         // The new item must not start from 0 before the start seek.
         player.pause()
-        // The playlists can say where to start: nothing then comes or shows from before it, and no seek follows.
-        let startsByPlaylist = start > 0.5 && newSession?.isHLS == true
+        // The playlists can say where to start: nothing then comes or shows from before it, and no seek follows. Not close
+        // to the end, where AVPlayer can report the end and never get ready: a seek there gets clamped and finishes.
+        let startsByPlaylist = start > 0.5 && newSession?.isHLS == true && (duration <= 0 || start < duration - 5)
         newSession?.startPlaylists(at: startsByPlaylist ? start : nil)
         playlistStartTime = startsByPlaylist ? start : nil
         pendingStartTime = start > 0.5 && !startsByPlaylist ? start : nil
@@ -1967,7 +2016,6 @@ final class PlayerController: ObservableObject {
         loadTask = nil
         sideTask?.cancel()
         sideTask = nil
-        streamPreloadsWanted = []
         takenPreload?.close()
         takenPreload = nil
         lastItemError = nil
@@ -2111,10 +2159,10 @@ final class PlayerController: ObservableObject {
             refreshDurationFromItem()
             if let start = playlistStartTime {
                 playlistStartTime = nil
-                // Not where the playlists said: the seek does it after all.
+                // Not where the playlists said: the seek does it after all, unless one was asked for meanwhile.
                 if abs(observed.currentTime().seconds - start) > 1 {
                     trace("start by playlist at \(start) came at \(observed.currentTime().seconds)")
-                    pendingStartTime = start
+                    if pendingStartTime == nil { pendingStartTime = start }
                 }
             }
             if let start = pendingStartTime {
@@ -2582,6 +2630,9 @@ final class PlayerController: ObservableObject {
     }
 
     private func secondTick(time t: Double, playing: Bool) {
+        let onTheSwipes = isOnTheSwipes
+        if onTheSwipes, !wasOnTheSwipes { onBackOnTheSwipes?() }
+        wasOnTheSwipes = onTheSwipes
         if startupDone { heartbeat.tick(position: t, isPlaying: playing) }
         refreshStats()
         sleepTimerTick()
@@ -2695,6 +2746,7 @@ final class PlayerController: ObservableObject {
         guard !isFullscreen else { return }
         containerVisible = false
         containerHidden = true
+        swipeAfterLanding = nil
         stopOrientationObserving()
         // The detail page pauses a playing / buffering player when a page is pushed over it; one still loading
         // would start playing hidden once ready. Hold its intent until the page is back (or `stop()` comes).

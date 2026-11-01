@@ -70,17 +70,21 @@ enum FeedAPI {
     /// so portrait videos open 短视频 from either feed: one `x/article/cards` request per 40 cards.
     /// Best effort: cards the lookup misses come back unchanged.
     static func fillVideoSizes(_ cards: [VideoCard]) async -> [VideoCard] {
+        applyVideoSizes(videoSizes(await lookUpVideos(cards)), to: cards)
+    }
+
+    /// What `x/article/cards` knows of the cards that still need a size, keyed by `sizeLookupID`. Best effort.
+    static func lookUpVideos(_ cards: [VideoCard]) async -> [String: JSON] {
         let ids = Array(Set(cards.compactMap(sizeLookupID)))
-        guard !ids.isEmpty else { return cards }
-        var sizes: [String: (width: Int, height: Int)] = [:]
+        var found: [String: JSON] = [:]
         for start in stride(from: 0, to: ids.count, by: 40) {
             let chunk = ids[start..<min(start + 40, ids.count)]
             guard let data = try? await BiliHTTP.shared.api(BiliHost.api + "/x/article/cards",
                                                          query: ["ids": chunk.joined(separator: ",")], timeout: 5)
             else { continue }
-            sizes.merge(videoSizes(data)) { _, new in new }
+            found.merge(data.objectValue) { _, new in new }
         }
-        return applyVideoSizes(sizes, to: cards)
+        return found
     }
 
     /// The id `x/article/cards` takes for a video card that still needs its size; nil otherwise.
@@ -92,8 +96,12 @@ enum FeedAPI {
 
     /// `x/article/cards` `data` (keyed by the requested `BV…` / `av…` id) → display sizes, rotation applied.
     static func videoSizes(_ data: JSON) -> [String: (width: Int, height: Int)] {
+        videoSizes(data.objectValue)
+    }
+
+    static func videoSizes(_ cards: [String: JSON]) -> [String: (width: Int, height: Int)] {
         var out: [String: (width: Int, height: Int)] = [:]
-        for (id, card) in data.objectValue {
+        for (id, card) in cards {
             let w = card[path: "dimension.width"].intValue, h = card[path: "dimension.height"].intValue
             guard w > 0, h > 0 else { continue }
             out[id] = card[path: "dimension.rotate"].intValue == 1 ? (h, w) : (w, h)

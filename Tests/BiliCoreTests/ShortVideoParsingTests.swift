@@ -5,11 +5,39 @@ import XCTest
 /// portrait marker the app home feed's `uri` carries.
 final class ShortVideoParsingTests: XCTestCase {
     func testTheSourceGoesByTheLoginUntilOneIsChosen() {
-        XCTAssertEqual(ShortVideoAPI.source(chosen: nil, hasAppToken: true, isLoggedIn: true), .official)
-        XCTAssertEqual(ShortVideoAPI.source(chosen: nil, hasAppToken: false, isLoggedIn: true), .web, "the official feed would be anonymous")
-        XCTAssertEqual(ShortVideoAPI.source(chosen: nil, hasAppToken: false, isLoggedIn: false), .official)
-        XCTAssertEqual(ShortVideoAPI.source(chosen: .web, hasAppToken: true, isLoggedIn: true), .web)
-        XCTAssertEqual(ShortVideoAPI.source(chosen: .official, hasAppToken: false, isLoggedIn: true), .official)
+        func source(_ chosen: SwipeFeedSource?, token: Bool, loggedIn: Bool, onlyPortrait: Bool = false) -> SwipeFeedSource {
+            ShortVideoAPI.source(chosen: chosen, hasAppToken: token, isLoggedIn: loggedIn, onlyPortrait: onlyPortrait)
+        }
+        XCTAssertEqual(source(nil, token: true, loggedIn: true), .official)
+        XCTAssertEqual(source(nil, token: false, loggedIn: true), .web, "the official feed would be anonymous")
+        XCTAssertEqual(source(nil, token: false, loggedIn: true, onlyPortrait: true), .official, "the web feed has hardly any")
+        XCTAssertEqual(source(nil, token: false, loggedIn: false), .official)
+        XCTAssertEqual(source(.web, token: true, loggedIn: true), .web)
+        XCTAssertEqual(source(.web, token: true, loggedIn: true, onlyPortrait: true), .web, "chosen")
+        XCTAssertEqual(source(.official, token: false, loggedIn: true), .official)
+    }
+
+    func testAWebCardGetsItsCountsFromTheLookup() throws {
+        var card = VideoCard(id: "a")
+        card.bvid = "BV1aaaaaaaaa"
+        card.width = 1080
+        card.height = 1920
+        card.likeCount = 3
+        let lookedUp = try JSON(string: #"{"copyright":2,"stat":{"reply":4,"coin":5,"favorite":6,"share":7}}"#)
+        let item = ShortVideoAPI.webItem(from: card, lookedUp: lookedUp)
+        XCTAssertEqual(item.replyCount, 4)
+        XCTAssertEqual(item.coinCount, 5)
+        XCTAssertEqual(item.favoriteCount, 6)
+        XCTAssertEqual(item.shareCount, 7)
+        XCTAssertEqual(item.likeCount, 3)
+        XCTAssertEqual(item.maxCoins, 1, "a reprint")
+        XCTAssertTrue(item.isPortrait)
+    }
+
+    func testAWebCardOfUnknownSizeIsNotTakenForAVerticalVideo() {
+        var card = VideoCard(id: "a")
+        card.bvid = "BV1aaaaaaaaa"
+        XCTAssertFalse(ShortVideoAPI.webItem(from: card, lookedUp: nil).isPortrait)
     }
 
     func testSwipesGoOnlyToVideosOfTheWebFeed() {

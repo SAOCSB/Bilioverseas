@@ -36,11 +36,15 @@ final class PlayerSurfaceView: UIView {
     /// The video a swipe goes to: its picture comes in with the finger and stays until the video shows its own.
     private let swipeCover = PlayerSwipeCoverView()
     /// What `swipeCover` shows.
-    private var swipePicture: PlayerSwipePicture?
-    /// It landed, and stands in for the video until that shows its own picture.
-    private(set) var isHoldingSwipePicture = false
+    private var swipeCoverTarget: PlayerVideoSwipeTarget?
     /// The video a swipe leaves, while it has no picture of its own yet.
     private let leavingCover = PlayerSwipeCoverView()
+    private var leavingCoverTarget: PlayerVideoSwipeTarget?
+    /// It is what stood in for this video when the swipe began.
+    private var leavingCoverHeld = false
+    /// The cover standing in for the video until that shows its own picture.
+    private var holdingCover: PlayerSwipeCoverView?
+    var isHoldingSwipePicture: Bool { holdingCover != nil }
     /// Bumped by every swipe, so a late clean-up of the last one leaves the new one alone.
     private var swipeGeneration = 0
     /// Which edge the target's cover is coming in from.
@@ -130,6 +134,9 @@ final class PlayerSurfaceView: UIView {
             moving.bounds = CGRect(origin: .zero, size: bounds.size)
             moving.center = CGPoint(x: bounds.midX, y: bounds.midY)
         }
+        // The page or the phone can change this size while a picture stands in for the video.
+        if !swipeCover.isHidden, let swipeCoverTarget { swipeCover.show(picture(of: swipeCoverTarget)) }
+        if !leavingCover.isHidden, let leavingCoverTarget { leavingCover.show(picture(of: leavingCoverTarget)) }
         var lanes = bounds.inset(by: UIEdgeInsets(top: danmakuTopInset, left: 0, bottom: 0, right: 0))
         // Over the picture, not over the black around it.
         if let picture = wholePictureRect { lanes = lanes.intersection(picture) }
@@ -144,18 +151,24 @@ final class PlayerSurfaceView: UIView {
     func beginVideoSwipe(leavingCover cover: String?) {
         swipeGeneration += 1
         dismissDanmakuBubble()
-        swipeCover.layer.removeAllAnimations()
+        stopSwipeAnimations()
         swipeCover.alpha = 1
+        leavingCover.alpha = 1
         swipeCover.showsSpinner = false
         // This video has no picture of its own yet: what stands in for it leaves in its place.
-        if isHoldingSwipePicture, let swipePicture {
-            isHoldingSwipePicture = false
-            leavingCover.show(swipePicture)
-            leavingCover.isHidden = false
+        if let holding = holdingCover {
+            let held = holding === swipeCover ? swipeCoverTarget : leavingCoverTarget
+            holdingCover = nil
+            leavingCoverHeld = true
+            setLeavingCover(held)
         } else {
-            if let cover { leavingCover.show(coverPicture(cover, whole: showsWholeOnVerticalScreen)) }
-            leavingCover.isHidden = cover == nil
+            leavingCoverHeld = false
+            setLeavingCover(cover.map { PlayerVideoSwipeTarget(cover: $0, isLandscape: controller?.isVerticalVideo == false) })
         }
+    }
+
+    private func stopSwipeAnimations() {
+        for moving in [videoView, danmaku, leavingCover, swipeCover] as [UIView] { moving.layer.removeAllAnimations() }
     }
 
     /// `target` nil: nothing to go to (yet), so the picture only gives a little.
@@ -166,9 +179,14 @@ final class PlayerSurfaceView: UIView {
     }
 
     private func setSwipeCover(_ target: PlayerVideoSwipeTarget) {
-        let picture = picture(of: target)
-        swipePicture = picture
-        swipeCover.show(picture)
+        swipeCoverTarget = target
+        swipeCover.show(picture(of: target))
+    }
+
+    private func setLeavingCover(_ target: PlayerVideoSwipeTarget?) {
+        leavingCoverTarget = target
+        if let target { leavingCover.show(picture(of: target)) }
+        leavingCover.isHidden = target == nil
     }
 
     /// The picture for `target`, placed the way the video will be (`videoFrame`, `updateVideoGravity`).
@@ -186,7 +204,7 @@ final class PlayerSurfaceView: UIView {
         switch PlayerAspectMode.stored(forVertical: !target.isLandscape) {
         case .fit:
             let fills = onVerticalScreen && VerticalVideoMetrics.fills(video: target.videoSize, area: bounds.size)
-            return PlayerSwipePicture(url: url, frame: bounds, contentMode: fills ? .scaleToFill : .scaleAspectFit, still: nil)
+            return PlayerSwipePicture(url: url, frame: bounds, contentMode: fills ? .scaleAspectFill : .scaleAspectFit, still: nil)
         case .fill:
             return PlayerSwipePicture(url: url, frame: bounds, contentMode: .scaleAspectFill, still: nil)
         case .stretch:
@@ -243,51 +261,63 @@ final class PlayerSurfaceView: UIView {
         } completion: { _ in
             completion()
         }
+        // On its way now, outside this thread, whatever keeps this thread busy next.
+        CATransaction.flush()
     }
 
-    /// Back to the video that was showing.
-    func cancelVideoSwipe() {
+    /// Back to the video that was showing. `holdingPicture`: it still has no picture of its own, so what stood in for it
+    /// goes on doing that.
+    func cancelVideoSwipe(holdingPicture: Bool) {
         swipeGeneration += 1
         let generation = swipeGeneration
         swipeCover.showsSpinner = false
+        if holdingPicture, leavingCoverHeld { holdingCover = leavingCover }
         UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
             self.setVideoSwipe(offset: 0, coverFromBelow: self.swipeCoverFromBelow)
         } completion: { _ in
             guard generation == self.swipeGeneration else { return }
             self.swipeCover.isHidden = true
             self.swipeCover.clearStill()
-            self.leavingCover.isHidden = true
-            self.leavingCover.clearStill()
+            if self.holdingCover !== self.leavingCover {
+                self.leavingCover.isHidden = true
+                self.leavingCover.clearStill()
+            }
         }
     }
 
-    /// The new video is loading: the picture is back in place behind the one that slid in, which stays until the video
-    /// shows its own (`releaseSwipePicture`).
-    func finishVideoSwipe() {
+    /// The new video is loading: the picture is back in place. `holdingPicture`: behind the one that slid in, which stays
+    /// until the video shows its own (`releaseSwipePicture`). Otherwise nothing of the swipe stays.
+    func finishVideoSwipe(holdingPicture: Bool) {
         swipeGeneration += 1
+        stopSwipeAnimations()
         videoView.transform = CGAffineTransform(scaleX: zoomScale, y: zoomScale)
         danmaku.transform = .identity
         leavingCover.transform = .identity
         leavingCover.isHidden = true
+        leavingCover.alpha = 1
         leavingCover.clearStill()
         swipeCover.transform = .identity
+        swipeCover.alpha = 1
         swipeCover.showsSpinner = false
-        // Going on by itself at a video's end, nothing slid in.
-        isHoldingSwipePicture = !swipeCover.isHidden
+        holdingCover = holdingPicture ? swipeCover : nil
+        if !holdingPicture {
+            swipeCover.isHidden = true
+            swipeCover.clearStill()
+        }
     }
 
     /// The video shows its own picture.
     func releaseSwipePicture() {
-        guard isHoldingSwipePicture else { return }
-        isHoldingSwipePicture = false
+        guard let holding = holdingCover else { return }
+        holdingCover = nil
         let generation = swipeGeneration
         UIView.animate(withDuration: 0.08) {
-            self.swipeCover.alpha = 0
+            holding.alpha = 0
         } completion: { _ in
             guard generation == self.swipeGeneration else { return }
-            self.swipeCover.isHidden = true
-            self.swipeCover.alpha = 1
-            self.swipeCover.clearStill()
+            holding.isHidden = true
+            holding.alpha = 1
+            holding.clearStill()
         }
     }
 

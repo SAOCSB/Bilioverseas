@@ -6,13 +6,15 @@ import Foundation
 /// feed never ends. Paging keeps the entry video and counts `display_id` up from 1.
 /// With `SwipeFeedSource.web`, bilibili.com's 推荐 stands in for it, personalised by the web login.
 enum ShortVideoAPI {
-    /// The source chosen, else the one a login personalises: without a TV login the vertical feed is anonymous.
+    /// The source chosen, else the one a login personalises: without a TV login the vertical feed is anonymous. Only
+    /// 「只看竖屏」 stays with it either way, since the web feed has hardly any vertical videos.
     static func source(chosen: SwipeFeedSource?) -> SwipeFeedSource {
-        source(chosen: chosen, hasAppToken: FeedAPI.appAuth() != nil, isLoggedIn: BiliHTTP.shared.isLoggedIn)
+        source(chosen: chosen, hasAppToken: FeedAPI.appAuth() != nil, isLoggedIn: BiliHTTP.shared.isLoggedIn,
+               onlyPortrait: AppSettings.shared.general.swipesOnlyPortrait)
     }
 
-    static func source(chosen: SwipeFeedSource?, hasAppToken: Bool, isLoggedIn: Bool) -> SwipeFeedSource {
-        chosen ?? (!hasAppToken && isLoggedIn ? .web : .official)
+    static func source(chosen: SwipeFeedSource?, hasAppToken: Bool, isLoggedIn: Bool, onlyPortrait: Bool) -> SwipeFeedSource {
+        chosen ?? (!hasAppToken && isLoggedIn && !onlyPortrait ? .web : .official)
     }
 
     /// Why a source would not go by the account, for where it is chosen.
@@ -27,10 +29,20 @@ enum ShortVideoAPI {
     /// previous page's `next`.
     static func feed(start: ShortVideoItem?, cursor: ShortVideoCursor?,
                      source: SwipeFeedSource = .official) async throws -> ShortVideoPage {
-        if source == .web { return try await webFeed(cursor: cursor) }
+        if source == .web {
+            do {
+                return try await webFeed(cursor: cursor)
+            } catch {
+                // Chosen, this is the answer. Only as the login's default, the official feed still works.
+                if ListMapping.isCancellation(error) || AppSettings.shared.general.swipeFeedSource == .web { throw error }
+                let code = (error as? BiliError).map { "\($0)" } ?? "error"
+                PlaybackSession.routeLog?("swipe feed web: \(code.prefix(80)), official instead")
+            }
+        }
         let displayId = cursor?.displayId ?? 1
-        let aid = cursor?.aid ?? start?.aid ?? 0
-        let bvid = cursor?.bvid ?? start?.bvid ?? ""
+        // A web page's cursor knows no video to go on from.
+        let aid = cursor.flatMap { $0.aid != 0 ? $0.aid : nil } ?? start?.aid ?? 0
+        let bvid = cursor.flatMap { $0.bvid.isEmpty ? nil : $0.bvid } ?? start?.bvid ?? ""
         let query = storyQuery(aid: aid, bvid: bvid, displayId: displayId)
         if let auth = FeedAPI.appAuth() {
             var personal = query
@@ -55,16 +67,38 @@ enum ShortVideoAPI {
         return page
     }
 
-    /// bilibili.com's 推荐 as a feed of swipes. Its cards come without a size, which swipes need to show them.
+    /// bilibili.com's 推荐 as a feed of swipes. Its cards come without a size, which swipes need to show them, and without
+    /// most counts: the lookup of the sizes has those too.
     private static func webFeed(cursor: ShortVideoCursor?) async throws -> ShortVideoPage {
         let number = cursor?.displayId ?? 1
-        let cards = try await FeedAPI.recommend(cursor: String(number - 1)).items
-        let sized = await FeedAPI.fillVideoSizes(swipeCards(cards))
+        let cards = swipeCards(try await FeedAPI.recommend(cursor: String(number - 1)).items)
+        let looked = await FeedAPI.lookUpVideos(cards)
+        let sized = FeedAPI.applyVideoSizes(FeedAPI.videoSizes(looked), to: cards)
         let allowed = FeedFilter.liveFilter(scope: .recommend)
-        let page = ShortVideoPage(items: sized.filter(allowed).map(item(from:)),
-                                  next: ShortVideoCursor(aid: 0, bvid: "", displayId: number + 1))
+        let items = zip(cards, sized).filter { allowed($0.1) }.map { card, sized in
+            webItem(from: sized, lookedUp: FeedAPI.sizeLookupID(card).flatMap { looked[$0] })
+        }
+        let page = ShortVideoPage(items: items, next: ShortVideoCursor(aid: 0, bvid: "", displayId: number + 1))
         trace(page, source: "web", number: number)
         return page
+    }
+
+    /// A web card as a video to swipe to. The lookup can miss it, and then it counts as landscape, like nearly all of them.
+    static func webItem(from card: VideoCard, lookedUp: JSON?) -> ShortVideoItem {
+        var v = item(from: card)
+        if let lookedUp {
+            let stat = lookedUp["stat"]
+            v.replyCount = stat["reply"].int64Value
+            v.coinCount = stat["coin"].int64Value
+            v.favoriteCount = stat["favorite"].int64Value
+            v.shareCount = stat["share"].int64Value
+            v.copyright = lookedUp["copyright"].intValue
+        }
+        if v.width <= 0 || v.height <= 0 {
+            v.width = 16
+            v.height = 9
+        }
+        return v
     }
 
     /// The cards of a feed that swipes can go to.

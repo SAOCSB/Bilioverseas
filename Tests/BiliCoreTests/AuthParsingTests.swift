@@ -15,10 +15,14 @@ final class AuthParsingTests: XCTestCase {
         tv.refreshToken = "old-web-refresh"
         let web: (inout StoredSession) -> Void = { $0.refreshToken = "web-refresh" }
 
-        XCTAssertTrue(AuthService.tvLoginJoinsWebLogin(isLoggedIn: true, currentMid: 42, tvMid: 42))
-        XCTAssertFalse(AuthService.tvLoginJoinsWebLogin(isLoggedIn: true, currentMid: 42, tvMid: 7), "another account")
-        XCTAssertFalse(AuthService.tvLoginJoinsWebLogin(isLoggedIn: false, currentMid: nil, tvMid: 42), "no login yet")
-        XCTAssertFalse(AuthService.tvLoginJoinsWebLogin(isLoggedIn: true, currentMid: 42, tvMid: 0), "does not say")
+        func joins(loggedIn: Bool = true, refreshToken: Bool = true, mid: Int64? = 42, tvMid: Int64 = 42) -> Bool {
+            AuthService.tvLoginJoinsWebLogin(isLoggedIn: loggedIn, hasWebRefreshToken: refreshToken, currentMid: mid, tvMid: tvMid)
+        }
+        XCTAssertTrue(joins())
+        XCTAssertFalse(joins(tvMid: 7), "another account")
+        XCTAssertFalse(joins(loggedIn: false, mid: nil), "no login yet")
+        XCTAssertFalse(joins(tvMid: 0), "does not say")
+        XCTAssertFalse(joins(refreshToken: false), "cookies nothing can renew: the new ones are better")
         let same = AuthService.session(after: tv, newMid: 42, update: web)
         XCTAssertEqual(same.accessKey, "tok")
         XCTAssertEqual(same.accessKeyAppKey, AppKey.tv.key)

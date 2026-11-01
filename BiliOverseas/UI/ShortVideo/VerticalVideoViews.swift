@@ -564,28 +564,38 @@ struct VerticalVideoLikeBurst: Identifiable {
 }
 
 /// A finger held on the video for 倍速: once it moves sideways, it is dragging the video's progress. A whole width is the
-/// whole video, from where it was when that began.
+/// whole video, from where it was when that began. Going back there and letting go leaves the video where it has got to.
 struct VerticalVideoPressSeek {
-    let startX: CGFloat
+    private static let slop: CGFloat = 12
+
+    let start: CGPoint
     private var seekStart: Double?
     private var baseX: CGFloat = 0
+    private var lastX: CGFloat = 0
     private(set) var target: Double = 0
 
-    init(startX: CGFloat) {
-        self.startX = startX
+    init(start: CGPoint) {
+        self.start = start
     }
 
     var isSeeking: Bool { seekStart != nil }
 
-    /// The time it drags to, once it does.
-    mutating func moved(toX x: CGFloat, width: CGFloat, time: () -> Double, duration: Double) -> Double? {
+    /// Where letting go takes the video, if anywhere.
+    var releaseTarget: Double? {
+        isSeeking && abs(lastX - baseX) > Self.slop ? target : nil
+    }
+
+    /// The time it drags to, once it does. Mostly downwards it is on its way to the lock instead.
+    mutating func moved(to point: CGPoint, width: CGFloat, time: () -> Double, duration: Double) -> Double? {
         if seekStart == nil {
-            guard abs(x - startX) > 12, duration > 0 else { return nil }
+            let dx = abs(point.x - start.x)
+            guard dx > Self.slop, dx > abs(point.y - start.y), duration > 0 else { return nil }
             seekStart = time()
-            baseX = x
+            baseX = point.x
         }
         guard let seekStart else { return nil }
-        target = min(max(seekStart + Double((x - baseX) / max(width, 1)) * duration, 0), duration)
+        lastX = point.x
+        target = min(max(seekStart + Double((point.x - baseX) / max(width, 1)) * duration, 0), duration)
         return target
     }
 }
@@ -638,21 +648,34 @@ struct VerticalVideoSpeedLockHint: View {
     }
 }
 
+/// The place of the bar while the finger's speed is locked: a tap there ends it, as on the rest of the screen.
+struct VerticalVideoSpeedLockCatch: View {
+    let onTap: () -> Void
+
+    var body: some View {
+        Color.clear
+            .frame(height: VerticalVideoMetrics.bottomBarHeight)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onTap)
+            .ignoresSafeArea(edges: .bottom)
+            .accessibilityHidden(true)
+    }
+}
+
 /// The progress being dragged: a thick bar on the line's place, where it goes above that, and a picture of that moment.
 struct VerticalVideoSeekBar: View {
     let target: Double
     let duration: Double
     var shot: VideoShotInfo?
+    /// A portrait video's shape.
+    var pictureRatio: CGFloat?
 
-    private var thumbnailHeight: CGFloat {
-        guard let shot, shot.tileHeight > 0 else { return 0 }
-        return shot.tileWidth < shot.tileHeight ? 150 : 96
-    }
+    private var thumbnailHeight: CGFloat { pictureRatio == nil ? 96 : 150 }
 
     var body: some View {
         VStack(spacing: 8) {
             if let shot, !shot.isEmpty {
-                PlayerSeekThumbnail(shot: shot, time: target, height: thumbnailHeight)
+                PlayerSeekThumbnail(shot: shot, time: target, height: thumbnailHeight, pictureRatio: pictureRatio)
             }
             HStack(spacing: 4) {
                 Text(PlayerFormat.time(target))

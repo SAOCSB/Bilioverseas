@@ -72,6 +72,8 @@ struct ShortVideoFeedView: View {
         .toolbar(.hidden, for: .tabBar)
         .task { await model.loadInitialIfNeeded() }
         .onAppear {
+            // A swipe back begins with this.
+            VideoMorph.endWaiting()
             let depth = stackDepth ?? router.path.count
             stackDepth = depth
             // A swipe back brings this on while the video's page above it still plays, and may stop halfway. Its path update
@@ -218,7 +220,11 @@ struct ShortVideoFeedView: View {
                                        onClear: { cleared.toggle() },
                                        onFullscreen: { model.showLandscape() })
                     .modifier(ShortVideoSpeedingHidden(speeding: model.landing.isSpeeding))
-                if model.landing.isSpeeding, !model.landing.isPressSeeking, !model.landing.isSpeedLocked {
+                if model.landing.isSpeedLocked {
+                    VerticalVideoSpeedLockCatch {
+                        if let item = model.showing { model.setFastForward(false, item: item) }
+                    }
+                } else if model.landing.isSpeeding, !model.landing.isPressSeeking {
                     VerticalVideoSpeedLockHint(active: model.landing.isOverSpeedLock)
                 }
             }
@@ -414,7 +420,9 @@ struct ShortVideoPageView: View {
                 page(in: geo)
                 // Beside the page, not in it: the page's gestures would take a finger held still on the bar.
                 if let pressTarget {
-                    VerticalVideoSeekBar(target: pressTarget, duration: playback.duration, shot: playback.videoShot)
+                    VerticalVideoSeekBar(target: pressTarget, duration: playback.duration, shot: playback.videoShot,
+                                         pictureRatio: item.height > item.width && item.width > 0
+                                             ? CGFloat(item.width) / CGFloat(item.height) : nil)
                         .offset(y: VerticalVideoMetrics.progressOverhang)
                 } else {
                     progress
@@ -428,6 +436,10 @@ struct ShortVideoPageView: View {
             titleExpanded = false
             press = nil
             pressTarget = nil
+        }
+        // A speed the finger locked would keep the bars away from a video that needs them.
+        .onChange(of: playback.phase) { phase in
+            if case .failed = phase, playback.isFastForward { actions.fastForward(item, false) }
         }
     }
 
@@ -521,8 +533,8 @@ struct ShortVideoPageView: View {
             .foregroundStyle(.white)
             .padding(24)
         default:
-            if playback.isFastForward {
-                VerticalVideoSpeedPill(mode: pressTarget != nil ? .seeking : press == nil ? .locked(speedText) : .speed(speedText))
+            if playback.isFastForward, press != nil {
+                VerticalVideoSpeedPill(mode: pressTarget != nil ? .seeking : .speed(speedText))
             } else if let scrubbing {
                 PlayerPill { Text("\(PlayerFormat.time(scrubbing))/\(PlayerFormat.time(playback.duration))").monospacedDigit() }
                     .allowsHitTesting(false)
@@ -530,6 +542,8 @@ struct ShortVideoPageView: View {
                 PlayerQuietSpinner()
             } else if isCurrent && playback.isPaused && !playback.isStandingBy && playback.phase == .ready {
                 VerticalVideoPausedHint(time: "\(PlayerFormat.time(playback.position)) / \(PlayerFormat.time(playback.duration))")
+            } else if playback.isFastForward {
+                VerticalVideoSpeedPill(mode: .locked(speedText))
             }
         }
     }
@@ -597,8 +611,9 @@ struct ShortVideoPageView: View {
 
     private func tapped() {
         if playback.isFastForward {
-            // The speed the finger locked.
+            // The speed the finger locked, on a video a call may have paused meanwhile.
             actions.fastForward(item, false)
+            if playback.isPaused { actions.togglePlay(item) }
         } else if cleared {
             actions.restoreControls()
         } else {
@@ -607,13 +622,13 @@ struct ShortVideoPageView: View {
     }
 
     private func pressBegan(at location: CGPoint) {
-        press = VerticalVideoPressSeek(startX: location.x)
+        press = VerticalVideoPressSeek(start: location)
         actions.fastForward(item, true)
     }
 
     private func pressMoved(to location: CGPoint, in size: CGSize) {
         guard var moving = press else { return }
-        let target = moving.moved(toX: location.x, width: size.width, time: { playback.position }, duration: playback.duration)
+        let target = moving.moved(to: location, width: size.width, time: { playback.position }, duration: playback.duration)
         press = moving
         if let target {
             if pressTarget == nil {
@@ -627,7 +642,7 @@ struct ShortVideoPageView: View {
     }
 
     private func pressEnded(cancelled: Bool) {
-        let target = pressTarget
+        let target = press?.releaseTarget
         let locks = !cancelled && landing.isOverSpeedLock
         press = nil
         pressTarget = nil

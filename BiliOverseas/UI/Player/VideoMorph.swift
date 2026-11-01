@@ -19,6 +19,7 @@ final class VideoMorph {
     /// Where the video is on the screen before it moves.
     private let start: CGRect
     private var finished = false
+    private var isWaiting = false
 
     /// The video's shape.
     var pictureSize: CGSize { start.size }
@@ -71,6 +72,13 @@ final class VideoMorph {
     /// What is underneath can be touched while the picture waits for the page's own.
     func letTouchesThrough() {
         window.isUserInteractionEnabled = false
+        isWaiting = true
+    }
+
+    /// Something was done on that page before its picture came: the picture goes, and what was done goes as if this were over.
+    static func endWaiting() {
+        guard let current, current.isWaiting else { return }
+        current.finish(fade: 0)
     }
 
     /// Gone, over `fade`; none when what is underneath shows the same picture only once this has given it back.

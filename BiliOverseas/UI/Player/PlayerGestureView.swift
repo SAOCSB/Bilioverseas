@@ -331,7 +331,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             }
             if controller.beginBoost() {
                 boosting = true
-                pressSeek = VerticalVideoPressSeek(startX: g.location(in: self).x)
+                pressSeek = VerticalVideoPressSeek(start: g.location(in: self))
                 pressCid = controller.item?.cid
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 controller.overlay.beginHold()
@@ -347,8 +347,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             guard boosting else { break }
             boosting = false
             let locks = g.state == .ended && controller.overlay.isOverSpeedLock
-            let target = g.state == .ended && pressSeek?.isSeeking == true && controller.item?.cid == pressCid
-                ? pressSeek?.target : nil
+            let target = g.state == .ended && controller.item?.cid == pressCid ? pressSeek?.releaseTarget : nil
             endPressSeek(controller)
             controller.overlay.endHold()
             if locks {
@@ -367,7 +366,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
 
     private func pressMoved(to p: CGPoint, _ controller: PlayerController) {
         guard boosting, var seek = pressSeek, controller.item?.cid == pressCid else { return }
-        let target = seek.moved(toX: p.x, width: bounds.width, time: { controller.displayTime() }, duration: controller.duration)
+        let target = seek.moved(to: p, width: bounds.width, time: { controller.displayTime() }, duration: controller.duration)
         pressSeek = seek
         if let target {
             if controller.overlay.seekPreview == nil { controller.ensureVideoShot() }

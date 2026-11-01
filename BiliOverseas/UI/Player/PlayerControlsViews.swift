@@ -492,6 +492,8 @@ struct PlayerSeekThumbnail: View {
     let shot: VideoShotInfo
     let time: Double
     let height: CGFloat
+    /// The shape of the video in the tile, for leaving out the black a portrait one has at its sides there.
+    var pictureRatio: CGFloat?
 
     @State private var sheetURL = ""
     @State private var sheetImage: UIImage?
@@ -509,7 +511,7 @@ struct PlayerSeekThumbnail: View {
                     .aspectRatio(contentMode: .fill)
             }
         }
-        .frame(width: height * ratio, height: height)
+        .frame(width: height * min(pictureRatio ?? ratio, ratio), height: height)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white, lineWidth: 1.5))
         .task(id: url) {

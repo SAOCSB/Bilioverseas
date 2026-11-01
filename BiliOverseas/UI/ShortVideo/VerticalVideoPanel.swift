@@ -157,7 +157,8 @@ struct VerticalVideoPanelHost: View {
         let top = min(max(metrics.top(for: state.detent) + live.dragOffset, metrics.statusBar), metrics.height)
         ZStack(alignment: .top) {
             if state.isOpen {
-                Color.black.opacity(0.001)
+                // Over the panel at its fullest, only the status bar's black is left of the video.
+                Color.black.opacity(max((metrics.normalTop - top) / max(metrics.normalTop - metrics.statusBar, 1), 0.001))
                     .frame(height: top)
                     .contentShape(Rectangle())
                     .onTapGesture { state.close() }
@@ -165,14 +166,18 @@ struct VerticalVideoPanelHost: View {
             panel
                 .frame(height: metrics.height - min(top, metrics.normalTop))
                 .offset(y: top)
-                .animation(live.animation, value: top)
         }
+        .animation(live.animation, value: top)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .ignoresSafeArea()
         // Next time it opens on the list.
         .onChange(of: state.isOpen) { open in
             if !open { content.comments.subRepliesRoot = nil }
         }
+        // An iPad turns with it open.
+        .background(GeometryReader { geo in
+            Color.clear.onChange(of: geo.size) { _ in state.prepare() }
+        })
     }
 
     private var panel: some View {
@@ -330,17 +335,19 @@ final class VerticalVideoIntroModel: ObservableObject {
     func loadIfNeeded() async {
         guard !started else { return }
         started = true
-        let detail = try? await VideoAPI.detail(ref)
-        self.detail = detail
+        didLoad = false
+        if detail == nil { detail = try? await VideoAPI.detail(ref) }
         let aid = detail?.aid ?? ref.aid
         let bvid = detail?.bvid ?? ref.bvid
-        let cards = (try? await VideoAPI.related(aid: aid, bvid: bvid)) ?? []
-        let allows = FeedFilter.liveFilter(scope: .related)
-        var ids = Set<String>()
-        related = cards.filter { $0.aid != aid && allows($0) && ids.insert($0.id).inserted }
+        let cards = try? await VideoAPI.related(aid: aid, bvid: bvid)
+        if let cards {
+            let allows = FeedFilter.liveFilter(scope: .related)
+            var ids = Set<String>()
+            related = cards.filter { $0.aid != aid && allows($0) && ids.insert($0.id).inserted }
+        }
         didLoad = true
-        // Asked again on the next look: it may have been the connection.
-        if detail == nil { started = false }
+        // Asked again on the next look: it may have been the connection, or this side being left, which cancels these.
+        if detail == nil || cards == nil { started = false }
     }
 }
 

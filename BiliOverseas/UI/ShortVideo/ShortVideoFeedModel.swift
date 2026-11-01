@@ -210,10 +210,9 @@ final class ShortVideoFeedModel: ObservableObject {
     /// 评论 on the video on screen, kept for as long as the panel is about it.
     func panelContent(for item: ShortVideoItem) -> VerticalVideoPanelContent {
         if let kept = panelKept, kept.id == item.id { return kept }
-        let playback = playback(for: item)
         let made = VerticalVideoPanelContent(id: item.id, comments: VideoCommentsModel(oid: item.aid, type: 1),
                                              intro: VerticalVideoIntroModel(ref: item.videoRef),
-                                             onSeek: { [weak playback] in playback?.seek(to: $0) })
+                                             onSeek: { [weak self] in self?.playbacks[item.id]?.seek(to: $0) })
         panelKept = made
         return made
     }
@@ -380,6 +379,7 @@ final class ShortVideoFeedModel: ObservableObject {
     }
 
     func setVisible(_ isVisible: Bool) {
+        if isVisible { VideoMorph.endWaiting() }
         pageVisible = isVisible
         // The fullscreen presentation covers this page, and the video goes on there.
         if !isVisible, isLandscape { return }

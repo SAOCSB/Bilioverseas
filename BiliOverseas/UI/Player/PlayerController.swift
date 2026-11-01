@@ -749,6 +749,7 @@ final class PlayerController: ObservableObject {
     }
 
     func enterFullscreen() {
+        VideoMorph.endWaiting()
         if isVerticalVideo {
             // It came from such a screen: back there, rather than another of them on top.
             if onStoryInstead?() == true { return }
@@ -2573,13 +2574,13 @@ final class PlayerController: ObservableObject {
             // Not from under a sheet: leaving fullscreen closes it, with whatever is being typed there. Once it has
             // gone, what comes next gets the same time to load.
             var waited = false
-            while let self, !Task.isCancelled, self.status == .ended, self.overlay.sheet != nil {
+            while let self, !Task.isCancelled, self.status == .ended, self.overlay.sheet != nil || self.storyPanel.isOpen {
                 waited = true
                 try? await Task.sleep(nanoseconds: 300_000_000)
             }
             if waited { try? await Task.sleep(nanoseconds: 1_200_000_000) }
             // A swipe's video on its way: only `load` ends what this waits for.
-            guard let self, !Task.isCancelled, self.status == .ended, self.overlay.sheet == nil,
+            guard let self, !Task.isCancelled, self.status == .ended, self.overlay.sheet == nil, !self.storyPanel.isOpen,
                   !self.isSwitchingBySwipe else { return }
             if self.storyTurned {
                 self.turnBackToStory()
@@ -2917,8 +2918,9 @@ final class PlayerController: ObservableObject {
               UIApplication.shared.applicationState == .active, !isPiPActive else { return }
         if case .failed = status { return }
         if isFullscreen {
-            // Not while a sheet is open over the fullscreen player (e.g. typing in 发弹幕): exiting would close it.
-            guard overlay.sheet == nil else { return }
+            // Not while a sheet is open over the fullscreen player (e.g. typing in 发弹幕): exiting would close it. The same
+            // for the panel, and what is typed from it.
+            guard overlay.sheet == nil, !storyPanel.isOpen else { return }
             if storyTurned {
                 if orientation == .portrait, fullscreenByRotation { turnBackToStory() }
             } else if isOnVerticalScreen {

@@ -92,11 +92,24 @@ struct VideoDetailView: View {
         // Playing (from the bar, a comment's timestamp, the lock screen …), another tab, fullscreen, PiP or a
         // vertical video: show the player again.
         .onChange(of: player.wantsToPlay) { if $0 { setPlayerCollapsed(false) } }
-        .onChange(of: tab) { if $0 != .comments { setPlayerCollapsed(false) } }
-        .onChange(of: player.isFullscreen) { if $0 { playerCollapsed = false } }
+        // A second-level list out of sight would hold 连播 for no reason to be seen (`commentsHoldAutoNext`).
+        .onChange(of: tab) {
+            if $0 != .comments {
+                setPlayerCollapsed(false)
+                model.comments.subRepliesRoot = nil
+            }
+        }
+        .onChange(of: player.isFullscreen) {
+            if $0 {
+                playerCollapsed = false
+                model.comments.subRepliesRoot = nil
+            }
+        }
         .onChange(of: player.isPiPActive) { if $0 { playerCollapsed = false } }
         .onChange(of: model.isVerticalVideo) { if $0 { playerCollapsed = false } }
         .onDisappear {
+            // It holds this view and so everything the page has, which `lifetime` must be free to let go. Back on appearing.
+            player.onStoryInstead = nil
             // The player's own fullscreen presentation can hide this page; never touch playback then.
             if player.isFullscreen { return }
             if let depth = stackDepth, router.path.count < depth {
@@ -157,6 +170,7 @@ struct VideoDetailView: View {
     /// Back on this page: to the screen its video came from, the way it came (`ShortVideoFeedModel.openPage`). Not when the
     /// page has moved on to another video or folded the picture away: then it is a page like any other.
     private func goBackToScreen() -> Bool {
+        VideoMorph.endWaiting()
         guard !VideoMorph.isRunning, let goingOn = player.goingOn, let item = player.item,
               goingOn.isVideo(aid: item.aid, cid: item.cid), !playerCollapsed, !player.isPiPBusy, !player.isFullscreen,
               let goingBack = goingOn.onGoingBack, player.surface.window != nil,

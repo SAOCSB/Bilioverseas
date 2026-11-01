@@ -1196,7 +1196,7 @@ struct VideoCommentSubRepliesSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            ScrollView {
+            refreshingAsSheet(ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     VideoCommentRow(item: model.root, showsPreview: false, timestamps: timestamps, actions: actions)
                     Rectangle()
@@ -1233,7 +1233,7 @@ struct VideoCommentSubRepliesSheet: View {
                         ScrollPullDownObserver(onPull: { pulled = $0 }, onLetGo: letGo)
                     }
                 }
-            }
+            })
             .task { await model.loadIfNeeded() }
             .safeAreaInset(edge: .bottom) {
                 VideoCommentInputBar(text: model.inputPlaceholder.isEmpty ? "回复 @\(model.root.uname)：" : model.inputPlaceholder) {
@@ -1264,6 +1264,15 @@ struct VideoCommentSubRepliesSheet: View {
         .presentationDragIndicator(.visible)
     }
 
+    /// Pulling it down refreshes it as a sheet of its own. Over a list that lets it go.
+    @ViewBuilder private func refreshingAsSheet<Content: View>(_ content: Content) -> some View {
+        if onClose == nil {
+            content.pullToRefresh { await model.refresh() }
+        } else {
+            content
+        }
+    }
+
     private var header: some View {
         HStack {
             Text("评论详情")
@@ -1283,7 +1292,8 @@ struct VideoCommentSubRepliesSheet: View {
         .frame(height: 44)
         .contentShape(Rectangle())
         // Held by its title bar it comes down the same way.
-        .gesture(onClose == nil ? nil : DragGesture(minimumDistance: 6)
+        // In the window's coordinates: this moves what it would be measured in.
+        .gesture(onClose == nil ? nil : DragGesture(minimumDistance: 6, coordinateSpace: .global)
             .onChanged { pulled = max($0.translation.height, 0) }
             .onEnded { letGo(distance: max($0.translation.height, 0), velocity: $0.predictedEndTranslation.height - $0.translation.height) })
     }

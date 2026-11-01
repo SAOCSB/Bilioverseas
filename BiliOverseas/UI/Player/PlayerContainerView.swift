@@ -331,7 +331,8 @@ struct PlayerChromeView: View {
         }
         if let preview = overlay.seekPreview {
             if verticalScreen {
-                VerticalVideoSeekBar(target: preview.target, duration: preview.duration, shot: controller.videoShot)
+                VerticalVideoSeekBar(target: preview.target, duration: preview.duration, shot: controller.videoShot,
+                                     pictureRatio: controller.isVerticalVideo ? 9.0 / 16.0 : nil)
                     .frame(maxHeight: .infinity, alignment: .bottom)
                     .offset(y: VerticalVideoMetrics.progressOverhang)
                     .opacity(preview.cancelled ? 0.5 : 1)
@@ -574,7 +575,9 @@ struct PlayerChromeView: View {
                                    onFullscreen: { controller.turnStoryLandscape() })
                 .opacity(controller.isBoosting ? 0 : 1)
                 .allowsHitTesting(!controller.isBoosting)
-            if controller.isBoosting, overlay.seekPreview == nil, !controller.isBoostLocked {
+            if controller.isBoostLocked {
+                VerticalVideoSpeedLockCatch { controller.endBoost() }
+            } else if controller.isBoosting, overlay.seekPreview == nil {
                 VerticalVideoSpeedLockHint(active: overlay.isOverSpeedLock)
             }
         }

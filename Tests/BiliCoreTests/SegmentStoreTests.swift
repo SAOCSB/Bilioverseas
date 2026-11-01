@@ -61,8 +61,9 @@ final class SegmentStoreTests: XCTestCase {
         XCTAssertFalse(store.isAccelerating)
 
         clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
-        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == seg && !$0.direct } }
+        let moved = await engineEventually(advancing: clock) { downloader.calls.contains { $0.range == seg && !$0.direct } }
         XCTAssertTrue(moved, "\(downloader.calls)")
+        if !moved { gate.open() }
         let bytes = try await task.value
         XCTAssertEqual(bytes, slice(file, seg))
         XCTAssertFalse(store.isPlain(.video))
@@ -163,8 +164,9 @@ final class SegmentStoreTests: XCTestCase {
         let plain = await engineEventually { downloader.calls.contains { $0.range == second && $0.direct } }
         XCTAssertTrue(plain)
         clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
-        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == second && !$0.direct } }
+        let moved = await engineEventually(advancing: clock) { downloader.calls.contains { $0.range == second && !$0.direct } }
         XCTAssertTrue(moved, "4 s ahead of a playhead that is not moving: the player is waiting for it")
+        if !moved { gate.open() }
         _ = try await task.value
         store.close()
     }
@@ -209,8 +211,9 @@ final class SegmentStoreTests: XCTestCase {
         try await Task.sleep(nanoseconds: 600_000_000)
         XCTAssertFalse(downloader.calls.contains { !$0.direct }, "nobody is waiting")
         store.setForwardLimit(nil)
-        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == seg && !$0.direct } }
+        let moved = await engineEventually(advancing: clock) { downloader.calls.contains { $0.range == seg && !$0.direct } }
         XCTAssertTrue(moved, "taken over: it is late now")
+        if !moved { gate.open() }
         _ = try await task.value
         store.close()
     }
@@ -233,8 +236,9 @@ final class SegmentStoreTests: XCTestCase {
         try await Task.sleep(nanoseconds: 600_000_000)
         XCTAssertFalse(downloader.calls.contains { !$0.direct }, "paused")
         store.updatePlayback(time: 0, rate: 1, playing: false, bufferedAhead: 0, cacheFull: false)
-        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == seg && !$0.direct } }
+        let moved = await engineEventually(advancing: clock) { downloader.calls.contains { $0.range == seg && !$0.direct } }
         XCTAssertTrue(moved, "play pressed: it is late now")
+        if !moved { gate.open() }
         _ = try await task.value
         store.close()
     }
@@ -255,8 +259,9 @@ final class SegmentStoreTests: XCTestCase {
         let plain = await engineEventually { downloader.calls.contains { $0.range == target && $0.direct } }
         XCTAssertTrue(plain)
         clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
-        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == target && !$0.direct } }
+        let moved = await engineEventually(advancing: clock) { downloader.calls.contains { $0.range == target && !$0.direct } }
         XCTAssertTrue(moved, "paused, but the picture at the new position is waiting for this range")
+        if !moved { gate.open() }
         _ = try await task.value
         store.close()
     }
@@ -277,8 +282,9 @@ final class SegmentStoreTests: XCTestCase {
         let plain = await engineEventually { downloader.calls.contains { $0.range == seg && $0.direct } }
         XCTAssertTrue(plain)
         clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
-        let moved = await engineEventually(timeout: 3) { downloader.calls.contains { $0.range == seg && !$0.direct } }
+        let moved = await engineEventually(advancing: clock) { downloader.calls.contains { $0.range == seg && !$0.direct } }
         XCTAssertTrue(moved)
+        if !moved { gate.open() }
         _ = try await task.value
         XCTAssertTrue(store.hasAcceleratedTrack)
         store.close()

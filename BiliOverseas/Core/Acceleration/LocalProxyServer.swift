@@ -45,7 +45,8 @@ enum LocalProxyServerError: Error, Equatable {
 
 final class LocalProxyServer: LocalProxyServing, @unchecked Sendable {
     private enum Phase {
-        case stopped, starting, ready, failed
+        /// `checking`: was ready, and is being connected to (`ensureListening`).
+        case stopped, starting, ready, checking, failed
     }
 
     private weak var handler: LocalProxyRequestHandler?
@@ -59,6 +60,7 @@ final class LocalProxyServer: LocalProxyServing, @unchecked Sendable {
     private var readyWaiters: [UUID: CheckedContinuation<UInt16, Error>] = [:]
     private var connections: [ObjectIdentifier: LocalProxyConnection] = [:]
     private var portChangeHandler: ((UInt16) -> Void)?
+    private static let selfConnectTimeout: TimeInterval = 1
 
     /// - Parameter preferredPort: 0 = let the system pick (normal); the chosen port is reused on every rebind.
     init(handler: LocalProxyRequestHandler, preferredPort: UInt16 = 0) {
@@ -86,7 +88,7 @@ final class LocalProxyServer: LocalProxyServing, @unchecked Sendable {
     var port: UInt16 {
         lock.lock()
         defer { lock.unlock() }
-        return phase == .ready ? boundPort : 0
+        return phase == .ready || phase == .checking ? boundPort : 0
     }
 
     var openConnectionCount: Int {
@@ -97,16 +99,97 @@ final class LocalProxyServer: LocalProxyServing, @unchecked Sendable {
 
     func start() {
         lock.lock()
-        let running = phase == .starting || phase == .ready
+        let running = phase == .starting || phase == .ready || phase == .checking
         let port = preferredPort
         lock.unlock()
         if !running { startListener(port: port, allowFallback: true) }
     }
 
-    /// Foreground check: a listener that died while the app was suspended is rebuilt on the same port.
+    /// Foreground check. The system can take the socket of a suspended app without telling the listener, which then
+    /// goes on reporting ready while every connection is refused (seen on a phone, never in the Simulator: AVPlayer
+    /// fails with -1004 until the app is restarted). Connecting to it is the only way to know, so that is what this
+    /// does; new sessions wait for the answer, and a listener that does not answer is rebuilt on the same port.
     func ensureListening() {
-        start()
+        lock.lock()
+        let wasReady = phase == .ready
+        let port = boundPort
+        let gen = generation
+        if wasReady { phase = .checking }
+        lock.unlock()
+        guard wasReady else {
+            start()
+            return
+        }
+        connectToSelf(port: port) { [weak self] alive in
+            self?.checkEnded(alive: alive, generation: gen, port: port)
+        }
     }
+
+    /// Something connecting here was refused: rebuilds the listener on the same port, whatever it reports.
+    func restartListening() {
+        lock.lock()
+        let starting = phase == .starting
+        let port = preferredPort
+        lock.unlock()
+        if !starting { startListener(port: port, allowFallback: true) }
+    }
+
+    private func connectToSelf(port: UInt16, done: @escaping (Bool) -> Void) {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            done(false)
+            return
+        }
+        let connection = NWConnection(host: .ipv4(.loopback), port: nwPort, using: .tcp)
+        var finished = false
+        // On `queue`, as the state handler and the timer are.
+        let finish: (Bool) -> Void = { alive in
+            guard !finished else { return }
+            finished = true
+            connection.stateUpdateHandler = nil
+            connection.cancel()
+            done(alive)
+        }
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: finish(true)
+            case .failed, .waiting, .cancelled: finish(false)
+            default: break
+            }
+        }
+        connection.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + Self.selfConnectTimeout) { finish(false) }
+    }
+
+    private func checkEnded(alive: Bool, generation gen: Int, port: UInt16) {
+        LocalProxyTrace.log("self-connect to \(port): \(alive ? "answered" : "refused")")
+        lock.lock()
+        guard gen == generation, phase == .checking else {
+            lock.unlock()
+            return
+        }
+        guard alive else {
+            lock.unlock()
+            startListener(port: port, allowFallback: true)
+            return
+        }
+        phase = .ready
+        let waiters = Array(readyWaiters.values)
+        readyWaiters = [:]
+        lock.unlock()
+        for waiter in waiters { waiter.resume(returning: port) }
+    }
+
+    #if DEBUG
+    /// What the system does to a suspended app: the socket goes, and the listener is not told.
+    func debugLoseListenerSilently() {
+        lock.lock()
+        let old = listener
+        listener = nil
+        lock.unlock()
+        old?.stateUpdateHandler = nil
+        old?.cancel()
+    }
+    #endif
 
     func waitUntilReady(timeout: TimeInterval) async throws -> UInt16 {
         start()
@@ -223,7 +306,7 @@ final class LocalProxyServer: LocalProxyServing, @unchecked Sendable {
                 lock.unlock()
                 return
             }
-            let wasReady = phase == .ready
+            let wasReady = phase == .ready || phase == .checking
             self.listener = nil
             phase = .failed
             let samePort = preferredPort

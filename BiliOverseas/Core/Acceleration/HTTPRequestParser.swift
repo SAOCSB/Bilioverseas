@@ -267,6 +267,8 @@ protocol LocalProxyServing: AnyObject {
     func waitUntilReady(timeout: TimeInterval) async throws -> UInt16
     /// After the app returns to the foreground: rebinds the SAME port if the listener died while suspended.
     func ensureListening()
+    /// A connection here was refused: rebuilds the listener, whatever it reports about itself.
+    func restartListening()
     /// Current port, 0 when not listening.
     var port: UInt16 { get }
     /// Called with the new port when the listener could not get its old port back.

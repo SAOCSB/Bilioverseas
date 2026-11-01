@@ -38,6 +38,7 @@ final class ShortVideoPlayback: ObservableObject {
     private var usesAcceleration = false
     /// AVPlayer refused the DASH item, a codec it cannot play for instance, which only shows once it has it: the MP4.
     private var dashFailed = false
+    private var loopbackRetried = false
     private var loadTask: Task<Void, Never>?
     private var timeObserver: Any?
     private var observers: Set<AnyCancellable> = []
@@ -396,6 +397,15 @@ final class ShortVideoPlayback: ObservableObject {
 
     private func itemFailed(message: String?) {
         PlaybackTrace.log("feed item failed \(item.id) \(PlaybackTrace.describe(player.currentItem?.error))")
+        if session != nil, !loopbackRetried, AccelerationEngine.isLoopbackError(player.currentItem?.error) {
+            // The proxy's listener is gone (the app was suspended): the stream is fine.
+            loopbackRetried = true
+            AccelerationEngine.shared.restartListening()
+            if resumeAt == nil, position > 1 { resumeAt = position }
+            teardown()
+            prepare()
+            return
+        }
         guard let session, session.isHLS, session.isEndpointValid, !dashFailed else {
             phase = .failed(message ?? "播放失败")
             runStartedAction()

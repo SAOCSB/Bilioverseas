@@ -154,6 +154,15 @@ final class AccelerationEngineTests: XCTestCase {
         session.close()
     }
 
+    func testAURLErrorOnAProxiedItemIsAboutTheProxy() {
+        let refused = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)
+        XCTAssertTrue(AccelerationEngine.isLoopbackError(refused))
+        XCTAssertTrue(AccelerationEngine.isLoopbackError(NSError(domain: "AVFoundationErrorDomain", code: -11800,
+                                                                 userInfo: [NSUnderlyingErrorKey: refused])))
+        XCTAssertFalse(AccelerationEngine.isLoopbackError(NSError(domain: "AVFoundationErrorDomain", code: -11828)))
+        XCTAssertFalse(AccelerationEngine.isLoopbackError(nil))
+    }
+
     func testOtherModesIgnoreTheAnswer() async throws {
         for mode in [CDNMode.mainland, .original, .overseas] {
             var settings = AccelerationSettings()

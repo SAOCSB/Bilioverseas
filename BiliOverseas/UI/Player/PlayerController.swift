@@ -295,6 +295,8 @@ final class PlayerController: ObservableObject {
     private(set) var waitBegan = ProcessInfo.processInfo.systemUptime
     private var tracedPlaying = false
     private var lastItemError: Error?
+    /// This video already restarted the proxy once (`handleFailure`).
+    private var loopbackRetried = false
 
     /// Optional: when set, the fullscreen bar shows 「上一集」 and the lock screen offers "previous track".
     var onPrevious: (() -> Void)? {
@@ -1152,13 +1154,17 @@ final class PlayerController: ObservableObject {
             case "登录": ToastCenter.shared.show("该画质需要登录后观看")
             case "HDR": ToastCenter.shared.show("当前设备或设置不支持 HDR，可在「播放设置」中开启")
             case "不支持": ToastCenter.shared.show("当前设备不支持该画质的编码格式")
+            case "不可用": ToastCenter.shared.show("这个视频只有当前画质可以播放")
             default: ToastCenter.shared.show("该画质需要大会员")
             }
             return
         }
         AppSettings.shared.player.preferredQuality = qn
-        guard qn != currentQuality, !isProgressive else { return }
+        guard qn != currentQuality || isProgressive, !isProgressive || playInfo?.isDash == true else { return }
         beginSwitch(message: "正在切换至 \(entry.title)…", toast: "画质已变为：\(entry.title)")
+        // From the MP4 a fallback ended on, back to the streams: a failure keeps the MP4 playing (`installStreams`).
+        forceNoProxy = false
+        fallbackSteps.subtract([.direct, .noProxy])
         manualQuality = qn
         forceAVC = false
         fallbackSteps.subtract([.avc, .lowerQuality])
@@ -1241,11 +1247,12 @@ final class PlayerController: ObservableObject {
         }
         options.sort { $0.qn > $1.qn }
         let loggedIn = BiliHTTP.shared.isLoggedIn
-        if isProgressive {
+        if isProgressive, !info.isDash {
+            // A video with one MP4: there is nothing else to switch to, whoever is watching.
             let current = info.quality
             qualityEntries = options.map { o in
                 PlayerQualityEntry(qn: o.qn, title: o.title, playable: o.qn == current,
-                                   badge: o.qn == current ? nil : (o.needLogin && !loggedIn ? "登录" : "大会员"))
+                                   badge: o.qn == current ? nil : (o.needLogin && !loggedIn ? "登录" : "不可用"))
             }
             currentQuality = current
         } else {
@@ -1781,6 +1788,7 @@ final class PlayerController: ObservableObject {
         forceDirect = false
         forceNoProxy = false
         fallbackSteps = []
+        loopbackRetried = false
         itemReady = false
         startupDone = false
         isSeeking = false
@@ -2052,6 +2060,14 @@ final class PlayerController: ObservableObject {
     private func handleFailure(message: String?) {
         guard item != nil, let info = playInfo else {
             fail(message.map { "播放失败：\($0)" } ?? "播放失败")
+            return
+        }
+        if session != nil, !loopbackRetried, AccelerationEngine.isLoopbackError(lastItemError) {
+            // The proxy's listener is gone (the app was suspended): not the stream's fault, so no fallback step.
+            loopbackRetried = true
+            trace("proxy unreachable \(PlaybackTrace.describe(lastItemError)): restarting it")
+            AccelerationEngine.shared.restartListening()
+            rebuild(position: startupDone ? lastKnownPosition : nil, reason: .endpoint)
             return
         }
         if let session, !session.isEndpointValid {

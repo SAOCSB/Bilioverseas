@@ -361,6 +361,52 @@ final class LocalProxyServerTests: XCTestCase {
         server.stop()
     }
 
+    func testListenerLostSilentlyIsFoundAndRebuiltOnTheSamePort() async throws {
+        final class Handler: LocalProxyRequestHandler {
+            func handle(_ request: ProxyHTTPRequest) async -> LocalProxyResponse { .empty(204) }
+        }
+        let handler = Handler()
+        let server = LocalProxyServer(handler: handler)
+        defer { server.stop() }
+        let port = try await server.waitUntilReady(timeout: 3)
+
+        // Healthy: nothing changes.
+        server.ensureListening()
+        let same = try await server.waitUntilReady(timeout: 3)
+        XCTAssertEqual(same, port)
+        try await EngineRawHTTPClient(port: port).connect()
+
+        // The socket goes while the app is suspended, and the listener still says ready.
+        server.debugLoseListenerSilently()
+        XCTAssertEqual(server.port, port)
+        // The cancel takes a moment; on a phone the socket is long gone by the time the app returns.
+        for _ in 0..<200 {
+            if (try? await EngineRawHTTPClient(port: port).connect()) == nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        server.ensureListening()
+        let rebuilt = try await server.waitUntilReady(timeout: 3)
+        XCTAssertEqual(rebuilt, port, "items already handed to AVPlayer keep their URLs")
+        try await EngineRawHTTPClient(port: rebuilt).connect()
+    }
+
+    func testRestartListeningGivesAWorkingListener() async throws {
+        final class Handler: LocalProxyRequestHandler {
+            func handle(_ request: ProxyHTTPRequest) async -> LocalProxyResponse { .empty(204) }
+        }
+        let handler = Handler()
+        let server = LocalProxyServer(handler: handler)
+        defer { server.stop() }
+        let port = try await server.waitUntilReady(timeout: 3)
+        server.debugLoseListenerSilently()
+        server.restartListening()
+        let rebuilt = try await server.waitUntilReady(timeout: 3)
+        // Same port once the old socket is free; items on another port are rebuilt through `onPortChange`.
+        XCTAssertGreaterThan(rebuilt, 0)
+        XCTAssertGreaterThan(port, 0)
+        try await EngineRawHTTPClient(port: rebuilt).connect()
+    }
+
     func testLoopbackCheck() {
         XCTAssertTrue(LocalProxyServer.isLoopback(.ipv4(.loopback)))
         XCTAssertTrue(LocalProxyServer.isLoopback(.ipv4(IPv4Address("127.0.0.2")!)))

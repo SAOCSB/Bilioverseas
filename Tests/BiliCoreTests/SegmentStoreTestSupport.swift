@@ -315,6 +315,8 @@ final class EngineFakeServer: LocalProxyServing {
     var onPortChange: ((UInt16) -> Void)?
     private(set) var startCount = 0
     private(set) var ensureCount = 0
+    private(set) var restartCount = 0
+    func restartListening() { restartCount += 1 }
     func start() { startCount += 1 }
     func waitUntilReady(timeout: TimeInterval) async throws -> UInt16 { port }
     func ensureListening() { ensureCount += 1 }
@@ -452,6 +454,16 @@ func engineEventually(timeout: Double = 3, _ condition: () -> Bool) async -> Boo
     while Date() < deadline {
         if condition() { return true }
         try? await Task.sleep(nanoseconds: 5_000_000)
+    }
+    return condition()
+}
+
+/// `engineEventually` for something the clock has to reach, which moves it on if that does not happen. A watcher
+/// counts from its first run, and on a busy machine that can come after the test's own advance.
+func engineEventually(advancing clock: EngineTestClock, _ condition: () -> Bool) async -> Bool {
+    for _ in 0..<5 {
+        if await engineEventually(timeout: 1, condition) { return true }
+        clock.advance(ms: SegmentStore.plainFirstByteMs + 1)
     }
     return condition()
 }

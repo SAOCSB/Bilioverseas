@@ -119,6 +119,24 @@ struct ShortVideoFeedView: View {
         )
     }
 
+    @ViewBuilder private var feedMenuItems: some View {
+        Toggle(isOn: Binding(get: { model.portraitOnly }, set: { model.setPortraitOnly($0) })) {
+            Label("只看竖屏", systemImage: "rectangle.portrait")
+        }
+        Picker(selection: Binding(get: { ShortVideoAPI.source(chosen: settings.general.swipeFeedSource) }, set: { source in
+            settings.general.swipeFeedSource = source
+            // `@Published` emits before the value is stored; here it has been.
+            model.sourceMayHaveChanged()
+        })) {
+            ForEach(SwipeFeedSource.allCases) { source in
+                Text(source.title).tag(source)
+            }
+        } label: {
+            Label("推荐来源", systemImage: "sparkles")
+        }
+        .pickerStyle(.menu)
+    }
+
     @ViewBuilder private var placeholder: some View {
         VStack(spacing: 14) {
             if let error = model.errorText {
@@ -133,7 +151,9 @@ struct ShortVideoFeedView: View {
                 ProgressView()
                     .tint(.white)
             } else {
-                Text("暂时没有短视频")
+                Text(model.portraitOnly && ShortVideoAPI.source(chosen: settings.general.swipeFeedSource) == .web
+                     ? ShortVideoAPI.webHasNoPortraitNote : "暂时没有短视频")
+                    .multilineTextAlignment(.center)
                 Button("刷新") { Task { await model.reload() } }
                     .buttonStyle(.bordered)
             }
@@ -148,6 +168,13 @@ struct ShortVideoFeedView: View {
             VerticalVideoTopBar(online: model.onlineText, onBack: { dismiss() }, onSearch: { router.push(.searchHome) }) {
                 if let item = model.showing {
                     moreMenu(item)
+                } else {
+                    // What emptied the feed can be changed here too.
+                    Menu {
+                        feedMenuItems
+                    } label: {
+                        VerticalVideoBarIcon(systemName: "ellipsis", upright: true)
+                    }
                 }
             }
         }
@@ -209,21 +236,7 @@ struct ShortVideoFeedView: View {
                     Label("不感兴趣", systemImage: "hand.thumbsdown")
                 }
             }
-            Toggle(isOn: Binding(get: { model.portraitOnly }, set: { model.setPortraitOnly($0) })) {
-                Label("只看竖屏", systemImage: "rectangle.portrait")
-            }
-            Picker(selection: Binding(get: { ShortVideoAPI.source(chosen: settings.general.swipeFeedSource) }, set: { source in
-                settings.general.swipeFeedSource = source
-                // `@Published` emits before the value is stored; here it has been.
-                model.sourceMayHaveChanged()
-            })) {
-                ForEach(SwipeFeedSource.allCases) { source in
-                    Text(source.title).tag(source)
-                }
-            } label: {
-                Label("推荐来源", systemImage: "sparkles")
-            }
-            .pickerStyle(.menu)
+            feedMenuItems
             if settings.acceleration.enabled {
                 Toggle(isOn: Binding(get: { settings.acceleration.verticalVideosDirect }, set: { direct in
                     settings.acceleration.verticalVideosDirect = direct

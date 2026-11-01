@@ -606,7 +606,8 @@ final class PlayerController: ObservableObject {
         }
         if let current = item, current != newItem { PlaybackTrace.log("left \(current.bvid)") }
         let swiped = isSwitchingBySwipe
-        itemCameFromSwipe = swiped
+        // The same video again (重试, the next part) stays what it was.
+        itemCameFromSwipe = swiped || (itemCameFromSwipe && item?.aid == newItem.aid)
         if !swiped { waitBegan = ProcessInfo.processInfo.systemUptime }
         tracedPlaying = false
         // Auto-next (or another part tapped while playing) keeps playing even with 「自动播放」 off, and so does a
@@ -867,7 +868,7 @@ final class PlayerController: ObservableObject {
     /// This video is on the swipes, whatever Picture in Picture is doing for now.
     var isOnTheSwipes: Bool {
         guard videoSwipeTarget != nil, item?.epId == 0, AppSettings.shared.general.portraitOpensShortVideo else { return false }
-        return storyTurned || isVerticalVideo || (isFullscreen ? fullscreenIsStory : itemCameFromSwipe)
+        return storyTurned || isVerticalVideo || itemCameFromSwipe || (isFullscreen && fullscreenIsStory)
     }
 
     /// The finger moved: `offset` from where it started (negative is up, towards the next video). A drag that began
@@ -947,7 +948,7 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    /// The page goes on by itself to the video a swipe would go to (this one ended): it comes up the same way.
+    /// The page goes on by itself to the video a swipe would go to (this one ended, or 下一集): it comes up the same way.
     func beginAutomaticVideoSwipe() {
         waitBegan = ProcessInfo.processInfo.systemUptime
         // It ended under a finger: the picture goes back, and that drag is over.
@@ -1077,7 +1078,10 @@ final class PlayerController: ObservableObject {
 
     /// A page is opening `item`, and its detail takes a round trip of its own: the stream starts next to it.
     func prepareStreamAhead(of item: PlaybackItem) {
-        guard self.item == nil, streamPreloads.isEmpty, AppSettings.shared.player.autoPlay else { return }
+        let settings = AppSettings.shared
+        guard self.item == nil, streamPreloads.isEmpty, settings.player.autoPlay else { return }
+        // 「竖屏视频禁用加速」: the shape decides the route, and the detail that says it is what this runs next to.
+        guard !(settings.acceleration.enabled && settings.acceleration.verticalVideosDirect) else { return }
         streamPreloads = [makeStreamPreload(of: item, prefetch: PlayerStreamPreload.prefetchSeconds)]
     }
 
@@ -1187,8 +1191,10 @@ final class PlayerController: ObservableObject {
         forceDirect = false
         forceNoProxy = false
         resetRetake()
+        // One still alive goes on meanwhile, and may be seeked: the new one then opens where that has got to.
+        let alive = playerItem?.status == .readyToPlay && player.currentItem === playerItem
         status = .loading
-        rebuild(position: lastKnownPosition, reason: .retry)
+        rebuild(position: alive ? nil : lastKnownPosition, reason: .retry)
     }
 
     // MARK: Page integration
@@ -2483,7 +2489,8 @@ final class PlayerController: ObservableObject {
         let total = duration
         var target = max(0, raw)
         if total > 0 { target = min(target, total) }
-        guard itemReady, let observed = playerItem, player.currentItem === observed else {
+        // A failed item cannot seek, and a rebuild is on its way or a retry will be.
+        guard itemReady, let observed = playerItem, player.currentItem === observed, observed.status == .readyToPlay else {
             // Not ready yet: becomes the start position.
             pendingStartTime = target
             lastKnownPosition = target
@@ -2614,8 +2621,9 @@ final class PlayerController: ObservableObject {
                 }
             } else {
                 let forward = playerItem?.preferredForwardBufferDuration ?? forwardBufferSeconds
-                // Rate 0 tells a pause from waiting to play. A seek while paused is waited for.
-                let r = !wantsToPlay && !isSeeking ? 0 : player.rate > 0 ? Double(player.rate) : effectiveRate
+                // Rate 0 tells a pause from waiting to play. A seek while paused is waited for, and so is the start the
+                // playlists stand in for.
+                let r = !wantsToPlay && !isSeeking && playlistStartTime == nil ? 0 : player.rate > 0 ? Double(player.rate) : effectiveRate
                 session.update(time: t, rate: r, playing: playing, bufferedAhead: ahead,
                                cacheFull: ahead >= forward - 1)
             }
@@ -2753,6 +2761,8 @@ final class PlayerController: ObservableObject {
         if wantsToPlay, item != nil, status != .playing, status != .buffering, !isPiPBusy {
             wantsToPlay = false
             resumeOnContainerAppear = true
+            // It may have its rate already (`installItem`).
+            player.pause()
         }
     }
 

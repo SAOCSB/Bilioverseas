@@ -37,6 +37,8 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     private var panMode: PanMode = .undecided
     private var panStartPoint: CGPoint = .zero
     private var panStartTime: Double = 0
+    /// The part a seek pan began on: a seek means nothing on the next video.
+    private var panCid: Int64?
     private var panTarget: Double = 0
     private var panCancelled = false
     private var lastTranslation: CGPoint = .zero
@@ -377,6 +379,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         }
         if dx > 3 * dy {
             panMode = .seek
+            panCid = controller.item?.cid
             panStartTime = controller.displayTime()
             panTarget = panStartTime
             controller.overlay.beginHold()
@@ -415,6 +418,11 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         case .undecided, .ignored:
             return
         case .seek:
+            guard controller.item?.cid == panCid else {
+                panCancelled = true
+                controller.overlay.seekPreview = nil
+                return
+            }
             let total = controller.duration
             // 「滑动快进/快退时长」: a full-width swipe.
             let window = min(max(AppSettings.shared.player.slideSeekSeconds, 5), 600)
@@ -467,7 +475,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
             controller.overlay.seekPreview = nil
             controller.overlay.clearHint()
             controller.overlay.endHold()
-            if committed, !panCancelled {
+            if committed, !panCancelled, controller.item?.cid == panCid {
                 controller.seek(to: panTarget)
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             }

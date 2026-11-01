@@ -17,6 +17,9 @@ enum ShortVideoAPI {
         chosen ?? (!hasAppToken && isLoggedIn && !onlyPortrait ? .web : .official)
     }
 
+    /// Why swipes have nowhere to go with 「只看竖屏」 on the web feed.
+    static let webHasNoPortraitNote = "网页推荐基本没有竖屏视频，可以关闭只看竖屏，或换成官方竖屏流"
+
     /// Why a source would not go by the account, for where it is chosen.
     static func loginNote(for source: SwipeFeedSource) -> String? {
         switch source {

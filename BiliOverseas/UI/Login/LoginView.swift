@@ -98,7 +98,7 @@ struct LoginView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             if auth.isLoggedIn {
-                Text("当前已登录「\(auth.profile?.name ?? "账号")」，重新登录将切换账号")
+                Text("当前已登录「\(auth.profile?.name ?? "账号")」。同一账号扫码会同时保留两种登录，其他账号扫码将切换账号")
                     .font(.caption)
                     .foregroundStyle(Color.biliPink)
                     .multilineTextAlignment(.center)

@@ -672,6 +672,8 @@ final class VideoDetailModel: ObservableObject {
         swipeQueueTask?.cancel()
         swipeQueueTask = nil
         dropSwipeContents()
+        // With Picture in Picture the player outlives this page, with nothing left to swipe to.
+        player?.closeStreamPreloads()
         loadTask?.cancel()
         cancelSideTasks()
     }
@@ -689,6 +691,7 @@ final class VideoDetailModel: ObservableObject {
 
     private func load(_ target: VideoRef, inPlace: Bool) {
         abandonSwipe()
+        if inPlace, !isPerformingSwipe { keepSwipePosition() }
         // This replaces a switch still loading: if that one was a swipe's, it did not happen.
         if isSwitching { undoSwipeStep(requeue: true) }
         loadTask?.cancel()
@@ -1055,10 +1058,22 @@ final class VideoDetailModel: ObservableObject {
 
     /// A video of a list that a swipe left on this page goes on from there, as on the trail.
     private func goingOn(_ step: NextStep) -> NextStep {
-        guard case .video(var ref) = step,
-              let time = swipeTrail.last(where: { VideoDetailModel.sameVideo($0, ref) })?.startTime else { return step }
+        guard case .video(var ref) = step, let left = swipeTrail.last(where: { VideoDetailModel.sameVideo($0, ref) }),
+              let time = left.startTime else { return step }
         ref.startTime = time
+        if left.cid != 0 { ref.cid = left.cid }
         return .video(ref)
+    }
+
+    /// Coming back continues where it was left, in that part (from the start when that was about the end). A video left
+    /// before it started has no position of its own: the one it was given still stands.
+    private func keepSwipePosition() {
+        guard let player, let d = detail, swipeTrail.indices.contains(swipeIndex),
+              VideoDetailModel.sameVideo(swipeTrail[swipeIndex], VideoRef(aid: d.aid, bvid: d.bvid)) else { return }
+        swipeTrail[swipeIndex].cid = currentCid
+        guard player.startupDone, player.item?.cid == currentCid else { return }
+        let time = player.displayTime()
+        swipeTrail[swipeIndex].startTime = player.duration > 0 && time >= player.duration - PlayerController.startsOverNearEnd ? 0 : time
     }
 
     /// The trail's current entry is the video showing: auto-next or a 合集 tap may have moved on without a swipe.
@@ -1068,7 +1083,10 @@ final class VideoDetailModel: ObservableObject {
             if (entry.aid != 0 && entry.aid == d.aid) || (!entry.bvid.isEmpty && entry.bvid == d.bvid) { return }
             swipeTrail.removeSubrange((swipeIndex + 1)...)
         }
-        swipeTrail.append(VideoRef(aid: d.aid, bvid: d.bvid, cid: currentCid, title: d.title, cover: d.cover))
+        var entry = VideoRef(aid: d.aid, bvid: d.bvid, cid: currentCid, title: d.title, cover: d.cover)
+        // What it was opened with stands until it is left from somewhere.
+        entry.startTime = ref.startTime
+        swipeTrail.append(entry)
         swipeIndex = swipeTrail.count - 1
     }
 
@@ -1122,15 +1140,7 @@ final class VideoDetailModel: ObservableObject {
         }
         isPerformingSwipe = true
         defer { isPerformingSwipe = false }
-        // Coming back continues where it was left, in that part (from the start when that was about the end). A video
-        // left before it started has no position of its own: the one it was given still stands.
-        if let player, swipeTrail.indices.contains(swipeIndex) {
-            swipeTrail[swipeIndex].cid = currentCid
-            if player.startupDone {
-                let time = player.displayTime()
-                swipeTrail[swipeIndex].startTime = player.duration > 0 && time >= player.duration - PlayerController.startsOverNearEnd ? 0 : time
-            }
-        }
+        keepSwipePosition()
         switch step {
         case .list(.part(let part)):
             selectPart(part)
@@ -1228,7 +1238,9 @@ final class VideoDetailModel: ObservableObject {
     /// Makes ready what swipes to the videos around this one need, so that they need nothing from the network: each
     /// video's detail, and the player's stream once that detail is here. Off the swipes nothing is kept for them.
     private func refreshSwipePreload() {
-        guard !isSwitching, !isCovered, let player, player.item != nil else { return }
+        // While a part is about to replace the one playing, the window around it would close its own stream: `playCurrent`
+        // asks again once it has loaded.
+        guard !isSwitching, !isCovered, let player, let playing = player.item, currentCid == 0 || playing.cid == currentCid else { return }
         guard player.isOnTheSwipes, let showing = detail else {
             dropSwipeContents()
             player.closeStreamPreloads()
@@ -1312,7 +1324,7 @@ final class VideoDetailModel: ObservableObject {
     /// With 「只看竖屏」 on the web feed, more pages will not help.
     private var swipeNothingNextReason: String? {
         guard swipeQueue.isEmpty, swipeQueueSource == .web, AppSettings.shared.general.swipesOnlyPortrait else { return nil }
-        return "网页推荐基本没有竖屏视频，可以关闭只看竖屏，或换成官方竖屏流"
+        return ShortVideoAPI.webHasNoPortraitNote
     }
 
     /// A switch is about to replace the video on show: a swipe back finds its detail here, with the counts and the
@@ -1450,7 +1462,7 @@ final class VideoDetailModel: ObservableObject {
                 noteAutoNextHeld()
                 return
             }
-            if !manual { player?.beginAutomaticVideoSwipe() }
+            player?.beginAutomaticVideoSwipe()
             performSwipe(.next)
             return
         }

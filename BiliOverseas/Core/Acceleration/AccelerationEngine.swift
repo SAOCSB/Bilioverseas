@@ -119,7 +119,8 @@ final class AccelerationEngine: LocalProxyRequestHandler {
         var serverReadyTimeout: TimeInterval = 3
         /// URL-expiry check cadence of every session.
         var refreshCheckInterval: TimeInterval = 5
-        var maxSessions = 4
+        /// The video playing, five each way on the swipes, and one for a page opening on top of them.
+        var maxSessions = 12
     }
 
     private static let staticLock = NSLock()
@@ -607,6 +608,7 @@ final class PlaybackSession {
     private var lastRefreshAttemptMs: Double?
     private var refreshFailures = 0
     private var streams: [MediaKind: DashStream] = [:]
+    private var playlistStart: Double?
 
     init(id: String, routeKey: String, url: URL, isHLS: Bool, port: UInt16, engine: AccelerationEngine, store: SegmentStore,
          downloader: BTRDownloading, tracks: [EngineSessionTrack], playlists: [String: Data],
@@ -703,6 +705,14 @@ final class PlaybackSession {
         }.joined(separator: " ")
     }
 
+    /// The playlists tell the player to start at `time`: it fetches nothing from before it, as a seek after opening
+    /// would have it do. Only for a session of playlists, before the player asks for them.
+    func startPlaylists(at time: Double?) {
+        lock.lock()
+        playlistStart = time
+        lock.unlock()
+    }
+
     /// See `AccelerationEngine.noteInUse`.
     func markInUse() {
         engine?.noteInUse(id)
@@ -712,6 +722,12 @@ final class PlaybackSession {
     func limitPrefetch(toSeconds seconds: Double?) {
         guard !isClosed else { return }
         store.setForwardLimit(seconds)
+    }
+
+    /// See `SegmentStore.trimCache(toBytes:)`.
+    func trimCache(toBytes bytes: Int64) {
+        guard !isClosed else { return }
+        store.trimCache(toBytes: bytes)
     }
 
     var stats: AccelerationStats {
@@ -769,8 +785,12 @@ final class PlaybackSession {
     func respond(to request: ProxyHTTPRequest, name: String) async -> LocalProxyResponse {
         guard !isClosed else { return .notFound }
         let method = request.method.uppercased()
-        if let playlist = playlists[name] {
+        if var playlist = playlists[name] {
             guard method == "GET" || method == "HEAD" else { return .methodNotAllowed }
+            lock.lock()
+            let start = playlistStart
+            lock.unlock()
+            if let start { playlist = HLSPlaylistBuilder.playlist(playlist, startingAt: start) }
             let headers = [("Content-Type", HLSPlaylistBuilder.mpegURLContentType),
                            ("Content-Length", "\(playlist.count)"), ("Cache-Control", "no-cache")]
             return LocalProxyResponse(status: 200, headers: headers, body: method == "HEAD" ? .none : .data(playlist),

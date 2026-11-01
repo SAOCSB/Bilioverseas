@@ -102,6 +102,27 @@ final class AccelerationEngineTests: XCTestCase {
         session.close()
     }
 
+    func testPlaylistsSayWhereToStartOnceTold() async throws {
+        let h = makeHarness(files: [.video: videoFile.data, .audio: audioFile.data])
+        let session = try await h.engine.prepare(request())
+        func playlist(_ name: String) async throws -> String {
+            String(decoding: try await body(await get(h.engine, "/\(token(session))/\(name)", range: nil)), as: UTF8.self)
+        }
+        for name in ["master.m3u8", "v.m3u8", "a.m3u8"] {
+            let plain = try await playlist(name)
+            XCTAssertFalse(plain.contains("EXT-X-START"), name)
+        }
+        session.startPlaylists(at: 30)
+        for name in ["master.m3u8", "v.m3u8", "a.m3u8"] {
+            let told = try await playlist(name)
+            XCTAssertTrue(told.hasPrefix("#EXTM3U\n#EXT-X-START:TIME-OFFSET=30.000,PRECISE=YES\n"), name)
+        }
+        session.startPlaylists(at: nil)
+        let again = try await playlist("master.m3u8")
+        XCTAssertFalse(again.contains("EXT-X-START"), "a later item of this session starts where it is told")
+        session.close()
+    }
+
     func testAutoStaysAcceleratedWithoutAnAnswerThatSaysCached() async throws {
         let h = makeHarness(files: [.video: videoFile.data])
         let session = try await h.engine.prepare(request(audio: .some(nil)))

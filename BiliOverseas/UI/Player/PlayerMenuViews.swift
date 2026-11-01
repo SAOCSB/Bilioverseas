@@ -55,7 +55,7 @@ struct PlayerMenuBuilder {
         case .playMode:
             return settings.player.playRepeat.explanation
         case .swipeSource:
-            return "官方竖屏流按 TV 登录的账号推荐，网页推荐按网页登录的账号推荐。两种登录可以同时存在，在「设置」里登录。切换后从下一个视频开始。"
+            return "官方竖屏流横竖都有，按 TV 登录的账号推荐；网页推荐基本都是横屏视频，按网页登录的账号推荐。两种登录可以同时存在，在「设置」里登录。切换后从下一个视频开始。"
         case .smartSkip:
             if !settings.smartSkip.enabled { return "开启后识别视频中的口播广告并跳过或提示，模式可随时切换" }
             if controller.adSegments.isEmpty { return "当前视频没有识别到广告片段" }

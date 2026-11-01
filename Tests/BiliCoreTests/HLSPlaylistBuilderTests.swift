@@ -119,6 +119,14 @@ final class HLSPlaylistBuilderTests: XCTestCase {
         XCTAssertTrue(estimated.contains("BANDWIDTH=1500000,AVERAGE-BANDWIDTH=1000000,"), estimated)
     }
 
+    func testAPlaylistCanSayWhereToStart() {
+        let playlist = Data("#EXTM3U\n#EXT-X-VERSION:7\n".utf8)
+        XCTAssertEqual(String(decoding: HLSPlaylistBuilder.playlist(playlist, startingAt: 12.5), as: UTF8.self),
+                       "#EXTM3U\n#EXT-X-START:TIME-OFFSET=12.500,PRECISE=YES\n#EXT-X-VERSION:7\n")
+        let other = Data("not a playlist".utf8)
+        XCTAssertEqual(HLSPlaylistBuilder.playlist(other, startingAt: 1), other)
+    }
+
     func testMediaPlaylistWorkedExample() throws {
         let box = EngineSyntheticMP4.sidxBox(timescale: 16000, references: [
             .init(size: 524_288, duration: 80080), .init(size: 498_001, duration: 80080), .init(size: 301_777, duration: 51200),

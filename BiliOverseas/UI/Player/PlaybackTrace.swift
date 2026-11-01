@@ -10,14 +10,25 @@ enum PlaybackTrace {
         return f
     }()
 
+    /// About 3000 lines, half of them when it was last cut.
+    private static let maxBytes = 400_000
+
     static func log(_ line: String) {
         let now = Date()
         queue.async {
             guard let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
             let url = dir.appendingPathComponent("playback-trace.txt")
-            var kept = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-            if kept.count > 60_000 { kept = String(kept.suffix(30_000)) }
-            try? (kept + "\(formatter.string(from: now)) \(line)\n").write(to: url, atomically: true, encoding: .utf8)
+            let new = Data("\(formatter.string(from: now)) \(line)\n".utf8)
+            if let file = try? FileHandle(forWritingTo: url) {
+                defer { try? file.close() }
+                if let size = try? file.seekToEnd(), size < maxBytes {
+                    try? file.write(contentsOf: new)
+                    return
+                }
+            }
+            var kept = ((try? Data(contentsOf: url)) ?? Data()).suffix(maxBytes / 2)
+            if let lineEnd = kept.firstIndex(of: 10) { kept = kept[(lineEnd + 1)...] }
+            try? (kept + new).write(to: url, options: .atomic)
         }
     }
 

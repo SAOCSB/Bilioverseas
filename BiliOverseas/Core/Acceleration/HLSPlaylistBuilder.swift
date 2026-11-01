@@ -131,6 +131,14 @@ enum HLSPlaylistBuilder {
         return text
     }
 
+    /// `playlist` telling the player to start at `time`, with nothing shown from before it.
+    static func playlist(_ playlist: Data, startingAt time: Double) -> Data {
+        let tag = "#EXT-X-START:TIME-OFFSET=\(decimal3(time)),PRECISE=YES\n"
+        let header = Data("#EXTM3U\n".utf8)
+        guard playlist.starts(with: header) else { return playlist }
+        return header + Data(tag.utf8) + playlist.dropFirst(header.count)
+    }
+
     /// `x` with exactly three decimals, independent of the locale ("5.005", "3.200", "60.000").
     static func decimal3(_ x: Double) -> String {
         guard x.isFinite else { return "0.000" }

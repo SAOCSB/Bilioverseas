@@ -568,6 +568,14 @@ final class SegmentStore {
         lock.unlock()
     }
 
+    /// A video kept for later holds no more than `bytes`: what was played goes first, then what is furthest ahead.
+    func trimCache(toBytes bytes: Int64) {
+        let now = clock.nowMs()
+        lock.lock()
+        evictLocked(now: now, limit: bytes)
+        lock.unlock()
+    }
+
     func close() {
         lock.lock()
         guard !closed else {
@@ -848,8 +856,9 @@ final class SegmentStore {
     /// is reading right now (`protecting`) is never dropped (btr-core §9.7). Keeping played segments while
     /// evicting the ones ahead used to throw away fresh downloads — even the one AVPlayer had just asked for — and,
     /// because the planner counted those played bytes as unreclaimable, stopped prefetching under a tight budget.
-    private func evictLocked(now: Double, protecting: SegmentKey? = nil) {
-        guard cachedBytes > budgetBytes else { return }
+    private func evictLocked(now: Double, protecting: SegmentKey? = nil, limit: Int64? = nil) {
+        let limit = limit ?? budgetBytes
+        guard cachedBytes > limit else { return }
         let time = playhead.current(at: now)
         struct Candidate {
             var kind: MediaKind
@@ -877,7 +886,7 @@ final class SegmentStore {
         played.sort { ($0.end, $0.kind.rawValue) < ($1.end, $1.kind.rawValue) }
         ahead.sort { ($0.start, $0.kind.rawValue) > ($1.start, $1.kind.rawValue) }
         for candidate in behind + played + ahead {
-            guard cachedBytes > budgetBytes else { break }
+            guard cachedBytes > limit else { break }
             if let track = tracks[candidate.kind], let data = track.cache.removeValue(forKey: candidate.index) {
                 cachedBytes -= Int64(data.count)
             }

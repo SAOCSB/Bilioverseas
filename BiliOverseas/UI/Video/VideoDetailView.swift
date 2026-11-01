@@ -444,10 +444,19 @@ final class VideoDetailModel: ObservableObject {
         case pgc(PGCSeason, PGCEpisode)
     }
 
-    private struct SwipeContent {
+    /// A video's detail, kept for a swipe going to it.
+    private final class SwipeContent {
         let ref: VideoRef
         let task: Task<Content, Error>
         let madeAt = Date()
+        /// What the task came to; nil while it runs, and when it failed.
+        var content: Content?
+        var isFinished = false
+
+        init(ref: VideoRef, task: Task<Content, Error>) {
+            self.ref = ref
+            self.task = task
+        }
     }
 
     @Published private(set) var ref: VideoRef
@@ -520,9 +529,8 @@ final class VideoDetailModel: ObservableObject {
     private var swipeSourceObservation: AnyCancellable?
     private var swipeSeenIDs: Set<String> = []
     private var swipeFetchNotBefore = Date.distantPast
-    /// The detail of the video the next swipe goes to, fetched ahead, and of the one just left.
-    private var nextContent: SwipeContent?
-    private var leftContent: SwipeContent?
+    /// The details of the videos around this one on the swipes, fetched ahead or kept from when they were shown.
+    private var swipeContents: [SwipeContent] = []
     /// The video ended with the fullscreen comments sheet open: 连播 goes on when that closes.
     private var autoNextHeldBySheet = false
     private var sheetObservation: AnyCancellable?
@@ -638,8 +646,7 @@ final class VideoDetailModel: ObservableObject {
     /// Another page was pushed on top (or another tab was selected).
     func pageCovered() {
         isCovered = true
-        nextContent?.task.cancel()
-        nextContent = nil
+        dropUnfinishedSwipeContents()
         player?.closeStreamPreloads()
     }
 
@@ -662,9 +669,8 @@ final class VideoDetailModel: ObservableObject {
     func pageClosed() {
         swipeQueueTask?.cancel()
         swipeQueueTask = nil
-        nextContent?.task.cancel()
-        nextContent = nil
-        leftContent = nil
+        dropUnfinishedSwipeContents()
+        swipeContents = []
         loadTask?.cancel()
         cancelSideTasks()
     }
@@ -691,7 +697,7 @@ final class VideoDetailModel: ObservableObject {
             phase = .loading
             isRegionLocked = false
         }
-        let known = inPlace ? swipeContent(for: target)?.task : nil
+        let known = inPlace ? swipeContent(for: target).flatMap { Date().timeIntervalSince($0.madeAt) < 600 ? $0.task : nil } : nil
         PlaybackTrace.log("open \(target.bvid)")
         if !inPlace, !target.isPGC, target.cid != 0 {
             var item = PlaybackItem(aid: target.aid, bvid: target.bvid, cid: target.cid, title: target.title)
@@ -1059,13 +1065,13 @@ final class VideoDetailModel: ObservableObject {
     fileprivate func swipeTarget(_ swipe: PlayerVideoSwipe) -> PlayerVideoSwipeTarget? {
         switch swipeStep(swipe) {
         case .list(.part)?:
-            return detail.map { PlayerVideoSwipeTarget(cover: $0.cover, isLandscape: !isVerticalVideo) }
+            return detail.map { PlayerVideoSwipeTarget(cover: $0.cover, isLandscape: !isVerticalVideo, aid: $0.aid) }
         case .list(.episode(let episode))?:
             return PlayerVideoSwipeTarget(cover: episode.cover)
         case .list(.video(let ref))?, .trail(let ref)?:
-            return PlayerVideoSwipeTarget(cover: ref.cover, isLandscape: landscapeAids.contains(ref.aid))
+            return swipePicture(of: ref, cover: ref.cover, isLandscape: landscapeAids.contains(ref.aid))
         case .queue(let item)?:
-            return PlayerVideoSwipeTarget(cover: item.cover, isLandscape: !item.isPortrait)
+            return swipePicture(of: item.videoRef, cover: item.cover, isLandscape: !item.isPortrait)
         case nil:
             // Asked on every frame of a drag: a failing request is not repeated at that pace.
             if swipe == .next, Date() >= swipeFetchNotBefore {
@@ -1074,6 +1080,24 @@ final class VideoDetailModel: ObservableObject {
             }
             return nil
         }
+    }
+
+    /// What the player shows of `ref` while a swipe brings it in; its detail knows more than the feed, once that is here.
+    private func swipePicture(of ref: VideoRef, cover: String, isLandscape: Bool) -> PlayerVideoSwipeTarget {
+        var target = PlayerVideoSwipeTarget(cover: cover, isLandscape: isLandscape, aid: ref.aid)
+        guard case .ugc(let detail)? = swipeContent(for: ref)?.content else { return target }
+        let part = Self.swipePart(detail, target: ref)
+        target.aid = detail.aid
+        if let part, part.displayWidth > 0, part.displayHeight > 0 {
+            target.isLandscape = !part.isVertical
+            target.videoSize = CGSize(width: part.displayWidth, height: part.displayHeight)
+        }
+        // Going on from where it was left, its first frame is not what comes.
+        if (ref.startTime ?? 0) < 0.5, let frame = part?.firstFrame, !frame.isEmpty,
+           ImagePipeline.shared.cached(PlayerSwipeCoverView.firstFrameURL(frame)) != nil {
+            target.firstFrame = frame
+        }
+        return target
     }
 
     fileprivate func performSwipe(_ swipe: PlayerVideoSwipe) {
@@ -1140,42 +1164,95 @@ final class VideoDetailModel: ObservableObject {
         }
     }
 
-    /// Makes ready what a swipe to the next video needs, so that it needs nothing from the network: the video's detail,
-    /// and the player's stream once that detail is here.
-    private func refreshSwipePreload() {
-        guard !isSwitching, !isCovered, let player, player.goesOnBySwipes, let target = nextSwipeRef() else { return }
-        let entry: SwipeContent
-        if let known = swipeContent(for: target) {
-            entry = known
-        } else {
-            nextContent?.task.cancel()
-            entry = SwipeContent(ref: target, task: Task { try await VideoDetailModel.fetch(target) })
-            nextContent = entry
+    /// The videos the next swipes go to, nearest first. A list goes on by its own rule, one at a time.
+    private func swipeRefsAhead() -> [VideoRef] {
+        switch swipeStep(.next) {
+        case .list(.video(let ref))?:
+            return [ref]
+        case .trail?, .queue?:
+            let trail = swipeTrail.indices.contains(swipeIndex + 1) ? Array(swipeTrail[(swipeIndex + 1)...]) : []
+            let queue = swipeQueue.prefix(PlayerStreamPreload.swipeWindow).map { item -> VideoRef in
+                var ref = item.videoRef
+                ref.startTime = 0
+                return ref
+            }
+            return Array((trail + queue).prefix(PlayerStreamPreload.swipeWindow))
+        default:
+            return []
         }
+    }
+
+    /// The videos a swipe back goes to, nearest first.
+    private func swipeRefsBehind() -> [VideoRef] {
+        guard case .trail? = swipeStep(.previous), swipeTrail.indices.contains(swipeIndex) else { return [] }
+        return swipeTrail[..<swipeIndex].suffix(PlayerStreamPreload.swipeWindow).reversed()
+    }
+
+    /// Makes ready what swipes to the videos around this one need, so that they need nothing from the network: each
+    /// video's detail, and the player's stream once that detail is here.
+    private func refreshSwipePreload() {
+        guard !isSwitching, !isCovered, let player, player.goesOnBySwipes else { return }
+        let ahead = swipeRefsAhead(), behind = swipeRefsBehind()
+        let window = ahead + behind
+        swipeContents.removeAll { entry in
+            if window.contains(where: { VideoDetailModel.sameVideo($0, entry.ref) }) { return false }
+            entry.task.cancel()
+            return true
+        }
+        // The nearest first, a few at a time.
+        var fetching = swipeContents.filter { !$0.isFinished }.count
+        for ref in window where fetching < 3 && swipeContent(for: ref) == nil {
+            fetchSwipeContent(ref)
+            fetching += 1
+        }
+        func items(_ refs: [VideoRef]) -> [PlaybackItem] {
+            refs.compactMap { ref in
+                guard case .ugc(let detail)? = swipeContent(for: ref)?.content else { return nil }
+                return VideoDetailModel.swipeItem(detail, target: ref)
+            }
+        }
+        player.preloadStreams(ahead: items(ahead), behind: items(behind))
+    }
+
+    private func fetchSwipeContent(_ ref: VideoRef) {
+        let entry = SwipeContent(ref: ref, task: Task { try await VideoDetailModel.fetch(ref) })
+        swipeContents.append(entry)
         Task { [weak self] in
-            guard let content = try? await entry.task.value, case .ugc(let detail) = content,
-                  let self, !self.isSwitching, !self.isCovered, let next = self.nextSwipeRef(),
-                  VideoDetailModel.sameVideo(next, target),
-                  let item = VideoDetailModel.swipeItem(detail, target: target) else { return }
-            self.player?.preloadStream(of: item)
+            entry.content = try? await entry.task.value
+            entry.isFinished = true
+            guard let self, self.swipeContents.contains(where: { $0 === entry }) else { return }
+            if case .ugc(let detail)? = entry.content { Self.prefetchSwipePictures(detail, ref: ref) }
+            self.refreshSwipePreload()
+        }
+    }
+
+    /// The pictures a swipe would bring in are here before that, as the video is.
+    private static func prefetchSwipePictures(_ detail: VideoDetail, ref: VideoRef) {
+        var urls = [RemoteImage.resolvedURL(detail.cover, width: 640)]
+        if let frame = swipePart(detail, target: ref)?.firstFrame, !frame.isEmpty {
+            urls.append(PlayerSwipeCoverView.firstFrameURL(frame))
+        }
+        for url in urls {
+            Task { _ = await ImagePipeline.shared.image(for: url) }
         }
     }
 
     private func swipeContent(for target: VideoRef) -> SwipeContent? {
-        [nextContent, leftContent].compactMap { $0 }.first {
-            VideoDetailModel.sameVideo($0.ref, target) && Date().timeIntervalSince($0.madeAt) < 600
+        swipeContents.first { VideoDetailModel.sameVideo($0.ref, target) }
+    }
+
+    private func dropUnfinishedSwipeContents() {
+        swipeContents.removeAll { entry in
+            if entry.isFinished { return false }
+            entry.task.cancel()
+            return true
         }
     }
 
     /// A switch is about to replace the video on show: a swipe back finds its detail here, with the counts and the
     /// follow buttons as they stand now (a like of a moment ago included).
     private func keepLeftContent() {
-        nextContent?.task.cancel()
-        nextContent = nil
-        guard var kept = detail, season == nil else {
-            leftContent = nil
-            return
-        }
+        guard var kept = detail, season == nil else { return }
         kept.stat.view = counts.view
         kept.stat.danmaku = counts.danmaku
         kept.stat.like = counts.like
@@ -1187,16 +1264,25 @@ final class VideoDetailModel: ObservableObject {
             kept.staff[index].user.isFollowed = isFollowing(kept.staff[index].user.mid)
         }
         let content = Content.ugc(kept)
-        leftContent = SwipeContent(ref: VideoRef(aid: kept.aid, bvid: kept.bvid), task: Task { content })
+        let ref = VideoRef(aid: kept.aid, bvid: kept.bvid)
+        swipeContents.removeAll { VideoDetailModel.sameVideo($0.ref, ref) }
+        let entry = SwipeContent(ref: ref, task: Task { content })
+        entry.content = content
+        entry.isFinished = true
+        swipeContents.append(entry)
     }
 
     private static func sameVideo(_ a: VideoRef, _ b: VideoRef) -> Bool {
         (a.aid != 0 && a.aid == b.aid) || (!a.bvid.isEmpty && a.bvid == b.bvid)
     }
 
+    private static func swipePart(_ d: VideoDetail, target: VideoRef) -> VideoPart? {
+        (target.cid != 0 ? d.pages.first { $0.cid == target.cid } : nil) ?? d.pages.first
+    }
+
     /// As much of `makeItem` as the player's stream needs, once the page shows this video.
     private static func swipeItem(_ d: VideoDetail, target: VideoRef) -> PlaybackItem? {
-        let part = (target.cid != 0 ? d.pages.first { $0.cid == target.cid } : nil) ?? d.pages.first
+        let part = swipePart(d, target: target)
         let cid = part?.cid ?? d.cid
         guard cid != 0 else { return nil }
         var item = PlaybackItem(aid: d.aid, bvid: d.bvid, cid: cid, title: d.title)
@@ -1213,11 +1299,14 @@ final class VideoDetailModel: ObservableObject {
             && (swipeTrail.indices.contains(swipeIndex + 1) || !swipeQueue.isEmpty)
     }
 
+    private static let swipeQueueTarget = PlayerStreamPreload.swipeWindow + 2
+
     private static func knownPortrait(_ item: ShortVideoItem) -> Bool {
         item.width > 0 && item.height > item.width
     }
 
-    /// Keeps a few videos ready, so a swipe has somewhere to go at once. Pages of the feed can hold none (「只看竖屏」).
+    /// Keeps enough videos ready for those made ready ahead, so a swipe has somewhere to go at once. Pages of the feed can
+    /// hold none (「只看竖屏」).
     private func prefetchSwipeQueueIfNeeded() {
         let source = ShortVideoAPI.source(chosen: AppSettings.shared.general.swipeFeedSource)
         if source != swipeQueueSource {
@@ -1227,7 +1316,7 @@ final class VideoDetailModel: ObservableObject {
             swipeQueueCursor = nil
             swipeQueueSource = source
         }
-        guard swipeQueue.count < 3, swipeQueueTask == nil, season == nil, let d = detail,
+        guard swipeQueue.count < Self.swipeQueueTarget, swipeQueueTask == nil, season == nil, let d = detail,
               AppSettings.shared.general.portraitOpensShortVideo else { return }
         if swipeQueueAnchor == nil {
             var anchor = ShortVideoItem(id: !d.bvid.isEmpty ? d.bvid : "av\(d.aid)")
@@ -1251,10 +1340,7 @@ final class VideoDetailModel: ObservableObject {
                 self.swipeSeenIDs.formUnion(fresh.map(\.id))
                 self.swipeQueue.append(contentsOf: fresh)
                 if !fresh.isEmpty { self.refreshNextAvailability() }
-                for item in fresh.prefix(2) {
-                    Task { _ = await ImagePipeline.shared.image(for: RemoteImage.resolvedURL(item.cover, width: 640)) }
-                }
-                if !fresh.isEmpty || page.next == nil { return }
+                if self.swipeQueue.count >= Self.swipeQueueTarget || page.next == nil { return }
             }
         }
     }
@@ -1417,9 +1503,8 @@ final class VideoDetailModel: ObservableObject {
     /// and follow state shown was loaded for the other session.
     private func reloadAccountState() {
         // Fetched ahead for the account before this one.
-        nextContent?.task.cancel()
-        nextContent = nil
-        leftContent = nil
+        dropUnfinishedSwipeContents()
+        swipeContents = []
         sideDataLoggedIn = BiliHTTP.shared.isLoggedIn
         relationEdits += 1
         relation = VideoRelation()

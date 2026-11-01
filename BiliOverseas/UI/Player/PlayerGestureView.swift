@@ -102,8 +102,9 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         guard let controller else { return false }
         if gestureRecognizer === singleTap { return true }
         if controller.overlay.isLocked { return false }
-        // A swipe is switching the video. A tap still brings up the controls, the way out if that takes long.
-        if controller.isSwitchingBySwipe { return false }
+        // A swipe is switching the video. A tap still brings up the controls, the way out if that takes long, and the
+        // next swipe may begin while this one lands.
+        if controller.isSwitchingBySwipe, gestureRecognizer !== pan { return false }
         if gestureRecognizer === doubleTap { return controller.item != nil }
         if gestureRecognizer === pinch { return controller.item != nil && controller.overlay.panel == nil }
         if gestureRecognizer === longPress {
@@ -369,6 +370,11 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         let dx = abs(t.x)
         let dy = abs(t.y)
         guard dx * dx + dy * dy >= 1 else { return }
+        // The last swipe is still landing: only the next one can begin.
+        if controller.isSwitchingBySwipe, dx > 3 * dy || (dy > 3 * dx && !controller.canSwipeVideos) {
+            panMode = .ignored
+            return
+        }
         if dx > 3 * dy {
             panMode = .seek
             panStartTime = controller.displayTime()

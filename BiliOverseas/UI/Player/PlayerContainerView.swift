@@ -197,7 +197,8 @@ struct PlayerChromeView: View {
     @ViewBuilder
     private var coverLayer: some View {
         let listening = controller.audioOnlyStream != nil
-        if !controller.hasFirstFrame || listening, let cover = controller.item?.cover, !cover.isEmpty {
+        if (!controller.hasFirstFrame && !controller.isHoldingSwipePicture) || listening,
+           let cover = controller.item?.cover, !cover.isEmpty {
             // Where the picture comes (`PlayerSurfaceView.videoFrame`).
             let whole = verticalScreen && !controller.isVerticalVideo
             RemoteImage(url: cover, width: 640, contentMode: whole ? .fit : .fill)
@@ -827,7 +828,6 @@ private struct PlayerVerticalSwipeThrough: ViewModifier {
                         if swiping == nil {
                             let moved = value.translation
                             swiping = abs(moved.height) > 3 * abs(moved.width) && controller.canSwipeVideos
-                                && !controller.isSwitchingBySwipe
                         }
                         if swiping == true { controller.videoSwipeMoved(offset: value.translation.height) }
                     }

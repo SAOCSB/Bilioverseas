@@ -33,8 +33,12 @@ final class PlayerSurfaceView: UIView {
     private var chromeLocked = false
     private var zoomedCid: Int64?
     private var cancellables: [AnyCancellable] = []
-    /// The video a swipe goes to: its cover comes in with the finger and stays until the player's own cover is up.
+    /// The video a swipe goes to: its picture comes in with the finger and stays until the video shows its own.
     private let swipeCover = PlayerSwipeCoverView()
+    /// What `swipeCover` shows.
+    private var swipePicture: PlayerSwipePicture?
+    /// It landed, and stands in for the video until that shows its own picture.
+    private(set) var isHoldingSwipePicture = false
     /// The video a swipe leaves, while it has no picture of its own yet.
     private let leavingCover = PlayerSwipeCoverView()
     /// Bumped by every swipe, so a late clean-up of the last one leaves the new one alone.
@@ -140,10 +144,18 @@ final class PlayerSurfaceView: UIView {
     func beginVideoSwipe(leavingCover cover: String?) {
         swipeGeneration += 1
         dismissDanmakuBubble()
+        swipeCover.layer.removeAllAnimations()
+        swipeCover.alpha = 1
         swipeCover.showsSpinner = false
-        leavingCover.showsWhole = showsWholeOnVerticalScreen
-        leavingCover.setCover(cover ?? "")
-        leavingCover.isHidden = cover == nil
+        // This video has no picture of its own yet: what stands in for it leaves in its place.
+        if isHoldingSwipePicture, let swipePicture {
+            isHoldingSwipePicture = false
+            leavingCover.show(swipePicture)
+            leavingCover.isHidden = false
+        } else {
+            if let cover { leavingCover.show(coverPicture(cover, whole: showsWholeOnVerticalScreen)) }
+            leavingCover.isHidden = cover == nil
+        }
     }
 
     /// `target` nil: nothing to go to (yet), so the picture only gives a little.
@@ -154,8 +166,49 @@ final class PlayerSurfaceView: UIView {
     }
 
     private func setSwipeCover(_ target: PlayerVideoSwipeTarget) {
-        swipeCover.showsWhole = onVerticalScreen && target.isLandscape
-        swipeCover.setCover(target.cover)
+        let picture = picture(of: target)
+        swipePicture = picture
+        swipeCover.show(picture)
+    }
+
+    /// The picture for `target`, placed the way the video will be (`videoFrame`, `updateVideoGravity`).
+    private func picture(of target: PlayerVideoSwipeTarget) -> PlayerSwipePicture {
+        let whole = onVerticalScreen && target.isLandscape
+        if let still = target.still, still.surfaceSize == bounds.size {
+            return PlayerSwipePicture(url: "", frame: bounds, contentMode: .scaleAspectFill, still: still)
+        }
+        guard !target.firstFrame.isEmpty else { return coverPicture(target.cover, whole: whole) }
+        let url = PlayerSwipeCoverView.firstFrameURL(target.firstFrame)
+        if whole {
+            return PlayerSwipePicture(url: url, frame: VerticalVideoMetrics.wholePictureFrame(in: bounds),
+                                      contentMode: .scaleAspectFit, still: nil)
+        }
+        switch PlayerAspectMode.stored(forVertical: !target.isLandscape) {
+        case .fit:
+            let fills = onVerticalScreen && VerticalVideoMetrics.fills(video: target.videoSize, area: bounds.size)
+            return PlayerSwipePicture(url: url, frame: bounds, contentMode: fills ? .scaleToFill : .scaleAspectFit, still: nil)
+        case .fill:
+            return PlayerSwipePicture(url: url, frame: bounds, contentMode: .scaleAspectFill, still: nil)
+        case .stretch:
+            return PlayerSwipePicture(url: url, frame: bounds, contentMode: .scaleToFill, still: nil)
+        case .ratio16x9:
+            return PlayerSwipePicture(url: url, frame: fitted(ratio: 16.0 / 9.0), contentMode: .scaleToFill, still: nil)
+        case .ratio4x3:
+            return PlayerSwipePicture(url: url, frame: fitted(ratio: 4.0 / 3.0), contentMode: .scaleToFill, still: nil)
+        }
+    }
+
+    /// A cover is made for any shape: it fills what the video will take, without saying what the video looks like.
+    private func coverPicture(_ cover: String, whole: Bool) -> PlayerSwipePicture {
+        PlayerSwipePicture(url: cover.isEmpty ? "" : RemoteImage.resolvedURL(cover, width: 640),
+                           frame: whole ? VerticalVideoMetrics.wholePictureFrame(in: bounds) : bounds,
+                           contentMode: whole ? .scaleAspectFit : .scaleAspectFill, still: nil)
+    }
+
+    /// The picture as it is now, to show when going back to this video.
+    func pictureStill() -> PlayerPictureStill? {
+        guard zoomScale == 1, let view = videoView.snapshotView(afterScreenUpdates: false) else { return nil }
+        return PlayerPictureStill(view: view, frame: videoFrame(), surfaceSize: bounds.size)
     }
 
     private func setVideoSwipe(offset: CGFloat, coverFromBelow: Bool) {
@@ -176,13 +229,16 @@ final class PlayerSurfaceView: UIView {
             swipeCover.isHidden = false
             setVideoSwipe(offset: videoView.transform.ty, coverFromBelow: toNext)
         }
-        // Only for a wait long enough to notice: a video made ready ahead takes no longer than the slide.
+        // Only for a wait long enough to notice: a video made ready ahead takes no longer than the slide. After that the
+        // player has a spinner of its own.
         let generation = swipeGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self, generation == self.swipeGeneration else { return }
             self.swipeCover.showsSpinner = true
         }
-        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+        // From where the finger put them (`beginFromCurrentState` would take what is on screen, which is older for a swipe
+        // that begins and ends at once, `PlayerController.goOnAfterLanding`).
+        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut]) {
             self.setVideoSwipe(offset: toNext ? -self.bounds.height : self.bounds.height, coverFromBelow: toNext)
         } completion: { _ in
             completion()
@@ -199,23 +255,39 @@ final class PlayerSurfaceView: UIView {
         } completion: { _ in
             guard generation == self.swipeGeneration else { return }
             self.swipeCover.isHidden = true
+            self.swipeCover.clearStill()
             self.leavingCover.isHidden = true
+            self.leavingCover.clearStill()
         }
     }
 
-    /// The new video is loading: the picture is back in place behind the cover, which goes once the player's own
-    /// (the same image) has taken over.
+    /// The new video is loading: the picture is back in place behind the one that slid in, which stays until the video
+    /// shows its own (`releaseSwipePicture`).
     func finishVideoSwipe() {
         swipeGeneration += 1
-        let generation = swipeGeneration
         videoView.transform = CGAffineTransform(scaleX: zoomScale, y: zoomScale)
         danmaku.transform = .identity
         leavingCover.transform = .identity
         leavingCover.isHidden = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self, generation == self.swipeGeneration else { return }
+        leavingCover.clearStill()
+        swipeCover.transform = .identity
+        swipeCover.showsSpinner = false
+        // Going on by itself at a video's end, nothing slid in.
+        isHoldingSwipePicture = !swipeCover.isHidden
+    }
+
+    /// The video shows its own picture.
+    func releaseSwipePicture() {
+        guard isHoldingSwipePicture else { return }
+        isHoldingSwipePicture = false
+        let generation = swipeGeneration
+        UIView.animate(withDuration: 0.08) {
+            self.swipeCover.alpha = 0
+        } completion: { _ in
+            guard generation == self.swipeGeneration else { return }
             self.swipeCover.isHidden = true
-            self.swipeCover.showsSpinner = false
+            self.swipeCover.alpha = 1
+            self.swipeCover.clearStill()
         }
     }
 
@@ -454,18 +526,35 @@ final class PlayerSurfaceView: UIView {
     }
 }
 
-/// A cover drawn like the player's own while a video loads (`PlayerChromeView.coverLayer`).
+/// What a video looked like when a swipe left it.
+struct PlayerPictureStill {
+    let view: UIView
+    /// Where it goes on the surface.
+    let frame: CGRect
+    /// The surface it was taken on: of no use on one of another size.
+    let surfaceSize: CGSize
+}
+
+/// A video's picture before the video shows it, placed the way the video will be.
+struct PlayerSwipePicture {
+    var url: String
+    var frame: CGRect
+    var contentMode: UIView.ContentMode
+    var still: PlayerPictureStill?
+}
+
+/// A video's picture for as long as the video has none to show: where it was left, its first frame, or its cover.
 final class PlayerSwipeCoverView: UIView {
+    /// An image the size of the phone's screen, or nearly, would take too much memory for five videos.
+    static func firstFrameURL(_ frame: String) -> String { RemoteImage.resolvedURL(frame, width: 300) }
+
     private let imageView = UIImageView()
     private let spinner = UIActivityIndicatorView(style: .medium)
     private var url = ""
+    private var still: UIView?
 
     var showsSpinner = false {
         didSet { showsSpinner ? spinner.startAnimating() : spinner.stopAnimating() }
-    }
-    /// On the vertical-video screen a landscape video's cover shows as that video will (`PlayerSurfaceView.videoFrame`).
-    var showsWhole = false {
-        didSet { if showsWhole != oldValue { setNeedsLayout() } }
     }
 
     override init(frame: CGRect) {
@@ -474,12 +563,7 @@ final class PlayerSwipeCoverView: UIView {
         isUserInteractionEnabled = false
         backgroundColor = .black
         clipsToBounds = true
-        imageView.contentMode = .scaleAspectFill
         addSubview(imageView)
-        let dim = UIView(frame: bounds)
-        dim.backgroundColor = UIColor.black.withAlphaComponent(0.25)
-        dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        addSubview(dim)
         spinner.color = .white
         spinner.hidesWhenStopped = true
         spinner.autoresizingMask = [.flexibleLeftMargin, .flexibleRightMargin, .flexibleTopMargin, .flexibleBottomMargin]
@@ -491,14 +575,29 @@ final class PlayerSwipeCoverView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        imageView.contentMode = showsWhole ? .scaleAspectFit : .scaleAspectFill
-        imageView.frame = showsWhole ? VerticalVideoMetrics.wholePictureFrame(in: bounds) : bounds
+    func show(_ picture: PlayerSwipePicture) {
+        if imageView.contentMode != picture.contentMode { imageView.contentMode = picture.contentMode }
+        if imageView.frame != picture.frame { imageView.frame = picture.frame }
+        setImage(picture.url)
+        if let shown = picture.still {
+            if still !== shown.view || shown.view.superview !== self {
+                clearStill()
+                still = shown.view
+                insertSubview(shown.view, aboveSubview: imageView)
+            }
+            shown.view.frame = shown.frame
+        } else {
+            clearStill()
+        }
     }
 
-    func setCover(_ cover: String) {
-        let next = cover.isEmpty ? "" : RemoteImage.resolvedURL(cover, width: 640)
+    /// It remains the controller's, which may show it again. Here only while it is in this view.
+    func clearStill() {
+        if still?.superview === self { still?.removeFromSuperview() }
+        still = nil
+    }
+
+    private func setImage(_ next: String) {
         guard next != url else { return }
         url = next
         imageView.image = ImagePipeline.shared.cached(next)

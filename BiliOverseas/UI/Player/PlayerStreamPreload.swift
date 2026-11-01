@@ -1,12 +1,18 @@
 import Foundation
 
 /// A video's stream, ready before a swipe goes to it or a page opening it has the detail: the playurl answer, then a
-/// session with its first seconds in the proxy's cache. Or the video a swipe just left, which has all that already.
+/// session with its first seconds in the proxy's cache. Or a video a swipe left, which has all that already.
 /// `PlayerController.load` takes it over; until then nothing plays and little is downloaded.
 @MainActor
 final class PlayerStreamPreload {
-    /// How far ahead a video that may never play downloads.
+    /// How many videos each way are kept ready on the swipes.
+    static let swipeWindow = 5
+    /// How far ahead a video that may never play downloads, when the next swipe goes to it.
     static let prefetchSeconds = 8.0
+    /// And when it is further away: enough to start at once, more when it is next.
+    static let farPrefetchSeconds = 4.0
+    /// What a video left holds at most, around where it would go on.
+    static let leftBytes: Int64 = 24 * 1024 * 1024
     /// An older playurl answer has signed URLs about to run out (`installStreams` replaces such an answer too).
     private static let maxAge: TimeInterval = 20 * 60
 
@@ -20,16 +26,21 @@ final class PlayerStreamPreload {
     private var session: PlaybackSession?
     private var choice: PlayerStreamChoice?
     private var accelerated = false
+    private var prefetch: Double
     private var task: Task<Void, Never>?
     private var closed = false
+    /// Still getting its answer and its session.
+    private(set) var isPreparing = false
 
     /// Starts on the video a swipe would go to. `start` says where it would start, once the answer is in.
     init(item: PlaybackItem, constraints: PlayerStreamConstraints, quality: Int, accelerate: Bool, allowHDR: Bool,
-         start: @escaping (PlayInfo) -> Double) {
+         prefetch: Double, start: @escaping (PlayInfo) -> Double) {
         aid = item.aid
         bvid = item.bvid
         cid = item.cid
         wasLeft = false
+        self.prefetch = prefetch
+        isPreparing = true
         task = Task { [weak self] in
             await self?.prepare(item, constraints: constraints, quality: quality, accelerate: accelerate,
                                 allowHDR: allowHDR, start: start)
@@ -48,10 +59,12 @@ final class PlayerStreamPreload {
         self.session = session
         self.choice = choice
         self.accelerated = accelerated
+        prefetch = Self.prefetchSeconds
     }
 
     private func prepare(_ item: PlaybackItem, constraints: PlayerStreamConstraints, quality: Int, accelerate: Bool,
                          allowHDR: Bool, start: (PlayInfo) -> Double) async {
+        defer { isPreparing = false }
         let began = ProcessInfo.processInfo.systemUptime
         func elapsed() -> Int { Int((ProcessInfo.processInfo.systemUptime - began) * 1000) }
         let answer: PlayInfo
@@ -79,7 +92,7 @@ final class PlayerStreamPreload {
                 made.close()
                 return
             }
-            made.limitPrefetch(toSeconds: Self.prefetchSeconds)
+            made.limitPrefetch(toSeconds: prefetch)
             made.playerWillSeek(to: start(answer), outsideBuffer: true)
             session = made
             choice = picked
@@ -91,8 +104,17 @@ final class PlayerStreamPreload {
         }
     }
 
+    /// What it holds now, for the playback log.
+    var cachedBytes: Int64 { session?.store.cachedByteCount ?? 0 }
+
+    func setPrefetch(seconds: Double) {
+        guard seconds != prefetch else { return }
+        prefetch = seconds
+        session?.limitPrefetch(toSeconds: seconds)
+    }
+
     func matches(_ item: PlaybackItem) -> Bool {
-        guard item.epId == 0, item.cid == cid, !closed,
+        guard item.epId == 0, item.cid == cid, !closed, session?.isEndpointValid != false,
               (aid != 0 && item.aid == aid) || (!bvid.isEmpty && item.bvid == bvid) else { return false }
         return fetchedAt.map { Date().timeIntervalSince($0) < Self.maxAge } ?? true
     }

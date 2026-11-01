@@ -163,12 +163,18 @@ final class PlayerAppEventRelay: NSObject {
                        name: UIApplication.willEnterForegroundNotification, object: nil)
         nc.addObserver(self, selector: #selector(orientationDidChange),
                        name: UIDevice.orientationDidChangeNotification, object: nil)
+        nc.addObserver(self, selector: #selector(didReceiveMemoryWarning),
+                       name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
         nc.addObserver(self, selector: #selector(audioInterruption(_:)),
                        name: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance())
     }
 
     @objc private func didEnterBackground() {
         owner?.appDidEnterBackground()
+    }
+
+    @objc private func didReceiveMemoryWarning() {
+        owner?.keepFewerStreams()
     }
 
     @objc private func willEnterForeground() {

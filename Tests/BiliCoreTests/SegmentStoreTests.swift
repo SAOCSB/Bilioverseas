@@ -531,6 +531,22 @@ final class SegmentStoreTests: XCTestCase {
         store.close()
     }
 
+    func testAVideoLeftKeepsWhatIsNearestAhead() throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: Array(repeating: 100_000, count: 10),
+                                           durations: Array(repeating: 20_000, count: 10))
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        downloader.gate = EngineAsyncGate() // never opens: planner downloads stay pending
+        let store = try makeStore(file, downloader: downloader)
+        store.seek(to: 100, outsideBuffer: true)
+        let blob = Data(count: 100_000)
+        for i in 0..<10 { store.debugInsert(.video, index: i, data: blob) }
+        store.trimCache(toBytes: 300_000)
+        XCTAssertEqual(store.debugCachedIndices(.video), [4, 5, 6], "what was played goes first, then the farthest ahead")
+        XCTAssertEqual(store.cachedByteCount, 300_000)
+        XCTAssertTrue(store.isCached(at: 105), "it goes on from here")
+        store.close()
+    }
+
     /// Regression: with a budget smaller than "30 s behind + forward", eviction kept segments AVPlayer had already
     /// played and dropped the farthest ahead — the segment AVPlayer had just requested — while the planner counted
     /// the played bytes as unreclaimable and stopped prefetching. Played segments must go first, and the segment

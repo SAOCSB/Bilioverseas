@@ -108,7 +108,7 @@ extension PlayerController {
             surface.videoView.playerLayer.player = nil
             if !wantsToPlay, !isSwitchingBySwipe { play() }
         } else {
-            if wantsToPlay { pause() }
+            if wantsToPlay { pauseForBackground() }
             pausedByBackground = true
         }
     }

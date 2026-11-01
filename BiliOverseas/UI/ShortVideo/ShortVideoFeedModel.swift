@@ -206,11 +206,14 @@ final class ShortVideoFeedModel: ObservableObject {
     func setPortraitOnly(_ on: Bool) {
         portraitOnly = on
         AppSettings.shared.general.swipesOnlyPortrait = on
+        if on {
+            items = items.enumerated().filter { $0.offset <= index || $0.element.isPortrait }.map(\.element)
+            activate()
+        }
         // Without a source chosen, this can change it.
-        defer { sourceMayHaveChanged() }
-        guard on else { return }
-        items = items.enumerated().filter { $0.offset <= index || $0.element.isPortrait }.map(\.element)
-        activate()
+        sourceMayHaveChanged()
+        // A feed it had emptied, with nothing on screen to ask for more.
+        if !on, items.isEmpty, !isLoading { Task { await loadMore() } }
     }
 
     // MARK: 全屏

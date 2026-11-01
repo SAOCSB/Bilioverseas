@@ -959,7 +959,8 @@ final class PlayerController: ObservableObject {
             controlsBeforeSwipe = overlay.controlsVisible
         }
         isSwitchingBySwipe = true
-        playAfterFailedSwipe = false
+        // 下一集 leaves the video playing until the next one is there, or until the app left it paused.
+        playAfterFailedSwipe = status != .ended && (wantsToPlay || pausedByBackground)
     }
 
     /// A swipe made while the last one was landing.
@@ -974,6 +975,13 @@ final class PlayerController: ObservableObject {
             self.videoSwipeMoved(offset: direction)
             self.videoSwipeEnded(offset: direction, velocity: direction * 1000)
         }
+    }
+
+    /// The app left without 后台播放. Not the viewer's pause: a switch failing meanwhile still brings this video back.
+    func pauseForBackground() {
+        let resumeAfterFailedSwipe = playAfterFailedSwipe
+        pause()
+        playAfterFailedSwipe = resumeAfterFailedSwipe
     }
 
     /// The app or the page is going away: one swipe made just before is not meant to go off when it comes back.

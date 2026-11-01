@@ -268,10 +268,13 @@ final class PlayerSurfaceView: UIView {
     /// Back to the video that was showing. `holdingPicture`: it still has no picture of its own, so what stood in for it
     /// goes on doing that.
     func cancelVideoSwipe(holdingPicture: Bool) {
+        // Going on by itself nothing moved, and a picture standing in for this video just goes on doing that.
+        if holdingCover === swipeCover { return }
         swipeGeneration += 1
         let generation = swipeGeneration
         swipeCover.showsSpinner = false
         if holdingPicture, leavingCoverHeld { holdingCover = leavingCover }
+        leavingCoverHeld = false
         UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
             self.setVideoSwipe(offset: 0, coverFromBelow: self.swipeCoverFromBelow)
         } completion: { _ in
@@ -299,6 +302,7 @@ final class PlayerSurfaceView: UIView {
         swipeCover.transform = .identity
         swipeCover.alpha = 1
         swipeCover.showsSpinner = false
+        leavingCoverHeld = false
         holdingCover = holdingPicture ? swipeCover : nil
         if !holdingPicture {
             swipeCover.isHidden = true

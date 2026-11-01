@@ -1035,7 +1035,7 @@ final class VideoDetailModel: ObservableObject {
             // The rest of the list comes first, once it is loaded.
             if case .pending? = position { return nil }
             if case .end? = position, AppSettings.shared.player.playRepeat == .listCycle, let first = firstListStep() {
-                return .list(goingOn(first))
+                return .list(first)
             }
             // 「只看竖屏」 may have come on since these were played or queued, and a list, 合集 or auto-next may have played
             // the queued ones.
@@ -1058,9 +1058,10 @@ final class VideoDetailModel: ObservableObject {
 
     /// A video of a list that a swipe left on this page goes on from there, as on the trail.
     private func goingOn(_ step: NextStep) -> NextStep {
-        guard case .video(var ref) = step, let left = swipeTrail.last(where: { VideoDetailModel.sameVideo($0, ref) }),
-              let time = left.startTime else { return step }
-        ref.startTime = time
+        guard case .video(var ref) = step, let left = swipeTrail.last(where: { VideoDetailModel.sameVideo($0, ref) }) else {
+            return step
+        }
+        if let time = left.startTime { ref.startTime = time }
         if left.cid != 0 { ref.cid = left.cid }
         return .video(ref)
     }
@@ -1070,6 +1071,8 @@ final class VideoDetailModel: ObservableObject {
     private func keepSwipePosition() {
         guard let player, let d = detail, swipeTrail.indices.contains(swipeIndex),
               VideoDetailModel.sameVideo(swipeTrail[swipeIndex], VideoRef(aid: d.aid, bvid: d.bvid)) else { return }
+        // A time it has belongs to the part it was kept for.
+        if swipeTrail[swipeIndex].cid != currentCid { swipeTrail[swipeIndex].startTime = nil }
         swipeTrail[swipeIndex].cid = currentCid
         guard player.startupDone, player.item?.cid == currentCid else { return }
         let time = player.displayTime()

@@ -225,9 +225,23 @@ final class AuthService: ObservableObject, @unchecked Sendable {
                                 refreshToken: refreshToken.isEmpty ? nil : refreshToken)
     }
 
-    /// TV QR success: cookie_info cookies + `access_key` (minted for `AppKey.tv`).
+    /// Whether a TV login joins the login there is, which keeps its cookies and web refresh token: the same account.
+    /// Anything else (no login, another account, a result that does not say) takes the cookies that came with it.
+    static func tvLoginJoinsWebLogin(isLoggedIn: Bool, currentMid: Int64?, tvMid: Int64) -> Bool {
+        isLoggedIn && tvMid != 0 && currentMid == tvMid
+    }
+
+    /// A TV login stands next to a web login, whichever came first (`session(after:)` for the other order).
+    var hasTVLogin: Bool { accessKey != nil }
+    /// The web refresh token of a web QR login. A TV login's cookies have none, and work for web requests all the same.
+    var hasWebRefreshToken: Bool { locked { tokens.refreshToken?.isEmpty == false } }
+
+    /// TV QR success: `access_key` (minted for `AppKey.tv`), and cookie_info cookies unless it joins a web login.
     func completeTVLogin(_ result: TVLoginResult) async {
-        await applyLogin(cookies: result.cookies, replaceExisting: true) { t in
+        let joins = AuthService.tvLoginJoinsWebLogin(isLoggedIn: http.isLoggedIn, currentMid: http.mid, tvMid: result.mid)
+        let webRefreshToken = locked { tokens.refreshToken }
+        await applyLogin(cookies: joins ? [] : result.cookies, replaceExisting: !joins) { t in
+            if joins { t.refreshToken = webRefreshToken }
             t.accessKey = result.accessToken
             t.accessKeyAppKey = AppKey.tv.key
             t.accessKeyMid = result.mid != 0 ? result.mid : nil

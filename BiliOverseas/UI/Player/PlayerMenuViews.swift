@@ -42,6 +42,7 @@ struct PlayerMenuBuilder {
         case .chapters: return chapterRows()
         case .episodes: return episodeRows()
         case .smartSkip: return smartSkipRows()
+        case .swipeSource: return swipeSourceRows()
         }
     }
 
@@ -53,6 +54,8 @@ struct PlayerMenuBuilder {
             return "HEVC 更省流量；遇到花屏或卡顿可切换为 AVC"
         case .playMode:
             return settings.player.playRepeat.explanation
+        case .swipeSource:
+            return "官方竖屏流按 TV 登录的账号推荐，网页推荐按网页登录的账号推荐。两种登录可以同时存在，在「设置」里登录。切换后从下一个视频开始。"
         case .smartSkip:
             if !settings.smartSkip.enabled { return "开启后识别视频中的口播广告并跳过或提示，模式可随时切换" }
             if controller.adSegments.isEmpty { return "当前视频没有识别到广告片段" }
@@ -170,6 +173,18 @@ struct PlayerMenuBuilder {
         }
     }
 
+    private func swipeSourceRows() -> [PlayerMenuRow] {
+        let current = ShortVideoAPI.source(chosen: settings.general.swipeFeedSource)
+        return SwipeFeedSource.allCases.map { source in
+            PlayerMenuRow(id: "swipeSource.\(source.rawValue)", title: source.title,
+                          detail: ShortVideoAPI.loginNote(for: source), selected: source == current,
+                          kind: .action {
+                              settings.general.swipeFeedSource = source
+                              close()
+                          })
+        }
+    }
+
     private func playModeRows() -> [PlayerMenuRow] {
         PlayRepeat.allCases.map { mode in
             PlayerMenuRow(id: "playMode.\(mode.rawValue)", title: mode.title,
@@ -275,6 +290,9 @@ struct PlayerMenuBuilder {
                 rows.append(PlayerMenuRow(id: "more.portraitOnly", title: "只看竖屏",
                                           kind: .toggle(Binding(get: { settings.general.swipesOnlyPortrait },
                                                                 set: { settings.general.swipesOnlyPortrait = $0 }))))
+                rows.append(PlayerMenuRow(id: "more.swipeSource", title: "竖屏推荐来源",
+                                          detail: ShortVideoAPI.source(chosen: settings.general.swipeFeedSource).title,
+                                          chevron: true, kind: .action { navigate(.swipeSource) }))
             }
         }
         let qualityTitle = controller.qualityEntries.first { $0.qn == controller.currentQuality }?.title

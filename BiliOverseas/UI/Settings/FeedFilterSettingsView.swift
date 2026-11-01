@@ -102,6 +102,12 @@ struct FeedFilterSettingsView: View {
                 Toggle("显示上次看到位置提示", isOn: $settings.general.showLastSeenHint)
                     .disabled(!settings.general.keepRecommendOnRefresh)
                 Toggle("竖屏视频进入短视频", isOn: $settings.general.portraitOpensShortVideo)
+                Picker("竖屏推荐来源", selection: Binding(get: { ShortVideoAPI.source(chosen: settings.general.swipeFeedSource) },
+                                                     set: { settings.general.swipeFeedSource = $0 })) {
+                    ForEach(SwipeFeedSource.allCases) { source in
+                        Text(source.title).tag(source)
+                    }
+                }
             } header: {
                 Text("首页推荐")
             } footer: {

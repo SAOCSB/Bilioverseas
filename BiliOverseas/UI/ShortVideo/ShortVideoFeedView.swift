@@ -212,6 +212,18 @@ struct ShortVideoFeedView: View {
             Toggle(isOn: Binding(get: { model.portraitOnly }, set: { model.setPortraitOnly($0) })) {
                 Label("只看竖屏", systemImage: "rectangle.portrait")
             }
+            Picker(selection: Binding(get: { ShortVideoAPI.source(chosen: settings.general.swipeFeedSource) }, set: { source in
+                settings.general.swipeFeedSource = source
+                // `@Published` emits before the value is stored; here it has been.
+                model.sourceMayHaveChanged()
+            })) {
+                ForEach(SwipeFeedSource.allCases) { source in
+                    Text(source.title).tag(source)
+                }
+            } label: {
+                Label("推荐来源", systemImage: "sparkles")
+            }
+            .pickerStyle(.menu)
             if settings.acceleration.enabled {
                 Toggle(isOn: Binding(get: { settings.acceleration.verticalVideosDirect }, set: { direct in
                     settings.acceleration.verticalVideosDirect = direct

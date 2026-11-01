@@ -4,10 +4,30 @@ import Foundation
 /// app plays after a vertical video is tapped in 推荐). Works logged out; a TV-login `access_key`
 /// personalises it like the app home feed. Pages hold 5–6 videos, about half of them portrait; the
 /// feed never ends. Paging keeps the entry video and counts `display_id` up from 1.
+/// With `SwipeFeedSource.web`, bilibili.com's 推荐 stands in for it, personalised by the web login.
 enum ShortVideoAPI {
+    /// The source chosen, else the one a login personalises: without a TV login the vertical feed is anonymous.
+    static func source(chosen: SwipeFeedSource?) -> SwipeFeedSource {
+        source(chosen: chosen, hasAppToken: FeedAPI.appAuth() != nil, isLoggedIn: BiliHTTP.shared.isLoggedIn)
+    }
+
+    static func source(chosen: SwipeFeedSource?, hasAppToken: Bool, isLoggedIn: Bool) -> SwipeFeedSource {
+        chosen ?? (!hasAppToken && isLoggedIn ? .web : .official)
+    }
+
+    /// Why a source would not go by the account, for where it is chosen.
+    static func loginNote(for source: SwipeFeedSource) -> String? {
+        switch source {
+        case .official: return FeedAPI.appAuth() == nil ? "未 TV 登录，不按账号推荐" : nil
+        case .web: return BiliHTTP.shared.isLoggedIn ? nil : "未登录，不按账号推荐"
+        }
+    }
+
     /// One page of the feed. `start` is the video it was entered from (page 1 only); `cursor` is the
     /// previous page's `next`.
-    static func feed(start: ShortVideoItem?, cursor: ShortVideoCursor?) async throws -> ShortVideoPage {
+    static func feed(start: ShortVideoItem?, cursor: ShortVideoCursor?,
+                     source: SwipeFeedSource = .official) async throws -> ShortVideoPage {
+        if source == .web { return try await webFeed(cursor: cursor) }
         let displayId = cursor?.displayId ?? 1
         let aid = cursor?.aid ?? start?.aid ?? 0
         let bvid = cursor?.bvid ?? start?.bvid ?? ""
@@ -17,14 +37,47 @@ enum ShortVideoAPI {
             personal["access_key"] = auth.token
             do {
                 let page = parseStory(try await request(personal, key: auth.key), displayId: displayId, aid: aid, bvid: bvid)
-                if !page.items.isEmpty { return page }
+                if !page.items.isEmpty {
+                    trace(page, source: "official with TV login", number: displayId)
+                    return page
+                }
+                PlaybackSession.routeLog?("swipe feed official with TV login: empty, anonymous instead")
             } catch {
                 // The personalised feed failed or came back empty: the anonymous one still works. A
                 // read-only feed never signs anyone out; only actions that need the login drop a token.
                 if ListMapping.isCancellation(error) { throw error }
+                let code = (error as? BiliError).map { "\($0)" } ?? "error"
+                PlaybackSession.routeLog?("swipe feed official with TV login: \(code.prefix(80)), anonymous instead")
             }
         }
-        return parseStory(try await request(query, key: ListMapping.appKey), displayId: displayId, aid: aid, bvid: bvid)
+        let page = parseStory(try await request(query, key: ListMapping.appKey), displayId: displayId, aid: aid, bvid: bvid)
+        trace(page, source: "official anonymous", number: displayId)
+        return page
+    }
+
+    /// bilibili.com's 推荐 as a feed of swipes. Its cards come without a size, which swipes need to show them.
+    private static func webFeed(cursor: ShortVideoCursor?) async throws -> ShortVideoPage {
+        let number = cursor?.displayId ?? 1
+        let cards = try await FeedAPI.recommend(cursor: String(number - 1)).items
+        let sized = await FeedAPI.fillVideoSizes(swipeCards(cards))
+        let allowed = FeedFilter.liveFilter(scope: .recommend)
+        let page = ShortVideoPage(items: sized.filter(allowed).map(item(from:)),
+                                  next: ShortVideoCursor(aid: 0, bvid: "", displayId: number + 1))
+        trace(page, source: "web", number: number)
+        return page
+    }
+
+    /// The cards of a feed that swipes can go to.
+    static func swipeCards(_ cards: [VideoCard]) -> [VideoCard] {
+        cards.filter { $0.kind == .video && $0.adSignals.isEmpty && ($0.aid != 0 || !$0.bvid.isEmpty) }
+    }
+
+    /// What the feed gave, for the playback log: the only way to tell afterwards which feed a viewer was on.
+    private static func trace(_ page: ShortVideoPage, source: String, number: Int) {
+        let landscape = page.items.filter { !$0.isPortrait }.count
+        let followed = page.items.filter(\.isFollowing).count
+        PlaybackSession.routeLog?("swipe feed \(source) page \(number): \(page.items.count) videos, \(landscape) landscape, "
+            + "\(followed) by followed uploaders")
     }
 
     private static func request(_ query: [String: Any], key: AppKey) async throws -> JSON {

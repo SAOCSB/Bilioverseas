@@ -177,6 +177,13 @@ struct SettingsView: View {
 
     private var logoutSection: some View {
         Section {
+            // Next to each other, in either order (`AuthService.completeTVLogin`).
+            NavigationLink(value: Route.loginWith(.tv)) {
+                LabeledContent("TV 登录", value: auth.hasTVLogin ? "已登录" : "未登录")
+            }
+            NavigationLink(value: Route.loginWith(.web)) {
+                LabeledContent("网页登录", value: auth.hasWebRefreshToken || !auth.hasTVLogin ? "已登录" : "随 TV 登录")
+            }
             // The login page replaces the current session (no 退出登录 first).
             NavigationLink(value: Route.login) {
                 Text("切换账号")

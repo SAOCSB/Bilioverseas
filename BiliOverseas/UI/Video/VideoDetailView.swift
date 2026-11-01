@@ -515,6 +515,9 @@ final class VideoDetailModel: ObservableObject {
     private var swipeQueueAnchor: ShortVideoItem?
     private var swipeQueueCursor: ShortVideoCursor?
     private var swipeQueueTask: Task<Void, Never>?
+    /// Where the queue's videos come from; another source starts it over.
+    private var swipeQueueSource: SwipeFeedSource?
+    private var swipeSourceObservation: AnyCancellable?
     private var swipeSeenIDs: Set<String> = []
     private var swipeFetchNotBefore = Date.distantPast
     /// The detail of the video the next swipe goes to, fetched ahead, and of the one just left.
@@ -627,6 +630,8 @@ final class VideoDetailModel: ObservableObject {
         if hasContent, BiliHTTP.shared.isLoggedIn != sideDataLoggedIn {
             reloadAccountState()
         }
+        // A login may have changed where the queue's videos should come from.
+        if swipeQueueSource != nil { prefetchSwipeQueueIfNeeded() }
         refreshSwipePreload()
     }
 
@@ -1214,6 +1219,14 @@ final class VideoDetailModel: ObservableObject {
 
     /// Keeps a few videos ready, so a swipe has somewhere to go at once. Pages of the feed can hold none (「只看竖屏」).
     private func prefetchSwipeQueueIfNeeded() {
+        let source = ShortVideoAPI.source(chosen: AppSettings.shared.general.swipeFeedSource)
+        if source != swipeQueueSource {
+            swipeQueueTask?.cancel()
+            swipeQueueTask = nil
+            swipeQueue = []
+            swipeQueueCursor = nil
+            swipeQueueSource = source
+        }
         guard swipeQueue.count < 3, swipeQueueTask == nil, season == nil, let d = detail,
               AppSettings.shared.general.portraitOpensShortVideo else { return }
         if swipeQueueAnchor == nil {
@@ -1224,10 +1237,10 @@ final class VideoDetailModel: ObservableObject {
             swipeSeenIDs.insert(anchor.id)
         }
         swipeQueueTask = Task { [weak self] in
-            defer { self?.swipeQueueTask = nil }
+            defer { if self?.swipeQueueSource == source { self?.swipeQueueTask = nil } }
             for _ in 0..<3 {
                 guard let self, let anchor = self.swipeQueueAnchor,
-                      let page = try? await ShortVideoAPI.feed(start: anchor, cursor: self.swipeQueueCursor),
+                      let page = try? await ShortVideoAPI.feed(start: anchor, cursor: self.swipeQueueCursor, source: source),
                       !Task.isCancelled else { return }
                 self.swipeQueueCursor = page.next
                 let onlyPortrait = AppSettings.shared.general.swipesOnlyPortrait
@@ -1794,6 +1807,14 @@ extension VideoDetailModel {
             Task { @MainActor [weak self] in self?.resumeAutoNextIfHeld() }
         }
         player.videoSwipeTarget = { [weak self] swipe in self?.swipeTarget(swipe) }
+        // `@Published` emits before the value is stored: hop once so the queue reads the new source.
+        swipeSourceObservation = AppSettings.shared.$general.map(\.swipeFeedSource).removeDuplicates().dropFirst().sink {
+            [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.prefetchSwipeQueueIfNeeded()
+                self?.refreshSwipePreload()
+            }
+        }
         player.onVideoSwipe = { [weak self] swipe in self?.performSwipe(swipe) }
     }
 

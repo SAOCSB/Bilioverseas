@@ -130,4 +130,23 @@ struct GeneralSettings: SettingsGroup {
     /// 「只看竖屏」: swipes skip the landscape videos the feed mixes in (about half of them), which the official app
     /// shows on the same screen. A new key: the stored values of the older ones were only their defaults.
     var swipesOnlyPortrait: Bool = false
+    /// Where vertical swiping gets its videos, once chosen (nil: `ShortVideoAPI.source`).
+    var swipeFeedSource: SwipeFeedSource? = nil
+}
+
+/// Where vertical swiping gets its videos.
+enum SwipeFeedSource: String, Codable, CaseIterable, Identifiable {
+    /// The official app's vertical feed, personalised by a TV login.
+    case official
+    /// bilibili.com's 推荐, personalised by a web login.
+    case web
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .official: return "官方竖屏流"
+        case .web: return "网页推荐"
+        }
+    }
 }

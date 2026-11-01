@@ -44,6 +44,8 @@ final class ShortVideoFeedModel: ObservableObject {
     /// 全屏 of a landscape video (`ShortVideoLandscapeView`).
     private let landscapePresenter = PlayerFullscreenPresenter()
     private var isLandscape = false
+    /// Where the videos ahead come from; another source replaces them.
+    private var source = ShortVideoAPI.source(chosen: AppSettings.shared.general.swipeFeedSource)
     private var landscapePlayback: ShortVideoPlayback?
     /// What the page last said about itself, which while 全屏 covers it does not count until that has gone.
     private var pageVisible = false
@@ -119,7 +121,7 @@ final class ShortVideoFeedModel: ObservableObject {
         }
         do {
             for _ in 0..<4 {
-                let page = try await ShortVideoAPI.feed(start: start, cursor: cursor)
+                let page = try await ShortVideoAPI.feed(start: start, cursor: cursor, source: source)
                 guard gen == generation else { return }
                 cursor = page.next
                 exhausted = page.next == nil
@@ -185,6 +187,19 @@ final class ShortVideoFeedModel: ObservableObject {
             userPaused = true
             playback.pause()
         }
+    }
+
+    /// The videos ahead go, the one on screen stays, and the new source's come after it.
+    func sourceMayHaveChanged() {
+        let now = ShortVideoAPI.source(chosen: AppSettings.shared.general.swipeFeedSource)
+        guard now != source else { return }
+        source = now
+        generation += 1
+        cursor = nil
+        exhausted = false
+        items = Array(items.prefix(index + 1))
+        activate()
+        Task { await loadMore() }
     }
 
     /// 「只看竖屏」 on drops the landscape videos ahead (the one on screen stays); off affects later pages.
@@ -253,10 +268,11 @@ final class ShortVideoFeedModel: ObservableObject {
         pageVisible = isVisible
         // The fullscreen presentation covers this page, and the video goes on there.
         if !isVisible, isLandscape { return }
-        // 「只看竖屏」 can be changed from the video's page too.
+        // 「只看竖屏」 and the source can be changed from the video's page too, and a login changes the source.
         if isVisible, portraitOnly != AppSettings.shared.general.swipesOnlyPortrait {
             setPortraitOnly(AppSettings.shared.general.swipesOnlyPortrait)
         }
+        if isVisible { sourceMayHaveChanged() }
         visible = isVisible
         PlayerNowPlayingCenter.shared.shortVideosVisible = isVisible
         if !isVisible { reportCurrentHistory() }

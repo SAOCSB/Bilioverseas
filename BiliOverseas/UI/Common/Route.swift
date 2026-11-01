@@ -27,6 +27,8 @@ enum Route: Hashable {
     case fans(mid: Int64)
     case live(roomId: Int64)
     case login
+    /// The login page on one way of logging in, to add it next to the other.
+    case loginWith(LoginQRViewModel.Mode)
     case settings
     case settingsAcceleration
     case settingsPlayer
@@ -123,6 +125,8 @@ struct RouteView: View {
             LiveRoomView(roomId: roomId)
         case .login:
             LoginView()
+        case .loginWith(let mode):
+            LoginView(mode: mode)
         case .settings:
             SettingsView()
         case .settingsAcceleration:

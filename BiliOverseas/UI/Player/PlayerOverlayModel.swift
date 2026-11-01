@@ -5,7 +5,7 @@ import UIKit
 /// Side panel / sheet content of the player menus.
 enum PlayerPanel: String, Identifiable {
     case speed, quality, audio, codec, subtitle, aspect, sleepTimer, more
-    case playMode, chapters, episodes, smartSkip
+    case playMode, chapters, episodes, smartSkip, swipeSource
     var id: String { rawValue }
 
     var title: String {
@@ -22,6 +22,7 @@ enum PlayerPanel: String, Identifiable {
         case .chapters: return "分段信息"
         case .episodes: return "选集"
         case .smartSkip: return "广告跳过"
+        case .swipeSource: return "竖屏推荐来源"
         }
     }
 }

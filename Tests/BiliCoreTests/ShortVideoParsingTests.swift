@@ -4,6 +4,26 @@ import XCTest
 /// 短视频: the app story feed (`x/v2/feed/index/story`) parser, its paging cursor and query, and the
 /// portrait marker the app home feed's `uri` carries.
 final class ShortVideoParsingTests: XCTestCase {
+    func testTheSourceGoesByTheLoginUntilOneIsChosen() {
+        XCTAssertEqual(ShortVideoAPI.source(chosen: nil, hasAppToken: true, isLoggedIn: true), .official)
+        XCTAssertEqual(ShortVideoAPI.source(chosen: nil, hasAppToken: false, isLoggedIn: true), .web, "the official feed would be anonymous")
+        XCTAssertEqual(ShortVideoAPI.source(chosen: nil, hasAppToken: false, isLoggedIn: false), .official)
+        XCTAssertEqual(ShortVideoAPI.source(chosen: .web, hasAppToken: true, isLoggedIn: true), .web)
+        XCTAssertEqual(ShortVideoAPI.source(chosen: .official, hasAppToken: false, isLoggedIn: true), .official)
+    }
+
+    func testSwipesGoOnlyToVideosOfTheWebFeed() {
+        var video = VideoCard(id: "a")
+        video.bvid = "BV1aaaaaaaaa"
+        var ad = video
+        ad.adSignals = ["goto=ad"]
+        var live = video
+        live.kind = .live
+        var nothing = VideoCard(id: "b")
+        nothing.kind = .video
+        XCTAssertEqual(ShortVideoAPI.swipeCards([video, ad, live, nothing]).map(\.id), ["a"])
+    }
+
     private func json(_ s: String) -> JSON {
         (try? JSON(string: s)) ?? .null
     }

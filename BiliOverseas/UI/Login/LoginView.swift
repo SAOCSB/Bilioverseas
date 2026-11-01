@@ -8,12 +8,16 @@ import CoreImage.CIFilterBuiltins
 /// the QR can be opened directly in the official app, saved to the album, or copied as a link;
 /// pasting cookies is offered as an advanced fallback.
 struct LoginView: View {
-    @StateObject private var model = LoginQRViewModel()
+    @StateObject private var model: LoginQRViewModel
     @ObservedObject private var auth = AuthService.shared
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var showCookieSheet = false
     @State private var cookieLoginSucceeded = false
+
+    init(mode: LoginQRViewModel.Mode = .web) {
+        _model = StateObject(wrappedValue: LoginQRViewModel(mode: mode))
+    }
 
     var body: some View {
         ScrollView {
@@ -28,8 +32,8 @@ struct LoginView: View {
                 .padding(.horizontal, 32)
 
                 Text(model.mode == .tv
-                     ? "TV 扫码登录同时获得 access_key：首页使用 App 端个性化推荐，并支持点踩、不感兴趣等仅 App 端提供的功能"
-                     : "网页扫码登录：只有网页登录时首页使用按账号个性化的网页端推荐；App 端推荐、点踩等功能需要 TV 扫码")
+                     ? "TV 扫码同时获得 access_key：官方竖屏流和 App 端首页按账号推荐，并支持点踩、不感兴趣等功能。同一账号可以同时登录网页和 TV，不分先后"
+                     : "网页扫码：只有网页登录时，首页和竖屏流用按账号个性化的网页推荐；官方竖屏流、App 端首页、点踩等需要再 TV 扫码。同一账号可以同时登录网页和 TV，不分先后")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -270,11 +274,15 @@ final class LoginQRViewModel: ObservableObject {
         }
     }
 
-    @Published var mode: Mode = .web
+    @Published var mode: Mode
     @Published private(set) var phase: Phase = .loading
     @Published private(set) var qrURL: String?
     @Published private(set) var qrImage: UIImage?
     @Published private(set) var didLogin = false
+
+    init(mode: Mode = .web) {
+        self.mode = mode
+    }
 
     /// Web `qrcode_key` or TV `auth_code`.
     private var key: String?

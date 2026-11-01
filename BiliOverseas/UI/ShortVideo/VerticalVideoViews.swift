@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import UIKit
 
@@ -43,6 +44,15 @@ enum VerticalVideoMetrics {
         guard room >= 90 else { return (lanes.intersection(picture), nil) }
         let frame = CGRect(x: lanes.minX, y: lanes.minY, width: lanes.width, height: picture.maxY - lanes.minY)
         return (frame, DanmakuOverlayView.AbovePicture(tracksHeight: room, picture: picture.offsetBy(dx: -frame.minX, dy: -frame.minY)))
+    }
+
+    /// Where a picture of this shape shows on this screen in `window`, in its coordinates.
+    @MainActor static func storyPicture(video: CGSize, in window: UIWindow) -> CGRect {
+        let bar = window.windowScene?.statusBarManager?.statusBarFrame.height ?? window.safeAreaInsets.top
+        let area = CGRect(x: 0, y: bar, width: window.bounds.width,
+                          height: max(window.bounds.height - bar - window.safeAreaInsets.bottom - bottomBarHeight, 0))
+        guard video.width > 0, video.height > 0 else { return area }
+        return fills(video: video, area: area.size) ? area : AVMakeRect(aspectRatio: video, insideRect: area)
     }
 
     /// A video about the shape of the picture area fills it, like the official app (a sliver of it is cut off); anything
@@ -454,16 +464,17 @@ private struct VerticalVideoClearGlyph: Shape {
 /// 「弹」 with a pink tick while danmaku show, a grey cross while they do not.
 struct VerticalVideoDanmakuSwitch: View {
     let on: Bool
+    var color: Color = .white
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             ZStack {
                 RoundedRectangle(cornerRadius: 5)
-                    .stroke(Color.white.opacity(on ? 1 : 0.6), lineWidth: 1.4)
+                    .stroke(color.opacity(on ? 1 : 0.6), lineWidth: 1.4)
                     .frame(width: 24, height: 19)
                 Text("弹")
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(.white.opacity(on ? 1 : 0.6))
+                    .foregroundColor(color.opacity(on ? 1 : 0.6))
             }
             Image(systemName: on ? "checkmark" : "xmark")
                 .font(.system(size: 7, weight: .black))
@@ -550,6 +561,136 @@ struct VerticalVideoLikeBurst: Identifiable {
     let id = UUID()
     let location: CGPoint
     let tilt = Double.random(in: -18...18)
+}
+
+/// A finger held on the video for 倍速: once it moves sideways, it is dragging the video's progress. A whole width is the
+/// whole video, from where it was when that began.
+struct VerticalVideoPressSeek {
+    let startX: CGFloat
+    private var seekStart: Double?
+    private var baseX: CGFloat = 0
+    private(set) var target: Double = 0
+
+    init(startX: CGFloat) {
+        self.startX = startX
+    }
+
+    var isSeeking: Bool { seekStart != nil }
+
+    /// The time it drags to, once it does.
+    mutating func moved(toX x: CGFloat, width: CGFloat, time: () -> Double, duration: Double) -> Double? {
+        if seekStart == nil {
+            guard abs(x - startX) > 12, duration > 0 else { return nil }
+            seekStart = time()
+            baseX = x
+        }
+        guard let seekStart else { return nil }
+        target = min(max(seekStart + Double((x - baseX) / max(width, 1)) * duration, 0), duration)
+        return target
+    }
+}
+
+/// Top of the screen while the finger holds 倍速.
+struct VerticalVideoSpeedPill: View {
+    enum Mode { case speed(String), seeking, locked(String) }
+    let mode: Mode
+
+    var body: some View {
+        HStack(spacing: 5) {
+            switch mode {
+            case .speed(let speed):
+                Image(systemName: "forward.fill").font(.system(size: 10))
+                Text("\(speed)倍速中")
+            case .seeking:
+                Image(systemName: "arrow.left.and.right").font(.system(size: 10, weight: .semibold))
+                Text("左右滑动调节进度")
+            case .locked(let speed):
+                Image(systemName: "lock.fill").font(.system(size: 10))
+                Text("已锁定\(speed)倍速，点击屏幕取消")
+            }
+        }
+        .font(.system(size: 12))
+        .foregroundColor(.white)
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 6))
+        .frame(maxHeight: .infinity, alignment: .top)
+        .padding(.top, 70)
+        .allowsHitTesting(false)
+    }
+}
+
+/// Where the bar was while the finger holds 倍速.
+struct VerticalVideoSpeedLockHint: View {
+    /// The finger is there: letting go locks it.
+    let active: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: active ? "lock.fill" : "arrow.down")
+            Text(active ? "松手锁定倍速" : "拖动到此处锁定倍速")
+        }
+        .font(.system(size: 12))
+        .foregroundColor(.white.opacity(active ? 1 : 0.8))
+        .frame(maxWidth: .infinity)
+        .frame(height: VerticalVideoMetrics.bottomBarHeight)
+        .allowsHitTesting(false)
+    }
+}
+
+/// The progress being dragged: a thick bar on the line's place, where it goes above that, and a picture of that moment.
+struct VerticalVideoSeekBar: View {
+    let target: Double
+    let duration: Double
+    var shot: VideoShotInfo?
+
+    private var thumbnailHeight: CGFloat {
+        guard let shot, shot.tileHeight > 0 else { return 0 }
+        return shot.tileWidth < shot.tileHeight ? 150 : 96
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if let shot, !shot.isEmpty {
+                PlayerSeekThumbnail(shot: shot, time: target, height: thumbnailHeight)
+            }
+            HStack(spacing: 4) {
+                Text(PlayerFormat.time(target))
+                    .foregroundColor(.white)
+                Text("/ \(PlayerFormat.time(duration))")
+                    .foregroundColor(.white.opacity(0.6))
+            }
+            .font(.system(size: 15, weight: .medium).monospacedDigit())
+            GeometryReader { geo in
+                let played = duration > 0 ? CGFloat(min(max(target / duration, 0), 1)) : 0
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.25))
+                    Capsule().fill(Color.biliPink).frame(width: geo.size.width * played)
+                }
+                .frame(height: 4)
+                .overlay(alignment: .leading) {
+                    VerticalVideoProgressMascot()
+                        .offset(x: min(max(geo.size.width * played - 9, 0), max(geo.size.width - 18, 0)))
+                }
+                .frame(maxHeight: .infinity)
+            }
+            .frame(height: 22)
+            .padding(.horizontal, 12)
+        }
+        .padding(.top, 20)
+        .padding(.bottom, 0)
+        .frame(maxWidth: .infinity)
+        .background(alignment: .bottom) {
+            // A low hill of shade behind the bar.
+            Ellipse()
+                .fill(LinearGradient(colors: [.black.opacity(0.75), .black.opacity(0.35)], startPoint: .bottom, endPoint: .top))
+                .frame(height: 150)
+                .scaleEffect(x: 1.6, y: 1, anchor: .bottom)
+                .offset(y: 75)
+                .allowsHitTesting(false)
+        }
+        .allowsHitTesting(false)
+    }
 }
 
 /// The double-tap 点赞 burst.

@@ -78,6 +78,11 @@ final class VideoGoingOn: Hashable {
     let cid: Int64
     /// Where the page has got to with it.
     var time: Double?
+    /// The page shows the video's picture.
+    var onPagePicture: (() -> Void)?
+    /// The page is going back to that screen, with the video at this time: where the picture is there, nil if it cannot
+    /// have it back.
+    var onGoingBack: ((Double) -> CGRect?)?
 
     init(aid: Int64, cid: Int64) {
         self.aid = aid

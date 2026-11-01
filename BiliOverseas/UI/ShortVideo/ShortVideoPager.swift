@@ -12,6 +12,8 @@ struct ShortVideoPager<Item: Identifiable, Page: View>: UIViewRepresentable {
     var onReachEnd: () -> Void = {}
     /// The page a swipe is coming to rest on, ahead of `index` (nil once it has).
     var onLanding: (Int?) -> Void = { _ in }
+    /// Off while something over the page has the fingers.
+    var scrollEnabled = true
     let page: (Item, Int) -> Page
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -29,6 +31,11 @@ struct ShortVideoPager<Item: Identifiable, Page: View>: UIViewRepresentable {
         view.contentInsetAdjustmentBehavior = .never
         view.scrollsToTop = false
         view.backgroundColor = .black
+        // Nothing is under a bar here, and it would smear the picture up behind the status bar.
+        if #available(iOS 26.0, *) {
+            view.topEdgeEffect.isHidden = true
+            view.bottomEdgeEffect.isHidden = true
+        }
         view.register(UICollectionViewCell.self, forCellWithReuseIdentifier: Coordinator.reuseID)
         view.dataSource = context.coordinator
         view.delegate = context.coordinator
@@ -39,6 +46,7 @@ struct ShortVideoPager<Item: Identifiable, Page: View>: UIViewRepresentable {
 
     func updateUIView(_ view: PagingCollectionView, context: Context) {
         let coordinator = context.coordinator
+        view.isScrollEnabled = scrollEnabled
         let oldIDs = coordinator.ids
         coordinator.parent = self
         coordinator.ids = items.map { AnyHashable($0.id) }

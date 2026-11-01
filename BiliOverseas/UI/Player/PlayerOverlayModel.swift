@@ -94,6 +94,8 @@ final class PlayerOverlayModel: ObservableObject {
     }
     @Published var sheet: PlayerSheet?
     @Published var seekPreview: PlayerSeekPreview?
+    /// A finger holding 倍速 is where letting go locks it.
+    @Published var isOverSpeedLock = false
     @Published private(set) var doubleTapHint: PlayerDoubleTapHint?
     @Published private(set) var levelHUD: PlayerLevelHUD?
     @Published private(set) var hint: String?

@@ -9,7 +9,9 @@ struct ShortVideoFeedView: View {
     @EnvironmentObject private var router: TabRouter
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var settings = AppSettings.shared
-    @State private var commentsFor: ShortVideoItem?
+    /// 简介 and 评论 of the video on screen, which gives way to them.
+    @StateObject private var panel = VerticalVideoPanelState()
+    @State private var panelContent: VerticalVideoPanelContent?
     @State private var coinFor: ShortVideoItem?
     @State private var favoriteFor: ShortVideoItem?
     @State private var danmakuFor: ShortVideoItem?
@@ -24,24 +26,41 @@ struct ShortVideoFeedView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .top) {
-                if model.items.isEmpty {
-                    placeholder
-                } else {
-                    ShortVideoPager(items: model.items, index: $model.index,
-                                    onReachEnd: { Task { await model.loadMore() } },
-                                    onLanding: { model.setLanding($0) }) { item, position in
-                        ShortVideoPageView(item: item, isCurrent: position == model.index,
-                                           playback: model.playback(for: item), social: model.social(for: item),
-                                           actions: actions, cleared: cleared)
+        ZStack {
+            VStack(spacing: 0) {
+                ZStack(alignment: .top) {
+                    if model.items.isEmpty {
+                        placeholder
+                    } else {
+                        ShortVideoPager(items: model.items, index: $model.index,
+                                        onReachEnd: { Task { await model.loadMore() } },
+                                        onLanding: { model.setLanding($0) },
+                                        scrollEnabled: !panel.isOpen) { item, position in
+                            ShortVideoPageView(item: item, isCurrent: position == model.index,
+                                               playback: model.playback(for: item), social: model.social(for: item),
+                                               actions: actions, cleared: cleared, panel: panel.live, landing: model.landing)
+                        }
+                    }
+                    if !cleared {
+                        topBar
+                            .modifier(VerticalVideoPanelFading(live: panel.live))
                     }
                 }
-                if !cleared { topBar }
+                bottomBar
+                    .modifier(VerticalVideoPanelFading(live: panel.live))
             }
-            bottomBar
+            .padding(.top, -VerticalVideoMetrics.statusBarGap)
+            if let panelContent {
+                VerticalVideoPanelHost(state: panel, live: panel.live, content: panelContent)
+            }
         }
-        .padding(.top, -VerticalVideoMetrics.statusBarGap)
+        // Once it has gone down: the lists go with it.
+        .onChange(of: panel.isOpen) { open in
+            guard !open else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                if !panel.isOpen { panelContent = nil }
+            }
+        }
         // Dark controls for this screen only: a window-wide color scheme would repaint the pages under it.
         .environment(\.colorScheme, .dark)
         // The keyboard of 发弹幕 comes up in a sheet: the video stays where it is behind that.
@@ -60,20 +79,9 @@ struct ShortVideoFeedView: View {
             if router.path.count <= depth { model.setVisible(true) }
         }
         .onDisappear { model.setVisible(false) }
-        // A push from inside the comments (a commenter's space, login…) lands under the sheet: close it.
         .onChange(of: router.path.count) { count in
-            if commentsFor != nil { commentsFor = nil }
             model.closeLandscape()
             if count == stackDepth { model.setVisible(true) }
-        }
-        .sheet(item: $commentsFor) { item in
-            NavigationStack {
-                VideoCommentsView(oid: item.aid, type: 1)
-                    .navigationTitle("评论")
-                    .navigationBarTitleDisplayMode(.inline)
-            }
-            .environmentObject(router)
-            .presentationDetents([.fraction(0.7), .large])
         }
         .sheet(item: $coinFor) { item in
             let social = model.social(for: item)
@@ -104,7 +112,12 @@ struct ShortVideoFeedView: View {
             togglePlay: { model.togglePlay($0) },
             fastForward: { model.setFastForward($1, item: $0) },
             restoreControls: { cleared = false },
-            comments: { commentsFor = $0 },
+            comments: { item in
+                panelContent = model.panelContent(for: item)
+                panel.prepare()
+                // On the next turn: it comes up from below, and has to be there first.
+                DispatchQueue.main.async { panel.open(tab: .comments) }
+            },
             coin: { item in
                 guard ShortVideoSocial.requireLogin("投币") else { return }
                 if model.social(for: item).coins >= item.maxCoins {
@@ -124,7 +137,7 @@ struct ShortVideoFeedView: View {
             uploader: { item in
                 if item.ownerMid != 0 { router.push(.user(mid: item.ownerMid)) }
             },
-            fullVideo: { item in router.push(.video(model.pageRef(for: item))) },
+            fullVideo: { item in model.openPage(of: item, router: router) },
             dislike: { item, reason in Task { await model.dislike(item, reason: reason) } }
         )
     }
@@ -193,17 +206,22 @@ struct ShortVideoFeedView: View {
 
     private var bottomBar: some View {
         ShortVideoLandingReader(landing: model.landing) {
-            VerticalVideoBottomBar(danmakuOn: settings.danmaku.enabled, landscape: model.showing?.isPortrait == false,
-                                   cleared: cleared,
-                                   onSend: sendDanmaku,
-                                   onToggle: { settings.danmaku.enabled.toggle() },
-                                   onSettings: { showsDanmakuSettings = true },
-                                   onDetail: {
-                                       if let item = model.showing { actions.fullVideo(item) }
-                                   },
-                                   onClear: { cleared.toggle() },
-                                   onFullscreen: { model.showLandscape() })
-                .modifier(ShortVideoSpeedingHidden(speeding: model.landing.isSpeeding))
+            ZStack {
+                VerticalVideoBottomBar(danmakuOn: settings.danmaku.enabled, landscape: model.showing?.isPortrait == false,
+                                       cleared: cleared,
+                                       onSend: sendDanmaku,
+                                       onToggle: { settings.danmaku.enabled.toggle() },
+                                       onSettings: { showsDanmakuSettings = true },
+                                       onDetail: {
+                                           if let item = model.showing { actions.fullVideo(item) }
+                                       },
+                                       onClear: { cleared.toggle() },
+                                       onFullscreen: { model.showLandscape() })
+                    .modifier(ShortVideoSpeedingHidden(speeding: model.landing.isSpeeding))
+                if model.landing.isSpeeding, !model.landing.isPressSeeking, !model.landing.isSpeedLocked {
+                    VerticalVideoSpeedLockHint(active: model.landing.isOverSpeedLock)
+                }
+            }
         }
     }
 
@@ -261,6 +279,81 @@ struct ShortVideoFeedView: View {
     }
 }
 
+/// Tap, double tap and the long press with what the finger does while it holds, which SwiftUI's long press cannot follow.
+/// The bars over it have their own touches, and the pages' scrolling goes on around it until the press has begun.
+struct ShortVideoGestureLayer: UIViewRepresentable {
+    let canSpeedUp: () -> Bool
+    let onTap: () -> Void
+    let onDoubleTap: (CGPoint) -> Void
+    let onPressBegan: (CGPoint) -> Void
+    let onPressMoved: (CGPoint, CGSize) -> Void
+    let onPressEnded: (_ cancelled: Bool) -> Void
+
+    func makeUIView(context: Context) -> GestureView { GestureView() }
+
+    func updateUIView(_ view: GestureView, context: Context) {
+        view.gestures = self
+    }
+
+    final class GestureView: UIView, UIGestureRecognizerDelegate {
+        var gestures: ShortVideoGestureLayer?
+        private let singleTap = UITapGestureRecognizer()
+        private let doubleTap = UITapGestureRecognizer()
+        private let longPress = UILongPressGestureRecognizer()
+        private var pressing = false
+
+        init() {
+            super.init(frame: .zero)
+            backgroundColor = .clear
+            singleTap.addTarget(self, action: #selector(tapped))
+            doubleTap.addTarget(self, action: #selector(doubleTapped(_:)))
+            doubleTap.numberOfTapsRequired = 2
+            singleTap.require(toFail: doubleTap)
+            longPress.addTarget(self, action: #selector(pressed(_:)))
+            longPress.minimumPressDuration = 0.3
+            longPress.delegate = self
+            for recognizer in [singleTap, doubleTap, longPress] as [UIGestureRecognizer] { addGestureRecognizer(recognizer) }
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            gestureRecognizer !== longPress || gestures?.canSpeedUp() == true
+        }
+
+        @objc private func tapped() { gestures?.onTap() }
+
+        @objc private func doubleTapped(_ g: UITapGestureRecognizer) { gestures?.onDoubleTap(g.location(in: self)) }
+
+        @objc private func pressed(_ g: UILongPressGestureRecognizer) {
+            switch g.state {
+            case .began:
+                pressing = true
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                gestures?.onPressBegan(g.location(in: self))
+            case .changed:
+                if pressing { gestures?.onPressMoved(g.location(in: self), bounds.size) }
+            case .ended, .cancelled, .failed:
+                guard pressing else { return }
+                pressing = false
+                gestures?.onPressEnded(g.state != .ended)
+            default:
+                break
+            }
+        }
+
+        /// The cell is reused or the page is covered with the finger still down.
+        override func willMove(toWindow newWindow: UIWindow?) {
+            super.willMove(toWindow: newWindow)
+            guard newWindow == nil, pressing else { return }
+            pressing = false
+            gestures?.onPressEnded(true)
+            longPress.isEnabled = false
+            longPress.isEnabled = true
+        }
+    }
+}
+
 /// 长按倍速 clears the screen like 清屏, with no way back to show: it lasts as long as the finger.
 private struct ShortVideoSpeedingHidden: ViewModifier {
     let speeding: Bool
@@ -303,32 +396,46 @@ struct ShortVideoPageView: View {
     @ObservedObject var social: ShortVideoSocial
     let actions: ShortVideoActions
     let cleared: Bool
+    let panel: VerticalVideoPanelLive
+    let landing: ShortVideoLanding
 
     @State private var readyForDisplay = false
     @State private var titleExpanded = false
     @State private var bursts: [VerticalVideoLikeBurst] = []
     @State private var scrubbing: Double?
-    /// A tap that a second one may turn into a double tap.
-    @State private var pendingTap: DispatchWorkItem?
-    /// That second one is on the screen.
-    @State private var secondTouch = false
+    /// A finger holding 倍速.
+    @State private var press: VerticalVideoPressSeek?
+    /// Where it drags the progress to.
+    @State private var pressTarget: Double?
 
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .bottom) {
                 page(in: geo)
                 // Beside the page, not in it: the page's gestures would take a finger held still on the bar.
-                progress
+                if let pressTarget {
+                    VerticalVideoSeekBar(target: pressTarget, duration: playback.duration, shot: playback.videoShot)
+                        .offset(y: VerticalVideoMetrics.progressOverhang)
+                } else {
+                    progress
+                        .modifier(VerticalVideoPanelFading(live: panel, active: isCurrent))
+                }
             }
         }
         .ignoresSafeArea()
         .onChange(of: isCurrent) { current in
             guard !current else { return }
             titleExpanded = false
-            pendingTap?.cancel()
-            pendingTap = nil
-            secondTouch = false
+            press = nil
+            pressTarget = nil
         }
+    }
+
+    /// Where the picture shows on the page, when the video's shape is known.
+    private func pictureRect(in size: CGSize, height: CGFloat) -> CGRect {
+        let area = CGRect(x: 0, y: 0, width: size.width, height: height)
+        guard item.width > 0, item.height > 0, !fills(in: size) else { return area }
+        return AVMakeRect(aspectRatio: CGSize(width: item.width, height: item.height), insideRect: area)
     }
 
     private func page(in geo: GeometryProxy) -> some View {
@@ -336,62 +443,50 @@ struct ShortVideoPageView: View {
             Color.black
             let pictureHeight = item.isPortrait ? geo.size.height
                 : VerticalVideoMetrics.wholePictureFrame(in: CGRect(origin: .zero, size: geo.size)).height
-            ShortVideoSurface(player: playback.player, fill: fills(in: geo.size), readyForDisplay: $readyForDisplay)
-                .frame(height: pictureHeight)
-                .frame(maxHeight: .infinity, alignment: .top)
-            if !readyForDisplay || playback.phase != .ready {
-                RemoteImage(url: item.cover, contentMode: fills(in: geo.size) ? .fill : .fit)
-                    .frame(width: geo.size.width, height: pictureHeight)
-                    .clipped()
+            ZStack {
+                ShortVideoSurface(player: playback.player, fill: fills(in: geo.size), readyForDisplay: $readyForDisplay,
+                                  onView: { playback.surfaceView = $0 })
+                    .frame(height: pictureHeight)
                     .frame(maxHeight: .infinity, alignment: .top)
-                    .allowsHitTesting(false)
+                if !readyForDisplay || playback.phase != .ready {
+                    RemoteImage(url: item.cover, contentMode: fills(in: geo.size) ? .fill : .fit)
+                        .frame(width: geo.size.width, height: pictureHeight)
+                        .clipped()
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .allowsHitTesting(false)
+                }
             }
-            if !showsCleared {
-                LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 110)
-                    .frame(maxHeight: .infinity, alignment: .top)
+            .modifier(VerticalVideoPanelPicture(live: panel, active: isCurrent,
+                                                picture: pictureRect(in: geo.size, height: pictureHeight), size: geo.size))
+            ZStack {
+                if !showsCleared {
+                    LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 110)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .allowsHitTesting(false)
+                    LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
+                        .frame(height: 300)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .allowsHitTesting(false)
+                }
+                // Below the top bar; the controls below it stay readable over the danmaku.
+                let lanes = danmakuLanes(in: geo.size, pictureHeight: pictureHeight)
+                ShortVideoDanmakuLayer(playback: playback, abovePicture: lanes.above)
+                    .frame(width: lanes.frame.width, height: lanes.frame.height)
+                    .position(x: lanes.frame.midX, y: lanes.frame.midY)
                     .allowsHitTesting(false)
-                LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
-                    .frame(height: 300)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                    .allowsHitTesting(false)
+                ShortVideoGestureLayer(canSpeedUp: { canSpeedUp }, onTap: tapped, onDoubleTap: doubleTap,
+                                       onPressBegan: pressBegan, onPressMoved: pressMoved, onPressEnded: pressEnded)
+                statusOverlay
+                ForEach(bursts) { burst in
+                    VerticalVideoLikeBurstView(burst: burst)
+                        .position(burst.location)
+                }
+                if !showsCleared { overlay }
             }
-            // Below the top bar; the controls below it stay readable over the danmaku.
-            let lanes = danmakuLanes(in: geo.size, pictureHeight: pictureHeight)
-            ShortVideoDanmakuLayer(playback: playback, abovePicture: lanes.above)
-                .frame(width: lanes.frame.width, height: lanes.frame.height)
-                .position(x: lanes.frame.midX, y: lanes.frame.midY)
-                .allowsHitTesting(false)
-            statusOverlay
-            ForEach(bursts) { burst in
-                VerticalVideoLikeBurstView(burst: burst)
-                    .position(burst.location)
-            }
-            if !showsCleared { overlay }
+            .modifier(VerticalVideoPanelFading(live: panel, active: isCurrent))
         }
         .frame(width: geo.size.width, height: geo.size.height)
-        .contentShape(Rectangle())
-        // The long press first: after a tap gesture it would wait for that to give up, about 0.8 s after the touch. For the
-        // same reason there is one tap gesture, which tells a double tap by the time between them.
-        // Not when it cannot speed anything up: a slower tap is still a tap then.
-        .onLongPressGesture(minimumDuration: canSpeedUp ? 0.3 : 3600, maximumDistance: 12, perform: {
-            guard canSpeedUp else { return }
-            actions.fastForward(item, true)
-        }, onPressingChanged: { pressing in
-            if pressing {
-                // A second touch in time: how it ends decides.
-                if let first = pendingTap {
-                    first.cancel()
-                    pendingTap = nil
-                    secondTouch = true
-                }
-            } else {
-                // A tap has been told by now (`tapped`). This was something else, and the first tap goes with it.
-                secondTouch = false
-                if playback.isFastForward { actions.fastForward(item, false) }
-            }
-        })
-        .onTapGesture(coordinateSpace: .local) { location in tapped(at: location) }
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: Text(playback.isPaused ? "播放" : "暂停")) { actions.togglePlay(item) }
     }
@@ -427,15 +522,7 @@ struct ShortVideoPageView: View {
             .padding(24)
         default:
             if playback.isFastForward {
-                Label("\(speedText)倍速播放中", systemImage: "forward.fill")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.black.opacity(0.45), in: Capsule())
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 52)
-                    .allowsHitTesting(false)
+                VerticalVideoSpeedPill(mode: pressTarget != nil ? .seeking : press == nil ? .locked(speedText) : .speed(speedText))
             } else if let scrubbing {
                 PlayerPill { Text("\(PlayerFormat.time(scrubbing))/\(PlayerFormat.time(playback.duration))").monospacedDigit() }
                     .allowsHitTesting(false)
@@ -508,22 +595,52 @@ struct ShortVideoPageView: View {
 
     private var canSpeedUp: Bool { AppSettings.shared.player.longPressSpeedEnabled && !playback.isPaused }
 
-    private func tapped(at location: CGPoint) {
-        if secondTouch {
-            secondTouch = false
-            doubleTap(at: location)
+    private func tapped() {
+        if playback.isFastForward {
+            // The speed the finger locked.
+            actions.fastForward(item, false)
+        } else if cleared {
+            actions.restoreControls()
+        } else {
+            actions.togglePlay(item)
+        }
+    }
+
+    private func pressBegan(at location: CGPoint) {
+        press = VerticalVideoPressSeek(startX: location.x)
+        actions.fastForward(item, true)
+    }
+
+    private func pressMoved(to location: CGPoint, in size: CGSize) {
+        guard var moving = press else { return }
+        let target = moving.moved(toX: location.x, width: size.width, time: { playback.position }, duration: playback.duration)
+        press = moving
+        if let target {
+            if pressTarget == nil {
+                playback.ensureVideoShot()
+                landing.isPressSeeking = true
+            }
+            pressTarget = target
+        }
+        let overLock = !moving.isSeeking && location.y >= size.height - 8
+        if landing.isOverSpeedLock != overLock { landing.isOverSpeedLock = overLock }
+    }
+
+    private func pressEnded(cancelled: Bool) {
+        let target = pressTarget
+        let locks = !cancelled && landing.isOverSpeedLock
+        press = nil
+        pressTarget = nil
+        if locks {
+            landing.isOverSpeedLock = false
+            landing.isSpeedLocked = true
             return
         }
-        let single = DispatchWorkItem {
-            pendingTap = nil
-            if cleared {
-                actions.restoreControls()
-            } else {
-                actions.togglePlay(item)
-            }
+        actions.fastForward(item, false)
+        if let target, !cancelled {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            playback.seek(to: target)
         }
-        pendingTap = single
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28, execute: single)
     }
 
     private func doubleTap(at location: CGPoint) {

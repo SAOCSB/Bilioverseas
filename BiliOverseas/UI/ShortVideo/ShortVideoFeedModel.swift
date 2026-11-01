@@ -12,7 +12,7 @@ final class ShortVideoFeedModel: ObservableObject {
         didSet {
             guard index != oldValue else { return }
             userPaused = false
-            landing.isSpeeding = false
+            endFastForward()
             activate()
             let kept = playbacks.values
             PlaybackTrace.log("feed at \(current?.id ?? "?") kept=\(kept.count) keptMB=\(kept.reduce(0) { $0 + $1.cachedBytes } / 1_000_000)")
@@ -57,6 +57,7 @@ final class ShortVideoFeedModel: ObservableObject {
     private var streamReach = PlayerStreamPreload.swipeWindow
     /// The video whose page was last opened from here, which goes on from where it gets to there.
     private var wentToPage: (id: String, goingOn: VideoGoingOn)?
+    private var panelKept: VerticalVideoPanelContent?
 
     init(start: ShortVideoItem?) {
         self.start = start
@@ -196,6 +197,25 @@ final class ShortVideoFeedModel: ObservableObject {
     func setFastForward(_ on: Bool, item: ShortVideoItem) {
         playbacks[item.id]?.setFastForward(on)
         landing.isSpeeding = on
+        if !on { landing.resetPress() }
+    }
+
+    /// Also a speed locked by the finger's letting go, which lasts until now.
+    private func endFastForward() {
+        for playback in playbacks.values where playback.isFastForward { playback.setFastForward(false) }
+        landing.isSpeeding = false
+        landing.resetPress()
+    }
+
+    /// 评论 on the video on screen, kept for as long as the panel is about it.
+    func panelContent(for item: ShortVideoItem) -> VerticalVideoPanelContent {
+        if let kept = panelKept, kept.id == item.id { return kept }
+        let playback = playback(for: item)
+        let made = VerticalVideoPanelContent(id: item.id, comments: VideoCommentsModel(oid: item.aid, type: 1),
+                                             intro: VerticalVideoIntroModel(ref: item.videoRef),
+                                             onSeek: { [weak playback] in playback?.seek(to: $0) })
+        panelKept = made
+        return made
     }
 
     /// Tap to pause / resume the video on screen.
@@ -285,6 +305,50 @@ final class ShortVideoFeedModel: ObservableObject {
         ref.goingOn = goingOn
         wentToPage = (item.id, goingOn)
         return ref
+    }
+
+    /// 详情页: no new page slides in. The bars go, the video moves to where the page has it, and the page comes up around
+    /// it. Going back from the page it moves back the same way (`VideoDetailView.goBackToScreen`).
+    func openPage(of item: ShortVideoItem, router: TabRouter) {
+        guard !VideoMorph.isRunning else { return }
+        let playback = playback(for: item)
+        let ref = pageRef(for: item)
+        guard let surface = playback.surfaceView, let window = surface.window else {
+            router.push(.video(ref))
+            return
+        }
+        let shown = surface.playerLayer.videoRect
+        let inPicture = shown.isEmpty ? surface.picture.bounds : shown
+        let picture = surface.picture.convert(inPicture, to: nil)
+        guard let morph = VideoMorph(moving: surface.picture, picture: inPicture, backdropAlpha: 1,
+                                     giveBack: { surface.takeBackPicture() }) else {
+            router.push(.video(ref))
+            return
+        }
+        ref.goingOn?.onGoingBack = { [weak self] time in
+            guard let kept = self?.playbacks[item.id] else { return nil }
+            // Ahead of the page's going: by the time this screen shows, the picture is there.
+            kept.seek(to: time)
+            return picture
+        }
+        // It holds the last frame until the page's own player has the same one.
+        var arrived = false
+        var pageShows = false
+        ref.goingOn?.onPagePicture = {
+            pageShows = true
+            if arrived { morph.finish() }
+        }
+        router.pushWithoutAnimation(.video(ref))
+        morph.move(to: VideoDetailView.inlinePictureFrame(video: picture.size, in: window), backdropAlpha: 0) {
+            arrived = true
+            morph.letTouchesThrough()
+            if pageShows {
+                morph.finish()
+            } else {
+                // Slow to come: its own loading shows instead.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { morph.finish() }
+            }
+        }
     }
 
     /// That page has gone.
@@ -451,6 +515,18 @@ final class ShortVideoLanding: ObservableObject {
     @Published var index: Int?
     /// 长按倍速 is on: the bars step aside like the page's own controls (the danmaku stay).
     @Published var isSpeeding = false
+    /// The finger holding it is dragging the progress.
+    @Published var isPressSeeking = false
+    /// It let go where that locks the speed.
+    @Published var isSpeedLocked = false
+    /// It is there now.
+    @Published var isOverSpeedLock = false
+
+    func resetPress() {
+        isPressSeeking = false
+        isSpeedLocked = false
+        isOverSpeedLock = false
+    }
 }
 
 /// Like / coin / favourite / follow state of one item, loaded when it comes on screen.

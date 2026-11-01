@@ -378,7 +378,10 @@ final class PlayerController: ObservableObject {
     /// Speed chosen in the 倍速 menu (session only, starts at 「默认播放速度」).
     @Published private(set) var rate: Double = 1
     /// Hold-to-speed-up active (长按倍速).
-    @Published private(set) var isBoosting = false
+    @Published private(set) var isBoosting = false {
+        didSet { if !isBoosting { isBoostLocked = false } }
+    }
+    @Published private(set) var isBoostLocked = false
     @Published private(set) var boostRate: Double = 2
     @Published private(set) var isVerticalVideo = false
     /// The video layer showed its first frame (the cover is hidden from then on).
@@ -606,6 +609,8 @@ final class PlayerController: ObservableObject {
         }
         if let current = item, current != newItem { PlaybackTrace.log("left \(current.bvid)") }
         let swiped = isSwitchingBySwipe
+        // 倍速 the finger locked lasts for this video.
+        if isBoostLocked { endBoost() }
         // The same video again (重试, the next part) stays what it was.
         itemCameFromSwipe = swiped || (itemCameFromSwipe && item?.aid == newItem.aid)
         if !swiped { waitBegan = ProcessInfo.processInfo.systemUptime }
@@ -744,7 +749,35 @@ final class PlayerController: ObservableObject {
     }
 
     func enterFullscreen() {
+        if isVerticalVideo {
+            // It came from such a screen: back there, rather than another of them on top.
+            if onStoryInstead?() == true { return }
+            if morphIntoVerticalScreen() { return }
+        }
         enterFullscreen(byRotation: false, deviceOrientation: nil)
+    }
+
+    /// From the page up to the vertical-video screen, the same way as the 短视频 page's 详情页 comes down.
+    private func morphIntoVerticalScreen() -> Bool {
+        guard inlinePictureFrame != nil, !isPiPBusy, let window = surface.window,
+              let morph = surface.lendPicture(backdropAlpha: 0) else { return false }
+        morph.move(to: VerticalVideoMetrics.storyPicture(video: morph.pictureSize, in: window), backdropAlpha: 1) { [weak self] in
+            self?.enterFullscreen(byRotation: false, deviceOrientation: nil, animated: false)
+            // The surface is in the new place by then.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { morph.finish(fade: 0) }
+        }
+        return true
+    }
+
+    /// 详情页 on the vertical-video screen: down to the page under it.
+    func goToPageFromVerticalScreen() {
+        guard isOnVerticalScreen, !isPiPBusy, let inlinePictureFrame, let morph = surface.lendPicture(backdropAlpha: 1) else {
+            exitFullscreen()
+            return
+        }
+        let target = inlinePictureFrame(morph.pictureSize)
+        exitFullscreen(animated: false)
+        morph.move(to: target, backdropAlpha: 0) { morph.finish(fade: 0) }
     }
 
     /// Back from the page fullscreen gave way to (`pagePathChanged`).
@@ -752,8 +785,9 @@ final class PlayerController: ObservableObject {
         enterFullscreen(byRotation: false, deviceOrientation: nil, story: storyWhenPageReturns)
     }
 
-    func exitFullscreen() {
+    func exitFullscreen(animated: Bool = true) {
         guard isFullscreen else { return }
+        storyPanel.close()
         overlay.unlock()
         fullscreenByRotation = false
         isFullscreen = false
@@ -761,7 +795,7 @@ final class PlayerController: ObservableObject {
         storyTurned = false
         storyCleared = false
         overlay.fullscreenChanged()
-        fullscreenPresenter.dismiss { [weak self] in
+        fullscreenPresenter.dismiss(animated: animated) { [weak self] in
             // Back inline before the fade, also when fullscreen was entered again meanwhile: the page then shows
             // the current picture until the new fullscreen controller takes it (`willPresent`).
             self?.surfaceInFullscreen = false
@@ -778,6 +812,16 @@ final class PlayerController: ObservableObject {
     @Published private(set) var storyTurned = false
     /// The video this page was opened with came from another screen, which goes on from where it gets to here.
     var goingOn: VideoGoingOn?
+    /// A page's way of going back to the screen its video came from: whether it does.
+    var onStoryInstead: (() -> Bool)?
+    /// Where the page has the picture of a video of this size, in the window's coordinates.
+    var inlinePictureFrame: ((CGSize) -> CGRect)?
+    /// `stop` waits: something still shows this player's picture (`VideoMorph`).
+    private var stopHeld = false
+    private var stopWaiting = false
+    /// 简介 and 评论 on the vertical-video screen, which the video gives way to.
+    let storyPanel = VerticalVideoPanelState()
+    @Published private(set) var storyPanelContent: VerticalVideoPanelContent?
     /// 清屏: nothing but the picture on that screen, also for the videos swiped to; a tap brings the rest back.
     @Published private(set) var storyCleared = false
 
@@ -786,6 +830,25 @@ final class PlayerController: ObservableObject {
 
     func setStoryCleared(_ cleared: Bool) {
         storyCleared = cleared
+    }
+
+    func openStoryPanel(_ content: VerticalVideoPanelContent) {
+        overlay.panel = nil
+        storyPanelContent = content
+        storyPanel.onClosing = { [weak self] in
+            guard let self else { return }
+            UIView.animate(withDuration: 0.28) { self.surface.danmaku.alpha = 1 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                if self?.storyPanel.isOpen == false { self?.storyPanelContent = nil }
+            }
+        }
+        storyPanel.prepare()
+        // On the next turn: it comes up from below, and has to be there first.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isFullscreen else { return }
+            self.storyPanel.open(tab: .comments)
+            UIView.animate(withDuration: 0.2) { self.surface.danmaku.alpha = 0 }
+        }
     }
 
     /// 全屏 on a landscape video on that screen, or the phone turned with one on it.
@@ -809,6 +872,7 @@ final class PlayerController: ObservableObject {
 
     private func turnStoryScreen(to mask: UIInterfaceOrientationMask, orientation: UIInterfaceOrientation) {
         overlay.panel = nil
+        storyPanel.close()
         // Out of the way while the screen turns, as on entering fullscreen.
         overlay.hideControls()
         fullscreenPresenter.turn(to: mask, orientation: orientation) { [weak self] in
@@ -858,7 +922,7 @@ final class PlayerController: ObservableObject {
     var canSwipeVideos: Bool {
         guard videoSwipeTarget != nil, item?.epId == 0, !isPiPActive,
               AppSettings.shared.general.portraitOpensShortVideo else { return false }
-        if storyTurned { return false }
+        if storyTurned || cameFromSwipingScreen { return false }
         return isVerticalVideo || (isFullscreen ? fullscreenIsStory : itemCameFromSwipe)
     }
 
@@ -867,9 +931,13 @@ final class PlayerController: ObservableObject {
         canSwipeVideos || (storyTurned && item?.epId == 0)
     }
 
+    /// This page is the 详情页 of a screen that does the swiping itself, so it does not (until it has a fullscreen of its own).
+    private var cameFromSwipingScreen: Bool { goingOn != nil && !isFullscreen }
+
     /// This video is on the swipes, whatever Picture in Picture is doing for now.
     var isOnTheSwipes: Bool {
-        guard videoSwipeTarget != nil, item?.epId == 0, AppSettings.shared.general.portraitOpensShortVideo else { return false }
+        guard videoSwipeTarget != nil, item?.epId == 0, AppSettings.shared.general.portraitOpensShortVideo,
+              !cameFromSwipingScreen else { return false }
         return storyTurned || isVerticalVideo || itemCameFromSwipe || (isFullscreen && fullscreenIsStory)
     }
 
@@ -1140,6 +1208,10 @@ final class PlayerController: ObservableObject {
 
     /// Stop & release. While Picture in Picture runs the player keeps going (kept alive) and stops when PiP ends.
     func stop() {
+        if stopHeld {
+            stopWaiting = true
+            return
+        }
         if isPiPBusy {
             stopAfterPiP = true
             PlayerPiPKeeper.retain(self)
@@ -1148,8 +1220,22 @@ final class PlayerController: ObservableObject {
         performStop()
     }
 
+    func holdStop() {
+        stopHeld = true
+    }
+
+    func releaseStop() {
+        stopHeld = false
+        if stopWaiting {
+            stopWaiting = false
+            stop()
+        }
+    }
+
     func performStop() {
         if let current = item { PlaybackTrace.log("left \(current.bvid)") }
+        onStoryInstead = nil
+        inlinePictureFrame = nil
         stopAfterPiP = false
         autoExitTask?.cancel()
         if isFullscreen { exitFullscreen() }
@@ -1389,6 +1475,12 @@ final class PlayerController: ObservableObject {
         guard isBoosting else { return }
         isBoosting = false
         applyRate()
+    }
+
+    /// The finger let go where that keeps the speed on, until a tap.
+    func lockBoost() {
+        guard isBoosting else { return }
+        isBoostLocked = true
     }
 
     private func applyRate() {
@@ -2130,6 +2222,10 @@ final class PlayerController: ObservableObject {
     private func layerReadinessChanged() {
         if surface.videoView.playerLayer.isReadyForDisplay, item != nil, !hasFirstFrame {
             hasFirstFrame = true
+            if let item, goingOn?.isVideo(aid: item.aid, cid: item.cid) == true {
+                goingOn?.onPagePicture?()
+                goingOn?.onPagePicture = nil
+            }
             trace("first frame at \(player.currentTime().seconds)")
             releaseSwipePicture()
         }
@@ -2689,7 +2785,7 @@ final class PlayerController: ObservableObject {
 
     // MARK: Fullscreen
 
-    func enterFullscreen(byRotation: Bool, deviceOrientation: UIDeviceOrientation?, story keepStory: Bool = false) {
+    func enterFullscreen(byRotation: Bool, deviceOrientation: UIDeviceOrientation?, story keepStory: Bool = false, animated: Bool = true) {
         guard !isFullscreen, item != nil else { return }
         autoExitTask?.cancel()
         let story = isVerticalVideo || keepStory
@@ -2723,7 +2819,7 @@ final class PlayerController: ObservableObject {
         let takeSurface: () -> Void = { [weak self] in self?.surfaceInFullscreen = true }
         VerticalVideoMetrics.measureStatusBarGap()
         let stage = PlayerStageView(controller: self, overlay: overlay, role: .fullscreen)
-        if !fullscreenPresenter.present(stage, mask: mask, orientation: orientation, showsStatusBar: story,
+        if !fullscreenPresenter.present(stage, mask: mask, orientation: orientation, showsStatusBar: story, animated: animated,
                                         willPresent: takeSurface, onShown: shown) {
             isFullscreen = false
             fullscreenIsStory = false
@@ -2740,6 +2836,8 @@ final class PlayerController: ObservableObject {
             overlay.toggleLock()
         } else if storyTurned {
             turnBackToStory()
+        } else if isOnVerticalScreen {
+            goToPageFromVerticalScreen()
         } else {
             exitFullscreen()
         }

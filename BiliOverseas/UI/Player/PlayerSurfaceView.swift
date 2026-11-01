@@ -126,9 +126,11 @@ final class PlayerSurfaceView: UIView {
         super.layoutSubviews()
         updateVideoGravity()
         // Bounds and centre, not frame: the zoom transform stays applied while the size changes.
-        let video = videoFrame()
-        videoView.bounds = CGRect(origin: .zero, size: video.size)
-        videoView.center = CGPoint(x: video.midX, y: video.midY)
+        if videoView.superview === self {
+            let video = videoFrame()
+            videoView.bounds = CGRect(origin: .zero, size: video.size)
+            videoView.center = CGPoint(x: video.midX, y: video.midY)
+        }
         // Bounds and centre here too: a swipe moves these with a transform.
         for moving in [leavingCover, swipeCover] {
             moving.bounds = CGRect(origin: .zero, size: bounds.size)
@@ -147,6 +149,28 @@ final class PlayerSurfaceView: UIView {
         danmaku.center = CGPoint(x: lanes.midX, y: lanes.midY)
         gestureView.frame = bounds
         layoutRestoreButton()
+    }
+
+    // MARK: Lending the picture
+
+    /// The picture, to move over everything (`VideoMorph`), and back here when that has gone.
+    func lendPicture(backdropAlpha: CGFloat) -> VideoMorph? {
+        resetZoom(animated: false)
+        let shown = videoView.playerLayer.videoRect
+        let morph = VideoMorph(moving: videoView, picture: shown.isEmpty ? videoView.bounds : shown, backdropAlpha: backdropAlpha) { [weak self] in
+            self?.takeBackPicture()
+        }
+        // On its way it has no black around it.
+        if morph != nil { videoView.backgroundColor = .clear }
+        return morph
+    }
+
+    private func takeBackPicture() {
+        videoView.backgroundColor = .black
+        videoView.transform = .identity
+        insertSubview(videoView, at: 0)
+        setNeedsLayout()
+        layoutIfNeeded()
     }
 
     // MARK: Swiping to another video
@@ -521,6 +545,13 @@ final class PlayerSurfaceView: UIView {
     var wholePictureRect: CGRect? {
         guard showsWholeOnVerticalScreen, videoSize.width > 0, videoSize.height > 0 else { return nil }
         return AVMakeRect(aspectRatio: videoSize, insideRect: VerticalVideoMetrics.wholePictureFrame(in: bounds))
+    }
+
+    /// Where the video shows on this surface.
+    var pictureRect: CGRect {
+        if let wholePictureRect { return wholePictureRect }
+        guard videoSize.width > 0, videoSize.height > 0, videoView.playerLayer.videoGravity == .resizeAspect else { return bounds }
+        return AVMakeRect(aspectRatio: videoSize, insideRect: bounds)
     }
 
     /// 自适应 on the vertical-video screen goes by the video's shape (`VerticalVideoMetrics.fills`).

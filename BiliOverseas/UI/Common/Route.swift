@@ -74,6 +74,20 @@ final class TabRouter: ObservableObject {
 
     func push(_ route: Route) { path.append(route) }
     func pop() { if !path.isEmpty { path.removeLast() } }
+
+    /// With no slide: something else moves (`VideoMorph`).
+    func pushWithoutAnimation(_ route: Route) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { path.append(route) }
+    }
+
+    func popWithoutAnimation() {
+        guard !path.isEmpty else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { path.removeLast() }
+    }
     func popToRoot() { path = NavigationPath() }
 }
 

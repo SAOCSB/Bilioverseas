@@ -47,6 +47,10 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     private var lastVolumeWrite: CFTimeInterval = 0
     private var adjustingVolume = false
     private var boosting = false
+    /// What the finger holding 倍速 does: sideways it drags the progress.
+    private var pressSeek: VerticalVideoPressSeek?
+    /// The part that began on: a time means nothing on the next one.
+    private var pressCid: Int64?
 
     private var tapForward: Bool?
     private var tapAccumulated: Double = 0
@@ -150,6 +154,7 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
                 boosting = false
                 controller.endBoost()
                 controller.overlay.endHold()
+                endPressSeek(controller)
             }
             if panMode != .undecided { finishPan(committed: false, controller) }
         } else {
@@ -170,6 +175,11 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         guard let controller, g.state == .ended else { return }
         let overlay = controller.overlay
         let surface = controller.surface
+        if controller.isBoostLocked {
+            cancelPendingDanmaku()
+            controller.endBoost()
+            return
+        }
         if overlay.isLocked {
             cancelPendingDanmaku()
             overlay.toggleControls()
@@ -317,9 +327,12 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
                 boosting = false
                 controller.endBoost()
                 controller.overlay.endHold()
+                endPressSeek(controller)
             }
             if controller.beginBoost() {
                 boosting = true
+                pressSeek = VerticalVideoPressSeek(startX: g.location(in: self).x)
+                pressCid = controller.item?.cid
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 controller.overlay.beginHold()
                 // HLS without I-frame playlists plays at most 2×: say so once per video (the pill shows the real rate).
@@ -328,15 +341,48 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
                     controller.overlay.showHint("当前视频最高支持 2 倍速播放")
                 }
             }
+        case .changed:
+            pressMoved(to: g.location(in: self), controller)
         case .ended, .cancelled, .failed:
-            if boosting {
-                boosting = false
+            guard boosting else { break }
+            boosting = false
+            let locks = g.state == .ended && controller.overlay.isOverSpeedLock
+            let target = g.state == .ended && pressSeek?.isSeeking == true && controller.item?.cid == pressCid
+                ? pressSeek?.target : nil
+            endPressSeek(controller)
+            controller.overlay.endHold()
+            if locks {
+                controller.lockBoost()
+            } else {
                 controller.endBoost()
-                controller.overlay.endHold()
+                if let target {
+                    controller.seek(to: target)
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                }
             }
         default:
             break
         }
+    }
+
+    private func pressMoved(to p: CGPoint, _ controller: PlayerController) {
+        guard boosting, var seek = pressSeek, controller.item?.cid == pressCid else { return }
+        let target = seek.moved(toX: p.x, width: bounds.width, time: { controller.displayTime() }, duration: controller.duration)
+        pressSeek = seek
+        if let target {
+            if controller.overlay.seekPreview == nil { controller.ensureVideoShot() }
+            controller.overlay.seekPreview = PlayerSeekPreview(target: target, duration: controller.duration, delta: 0, cancelled: false)
+        }
+        // Only that screen has the place for it, below the picture.
+        let overLock = onVerticalScreen && !seek.isSeeking && p.y >= bounds.height - 8
+        if controller.overlay.isOverSpeedLock != overLock { controller.overlay.isOverSpeedLock = overLock }
+    }
+
+    private func endPressSeek(_ controller: PlayerController) {
+        if pressSeek?.isSeeking == true { controller.overlay.seekPreview = nil }
+        pressSeek = nil
+        pressCid = nil
+        controller.overlay.isOverSpeedLock = false
     }
 
     // MARK: Pan

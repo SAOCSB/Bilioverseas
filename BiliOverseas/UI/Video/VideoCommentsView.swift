@@ -19,6 +19,20 @@ struct VideoCommentsView: View {
     }
 }
 
+// MARK: - What the list sits on
+
+private struct VideoCommentsPanelColorKey: EnvironmentKey {
+    static let defaultValue: Color? = nil
+}
+
+extension EnvironmentValues {
+    /// The panel the comments are on (`VerticalVideoPanel`); nil on a page, with the system's colours.
+    var videoCommentsPanelColor: Color? {
+        get { self[VideoCommentsPanelColorKey.self] }
+        set { self[VideoCommentsPanelColorKey.self] = newValue }
+    }
+}
+
 // MARK: - Composer target
 
 /// What the composer replies to. Root comment: all zero. Reply to a root comment: root = parent = its rpid.
@@ -393,6 +407,68 @@ private struct ScrollPositionObserver: UIViewRepresentable {
     }
 }
 
+/// Pulling the enclosing `UIScrollView` down from its top moves what holds it instead of the list, as a sheet does. Goes
+/// inside a `ScrollView`'s content.
+private struct ScrollPullDownObserver: UIViewRepresentable {
+    let onPull: (CGFloat) -> Void
+    let onLetGo: (_ distance: CGFloat, _ velocity: CGFloat) -> Void
+
+    func makeUIView(context: Context) -> ObserverView {
+        let view = ObserverView()
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ view: ObserverView, context: Context) {
+        view.onPull = onPull
+        view.onLetGo = onLetGo
+    }
+
+    final class ObserverView: UIView {
+        var onPull: ((CGFloat) -> Void)?
+        var onLetGo: ((CGFloat, CGFloat) -> Void)?
+        private weak var scrollView: UIScrollView?
+        private var pullStart: CGFloat?
+        private var distance: CGFloat = 0
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            var ancestor = superview
+            while let view = ancestor, !(view is UIScrollView) { ancestor = view.superview }
+            guard let found = ancestor as? UIScrollView, found !== scrollView else { return }
+            scrollView?.panGestureRecognizer.removeTarget(self, action: #selector(panned(_:)))
+            scrollView = found
+            found.panGestureRecognizer.addTarget(self, action: #selector(panned(_:)))
+        }
+
+        @objc private func panned(_ pan: UIPanGestureRecognizer) {
+            guard let scrollView else { return }
+            let top = -scrollView.adjustedContentInset.top
+            let translation = pan.translation(in: scrollView.superview).y
+            switch pan.state {
+            case .changed:
+                if let pullStart {
+                    distance = max(translation - pullStart, 0)
+                    scrollView.contentOffset.y = top
+                    onPull?(distance)
+                    if distance == 0 { self.pullStart = nil }
+                } else if scrollView.contentOffset.y <= top, pan.velocity(in: scrollView.superview).y > 0 {
+                    pullStart = translation
+                    distance = 0
+                    scrollView.contentOffset.y = top
+                }
+            case .ended, .cancelled, .failed:
+                guard pullStart != nil else { return }
+                pullStart = nil
+                onLetGo?(pan.state == .ended ? distance : 0, pan.state == .ended ? pan.velocity(in: scrollView.superview).y : 0)
+            default:
+                break
+            }
+        }
+    }
+}
+
 /// The comment list (sort header, pinned items, infinite scroll, sheets). `hostsComposer == false` when an
 /// ancestor presents `VideoCommentComposerHost` for the same model (the video detail page does).
 struct VideoCommentsListView: View {
@@ -404,6 +480,7 @@ struct VideoCommentsListView: View {
     var onScroll: ((VideoCommentsScrollMetrics) -> Void)? = nil
 
     @EnvironmentObject private var router: TabRouter
+    @Environment(\.videoCommentsPanelColor) private var panelColor
     @State private var viewer: VideoImageViewerItem?
     @State private var pendingDelete: ReplyItem?
 
@@ -443,9 +520,16 @@ struct VideoCommentsListView: View {
         .safeAreaInset(edge: .bottom) {
             if showsComposerBar { composerBar }
         }
-        .sheet(item: $model.subRepliesRoot) { root in
-            subRepliesSheet(root)
+        // Over this list, not over the page: what is above it (the video, the tabs) stays where it is.
+        .overlay {
+            if let root = model.subRepliesRoot {
+                subRepliesLayer(root)
+                    .id(root.rpid)
+                    .transition(.move(edge: .bottom))
+            }
         }
+        .clipped()
+        .animation(.easeOut(duration: 0.25), value: model.subRepliesRoot?.rpid)
         .background(Group {
             if hostsComposer { VideoCommentComposerHost(model: model) }
         })
@@ -473,13 +557,14 @@ struct VideoCommentsListView: View {
     private var sortHeader: some View {
         HStack {
             Text(model.sort == .hot ? "热门评论" : "最新评论")
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
             Spacer()
             Button {
                 model.setSort(model.sort == .hot ? .time : .hot)
             } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "arrow.up.arrow.down")
+                HStack(spacing: 4) {
+                    Image(systemName: "line.3.horizontal")
                     Text(model.sort.title)
                 }
                 .font(.system(size: 12))
@@ -493,24 +578,10 @@ struct VideoCommentsListView: View {
     }
 
     private var composerBar: some View {
-        Button {
+        VideoCommentInputBar(text: model.inputDisabled ? "评论区已关闭" : model.inputPlaceholder,
+                             disabled: model.inputDisabled || model.oid == 0) {
             openComposer(.init())
-        } label: {
-            HStack {
-                Text(model.inputDisabled ? "评论区已关闭" : "发个友善的评论吧")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 36)
-            .background(Color(.secondarySystemBackground), in: Capsule())
         }
-        .buttonStyle(.plain)
-        .disabled(model.inputDisabled || model.oid == 0)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 
     private func row(_ item: ReplyItem) -> some View {
@@ -544,7 +615,7 @@ struct VideoCommentsListView: View {
         model.composerTarget = target
     }
 
-    private func subRepliesSheet(_ root: ReplyItem) -> some View {
+    private func subRepliesLayer(_ root: ReplyItem) -> some View {
         let seek: ((Double) -> Void)? = onSeek == nil ? nil : { t in
             model.subRepliesRoot = nil
             onSeek?(t)
@@ -555,7 +626,8 @@ struct VideoCommentsListView: View {
                 model.subRepliesRoot = nil
                 router.push(route)
             },
-            onSeek: seek)
+            onSeek: seek,
+            onClose: { model.subRepliesRoot = nil })
     }
 
     private func handle(_ url: URL) -> OpenURLAction.Result {
@@ -600,8 +672,46 @@ struct VideoCommentRowActions {
     var delete: (ReplyItem) -> Void = { _ in }
 }
 
+/// The bar under a comment list: what to say in the capsule, the emote face beside it.
+struct VideoCommentInputBar: View {
+    let text: String
+    var disabled = false
+    let action: () -> Void
+
+    @Environment(\.videoCommentsPanelColor) private var panelColor
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: action) {
+                Text(text.isEmpty ? "发个友善的评论吧" : text)
+                    .font(.system(size: 14))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .frame(height: 36)
+                    .background(panelColor == nil ? Color(.secondarySystemBackground) : Color.white.opacity(0.08), in: Capsule())
+            }
+            .accessibilityLabel(Text("写评论"))
+            Button(action: action) {
+                Image(systemName: "face.smiling")
+                    .font(.system(size: 22))
+                    .foregroundColor(.secondary)
+                    .frame(width: 30, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel(Text("写评论"))
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background((panelColor ?? Color(.systemBackground)).ignoresSafeArea(edges: .bottom))
+    }
+}
+
 /// One comment: avatar, name (VIP pink), level, UP badge, rich content (emotes, links), pictures,
-/// time · IP属地, like / dislike / reply, 「UP主觉得很赞」 and the 「共N条回复」 preview box.
+/// time · IP属地 · 回复, like / dislike / ⋮, 「UP主觉得很赞」 and the 「共N条回复」 preview box.
 struct VideoCommentRow: View {
     let item: ReplyItem
     var compact = false
@@ -610,6 +720,7 @@ struct VideoCommentRow: View {
     var timestamps = false
     let actions: VideoCommentRowActions
 
+    @Environment(\.videoCommentsPanelColor) private var panelColor
     @State private var emotes: [String: UIImage] = [:]
     @State private var previewEmotes: [String: UIImage] = [:]
 
@@ -651,23 +762,25 @@ struct VideoCommentRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
-        .contextMenu {
-            Button {
-                UIPasteboard.general.string = item.message
-                ToastCenter.shared.show("已复制")
-            } label: {
-                Label("复制", systemImage: "doc.on.doc")
-            }
-            if isOwn {
-                Button(role: .destructive) {
-                    actions.delete(item)
-                } label: {
-                    Label("删除", systemImage: "trash")
-                }
-            }
-        }
+        .contextMenu { menuItems }
         .task(id: item.rpid) {
             await loadEmotes()
+        }
+    }
+
+    @ViewBuilder private var menuItems: some View {
+        Button {
+            UIPasteboard.general.string = item.message
+            ToastCenter.shared.show("已复制")
+        } label: {
+            Label("复制", systemImage: "doc.on.doc")
+        }
+        if isOwn {
+            Button(role: .destructive) {
+                actions.delete(item)
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
         }
     }
 
@@ -706,19 +819,43 @@ struct VideoCommentRow: View {
 
     private var timeLine: String {
         var parts: [String] = []
-        let time = item.timeDesc.isEmpty ? Fmt.relativeDate(item.ctime) : item.timeDesc
+        let time = VideoCommentRow.timeText(ctime: item.ctime, fallback: item.timeDesc)
         if !time.isEmpty { parts.append(time) }
-        if !item.location.isEmpty { parts.append(item.location) }
-        return parts.joined(separator: "  ")
+        let location = item.location.replacingOccurrences(of: "IP属地：", with: "")
+        if !location.isEmpty { parts.append(location) }
+        return parts.joined(separator: " ")
+    }
+
+    /// 「17小时前」, 「3天前」, 「10月4日」, 「2024年10月4日」, as the official app has them.
+    static func timeText(ctime: Int64, fallback: String) -> String {
+        guard ctime > 0 else { return fallback.replacingOccurrences(of: "发布", with: "") }
+        let date = Date(timeIntervalSince1970: TimeInterval(ctime))
+        let age = Date().timeIntervalSince(date)
+        if age < 60 { return "刚刚" }
+        if age < 3600 { return "\(Int(age / 60))分钟前" }
+        if age < 86400 { return "\(Int(age / 3600))小时前" }
+        if age < 7 * 86400 { return "\(Int(age / 86400))天前" }
+        let calendar = Calendar.current
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        let month = "\(parts.month ?? 0)月\(parts.day ?? 0)日"
+        return parts.year == calendar.component(.year, from: Date()) ? month : "\(parts.year ?? 0)年\(month)"
     }
 
     private var footer: some View {
         HStack(spacing: 0) {
             Text(timeLine)
                 .font(.system(size: 11))
-                .foregroundColor(.secondary)
+                .foregroundColor(Color(.tertiaryLabel))
                 .lineLimit(1)
-            Spacer(minLength: 8)
+            Button { actions.reply(item) } label: {
+                Text("回复")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+                    .contentShape(Rectangle())
+            }
+            Spacer(minLength: 4)
             Button { actions.like(item) } label: {
                 HStack(spacing: 3) {
                     Image(systemName: item.userLiked ? "hand.thumbsup.fill" : "hand.thumbsup")
@@ -736,21 +873,25 @@ struct VideoCommentRow: View {
                     .frame(height: 24)
                     .contentShape(Rectangle())
             }
-            Button { actions.reply(item) } label: {
-                Image(systemName: "bubble.left")
+            Menu {
+                menuItems
+            } label: {
+                Image(systemName: "ellipsis")
+                    .rotationEffect(.degrees(90))
                     .foregroundColor(.secondary)
                     .padding(.leading, 8)
                     .frame(height: 24)
                     .contentShape(Rectangle())
             }
+            .accessibilityLabel(Text("更多"))
         }
         .font(.system(size: 12))
         .buttonStyle(.plain)
     }
 
     private var previewBox: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            ForEach(item.previewReplies.prefix(3)) { reply in
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(item.previewReplies.prefix(2)) { reply in
                 previewLine(reply)
                     .font(.system(size: 13))
                     .foregroundColor(.primary)
@@ -758,27 +899,35 @@ struct VideoCommentRow: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if item.replyCount > 0 {
-                HStack(spacing: 2) {
+                HStack(spacing: 4) {
                     Text(item.replyCountText.isEmpty ? "共\(item.replyCount)条回复" : item.replyCountText)
                     Image(systemName: "chevron.right")
+                        .font(.system(size: 10))
                 }
                 .font(.system(size: 12))
                 .foregroundColor(.biliBlue)
             }
         }
-        .padding(8)
+        .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 4))
+        .background(panelColor == nil ? Color(.secondarySystemBackground) : Color.black.opacity(0.3),
+                    in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
         .onTapGesture { actions.openReplies(item) }
     }
 
     private func previewLine(_ reply: ReplyItem) -> Text {
-        var head = Text(reply.uname).foregroundColor(.biliBlue)
+        var head = Text(reply.uname).foregroundColor(.secondary)
         if reply.isUploader {
             head = head + Text(" UP").font(.system(size: 10, weight: .bold)).foregroundColor(.biliPink)
         }
-        return head + Text("：") + VideoRichText.text(VideoRichText.segments(for: reply, timestamps: false), emotes: previewEmotes)
+        var line = head + Text(": ").foregroundColor(.secondary)
+            + VideoRichText.text(VideoRichText.segments(for: reply, timestamps: false), emotes: previewEmotes)
+        if reply.likeCount > 0 {
+            line = line + Text("  ") + Text(Image(systemName: "hand.thumbsup")).font(.system(size: 11)).foregroundColor(.secondary)
+                + Text(" \(Fmt.count(reply.likeCount))").font(.system(size: 11)).foregroundColor(.secondary)
+        }
+        return line
     }
 
     private func loadEmotes() async {
@@ -887,6 +1036,8 @@ final class VideoCommentSubRepliesModel: ObservableObject, VideoCommentMutating 
     @Published private(set) var didLoad = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var totalCount: Int
+    /// What the input says, from the first page on.
+    @Published private(set) var inputPlaceholder = ""
     @Published var composerTarget: VideoCommentComposerTarget?
 
     private var nextPage = 1
@@ -943,7 +1094,10 @@ final class VideoCommentSubRepliesModel: ObservableObject, VideoCommentMutating 
             let requested = reset ? 1 : nextPage
             let page = try await ReplyAPI.subReplies(oid: oid, type: type, root: root.rpid, page: requested)
             guard gen == generation else { return }
-            if reset { items = [] }
+            if reset {
+                items = []
+                inputPlaceholder = page.inputPlaceholder
+            }
             if page.upperMid != 0 { upperMid = page.upperMid }
             if var fresh = page.root {
                 fresh.previewReplies = []
@@ -1010,38 +1164,57 @@ final class VideoCommentSubRepliesModel: ObservableObject, VideoCommentMutating 
     }
 }
 
-/// 「评论详情」 sheet: the root comment and its paged replies (楼中楼), with its own composer.
+/// 「评论详情」: the root comment and its paged replies (楼中楼), with its own composer. `onClose` nil: it is a sheet of its
+/// own. Otherwise it lies over the list it came from, and pulling it down from its top lets it go.
 struct VideoCommentSubRepliesSheet: View {
     @StateObject private var model: VideoCommentSubRepliesModel
     private let timestamps: Bool
     private let navigate: (Route) -> Void
     private let onSeek: ((Double) -> Void)?
+    private let onClose: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.videoCommentsPanelColor) private var panelColor
     @State private var viewer: VideoImageViewerItem?
     @State private var pendingDelete: ReplyItem?
+    /// How far it has been pulled down.
+    @State private var pulled: CGFloat = 0
 
     init(root: ReplyItem, oid: Int64, type: Int, parent: VideoCommentsModel?, timestamps: Bool,
-         navigate: @escaping (Route) -> Void, onSeek: ((Double) -> Void)?) {
+         navigate: @escaping (Route) -> Void, onSeek: ((Double) -> Void)?, onClose: (() -> Void)? = nil) {
         _model = StateObject(wrappedValue: VideoCommentSubRepliesModel(root: root, oid: oid, type: type, parent: parent))
         self.timestamps = timestamps
         self.navigate = navigate
         self.onSeek = onSeek
+        self.onClose = onClose
+    }
+
+    private func close() {
+        if let onClose { onClose() } else { dismiss() }
     }
 
     var body: some View {
-        NavigationStack {
+        VStack(spacing: 0) {
+            header
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     VideoCommentRow(item: model.root, showsPreview: false, timestamps: timestamps, actions: actions)
                     Rectangle()
-                        .fill(Color(.secondarySystemBackground))
+                        .fill(panelColor == nil ? Color(.secondarySystemBackground) : Color.black.opacity(0.3))
                         .frame(height: 8)
-                    Text("相关回复共\(model.totalCount)条")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
+                    HStack {
+                        Text("相关回复共\(model.totalCount)条")
+                        Spacer()
+                        HStack(spacing: 4) {
+                            Image(systemName: "line.3.horizontal")
+                            Text("按时间")
+                        }
+                        .font(.system(size: 12))
+                    }
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
                     ForEach(model.items) { reply in
                         VideoCommentRow(item: reply, compact: true, showsPreview: false, timestamps: timestamps, actions: actions)
                             .onAppear { model.onItemAppear(reply) }
@@ -1055,62 +1228,76 @@ struct VideoCommentSubRepliesSheet: View {
                         Task { await model.retry() }
                     }
                 }
-            }
-            .pullToRefresh { await model.refresh() }
-            .task { await model.loadIfNeeded() }
-            .safeAreaInset(edge: .bottom) { replyBar }
-            .navigationTitle("评论详情")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button { dismiss() } label: { Image(systemName: "xmark") }
-                }
-            }
-            .environment(\.openURL, OpenURLAction { url in handle(url) })
-            .sheet(item: $model.composerTarget) { target in
-                VideoCommentComposerSheet(target: target) { text in
-                    await model.send(text, target: target)
-                }
-            }
-            .fullScreenCover(item: $viewer) { item in
-                VideoImageViewer(item: item)
-            }
-            .confirmationDialog("确定删除这条评论吗？", isPresented: deleteBinding, titleVisibility: .visible,
-                                presenting: pendingDelete) { item in
-                Button("删除", role: .destructive) {
-                    Task {
-                        if await model.delete(item) { dismiss() }
+                .background {
+                    if onClose != nil {
+                        ScrollPullDownObserver(onPull: { pulled = $0 }, onLetGo: letGo)
                     }
                 }
-                Button("取消", role: .cancel) {}
             }
+            .task { await model.loadIfNeeded() }
+            .safeAreaInset(edge: .bottom) {
+                VideoCommentInputBar(text: model.inputPlaceholder.isEmpty ? "回复 @\(model.root.uname)：" : model.inputPlaceholder) {
+                    openComposer(.reply(to: model.root))
+                }
+            }
+        }
+        .background((panelColor ?? Color(.systemBackground)).ignoresSafeArea(edges: .bottom))
+        .offset(y: pulled)
+        .environment(\.openURL, OpenURLAction { url in handle(url) })
+        .sheet(item: $model.composerTarget) { target in
+            VideoCommentComposerSheet(target: target) { text in
+                await model.send(text, target: target)
+            }
+        }
+        .fullScreenCover(item: $viewer) { item in
+            VideoImageViewer(item: item)
+        }
+        .confirmationDialog("确定删除这条评论吗？", isPresented: deleteBinding, titleVisibility: .visible,
+                            presenting: pendingDelete) { item in
+            Button("删除", role: .destructive) {
+                Task {
+                    if await model.delete(item) { close() }
+                }
+            }
+            Button("取消", role: .cancel) {}
         }
         .presentationDragIndicator(.visible)
     }
 
-    private var deleteBinding: Binding<Bool> {
-        Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })
+    private var header: some View {
+        HStack {
+            Text("评论详情")
+                .font(.system(size: 15, weight: .medium))
+            Spacer()
+            Button(action: close) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("关闭"))
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 2)
+        .frame(height: 44)
+        .contentShape(Rectangle())
+        // Held by its title bar it comes down the same way.
+        .gesture(onClose == nil ? nil : DragGesture(minimumDistance: 6)
+            .onChanged { pulled = max($0.translation.height, 0) }
+            .onEnded { letGo(distance: max($0.translation.height, 0), velocity: $0.predictedEndTranslation.height - $0.translation.height) })
     }
 
-    private var replyBar: some View {
-        Button {
-            openComposer(.reply(to: model.root))
-        } label: {
-            HStack {
-                Text("回复 @\(model.root.uname)：")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 36)
-            .background(Color(.secondarySystemBackground), in: Capsule())
+    private func letGo(distance: CGFloat, velocity: CGFloat) {
+        if distance > 90 || velocity > 300 {
+            close()
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) { pulled = 0 }
         }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
+    }
+
+    private var deleteBinding: Binding<Bool> {
+        Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })
     }
 
     private var actions: VideoCommentRowActions {

@@ -94,7 +94,7 @@ final class PlayerFullscreenPresenter {
     /// `willPresent`: right before the controller goes on screen, which waits for one still leaving to have gone (not
     /// called when the presentation is dropped). `onShown`: the player is in place and the screen stands still.
     func present<Content: View>(_ content: Content, mask: UIInterfaceOrientationMask,
-                                orientation: UIInterfaceOrientation, showsStatusBar: Bool = false,
+                                orientation: UIInterfaceOrientation, showsStatusBar: Bool = false, animated: Bool = true,
                                 willPresent: (() -> Void)? = nil, onShown: @escaping () -> Void) -> Bool {
         guard hosting == nil else { return false }
         if leaving != nil {
@@ -102,7 +102,7 @@ final class PlayerFullscreenPresenter {
             pendingPresent = { [weak self] in
                 guard let self else { return }
                 if !self.present(content, mask: mask, orientation: orientation, showsStatusBar: showsStatusBar,
-                                 willPresent: willPresent, onShown: onShown) {
+                                 animated: animated, willPresent: willPresent, onShown: onShown) {
                     OrientationManager.shared.restorePortrait()
                 }
             }
@@ -127,21 +127,21 @@ final class PlayerFullscreenPresenter {
         if let dismissing = top.presentedViewController, dismissing.isBeingDismissed,
            let coordinator = dismissing.transitionCoordinator {
             let queued = coordinator.animate(alongsideTransition: nil) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.presentDeferred(vc, willPresent: willPresent, then: shown) }
+                Task { @MainActor [weak self] in self?.presentDeferred(vc, animated: animated, willPresent: willPresent, then: shown) }
             }
             if queued { return true }
         }
         willPresent?()
-        top.present(vc, animated: true, completion: shown)
+        top.present(vc, animated: animated, completion: shown)
         return true
     }
 
     /// Deferred `present`: skipped when fullscreen was left (or entered anew) meanwhile.
-    private func presentDeferred(_ vc: PlayerFullscreenHostingController, willPresent: (() -> Void)?,
+    private func presentDeferred(_ vc: PlayerFullscreenHostingController, animated: Bool, willPresent: (() -> Void)?,
                                  then shown: @escaping () -> Void) {
         guard hosting === vc, vc.presentingViewController == nil, let top = Self.topViewController() else { return }
         willPresent?()
-        top.present(vc, animated: true, completion: shown)
+        top.present(vc, animated: animated, completion: shown)
     }
 
     /// Turns the screen under the fullscreen player that stays: a landscape video on the vertical-video screen going
@@ -174,7 +174,8 @@ final class PlayerFullscreenPresenter {
 
     /// `releaseSurface`: called once the screen has turned back, right before the fade back to the page (the
     /// video stays in the fullscreen view while it turns). `completion`: the fullscreen controller is gone.
-    func dismiss(releasingSurface releaseSurface: @escaping () -> Void, completion: (() -> Void)? = nil) {
+    /// Not `animated`: something over it moves instead (`VideoMorph`).
+    func dismiss(animated: Bool = true, releasingSurface releaseSurface: @escaping () -> Void, completion: (() -> Void)? = nil) {
         guard let vc = hosting else {
             // Left before it was shown (it waited for the previous one to go away).
             pendingPresent = nil
@@ -206,32 +207,32 @@ final class PlayerFullscreenPresenter {
                 return
             }
             releaseSurface()
-            fadeOut(vc)
+            fadeOut(vc, animated: animated)
         }
         fadeOutOnceUpright()
     }
 
-    private func fadeOut(_ vc: PlayerFullscreenHostingController) {
+    private func fadeOut(_ vc: PlayerFullscreenHostingController, animated: Bool) {
         // UIKit ignores a dismissal requested while a presentation in this stack is still animating (the
         // fullscreen itself, or a sheet just opened over it).
         if let coordinator = Self.runningTransition(in: vc) {
             let queued = coordinator.animate(alongsideTransition: nil) { [weak self] _ in
-                Task { @MainActor in self?.dismissNow(vc) }
+                Task { @MainActor in self?.dismissNow(vc, animated: animated) }
             }
             if queued { return }
         }
-        dismissNow(vc)
+        dismissNow(vc, animated: animated)
     }
 
     /// Dismisses from the presenting controller: that also takes down a sheet shown over the fullscreen player
     /// (弹幕设置, 发弹幕 …). `vc.dismiss` would only close that sheet and leave a black fullscreen controller
     /// behind, with the surface already moved back inline and no way out.
-    private func dismissNow(_ vc: PlayerFullscreenHostingController) {
+    private func dismissNow(_ vc: PlayerFullscreenHostingController, animated: Bool) {
         guard let presenter = vc.presentingViewController else {
             finishLeaving(vc)
             return
         }
-        presenter.dismiss(animated: true) { [weak self] in self?.finishLeaving(vc) }
+        presenter.dismiss(animated: animated) { [weak self] in self?.finishLeaving(vc) }
     }
 
     private func finishLeaving(_ vc: PlayerFullscreenHostingController) {

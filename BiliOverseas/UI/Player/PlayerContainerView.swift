@@ -69,20 +69,31 @@ private struct PlayerStageContent: View {
             && measured.height + safeArea.top + safeArea.bottom > measured.width
         let gap = verticalScreen ? VerticalVideoMetrics.statusBarGap : 0
         let size = CGSize(width: measured.width, height: measured.height + gap)
-        ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea(edges: ignoredEdges)
-            PlayerSurfaceRepresentable(controller: controller, role: role)
-                .frame(height: verticalScreen ? max(size.height - VerticalVideoMetrics.bottomBarHeight, 0) : nil)
-                .ignoresSafeArea(edges: verticalScreen ? [] : ignoredEdges)
-            if isActive || holdsSurface {
-                PlayerChromeView(controller: controller, overlay: overlay, size: size,
-                                 fullscreen: role == .fullscreen, verticalScreen: verticalScreen,
-                                 showsPicture: holdsSurface && !controller.isVideoSwipeActive,
-                                 showsControls: isActive)
+        let surfaceHeight = max(size.height - VerticalVideoMetrics.bottomBarHeight, 0)
+        ZStack {
+            ZStack(alignment: .top) {
+                Color.black.ignoresSafeArea(edges: ignoredEdges)
+                PlayerSurfaceRepresentable(controller: controller, role: role)
+                    .frame(height: verticalScreen ? surfaceHeight : nil)
+                    .ignoresSafeArea(edges: verticalScreen ? [] : ignoredEdges)
+                    .modifier(VerticalVideoPanelPicture(live: controller.storyPanel.live, active: verticalScreen,
+                                                        picture: controller.surface.pictureRect,
+                                                        size: CGSize(width: size.width, height: surfaceHeight)))
+                if isActive || holdsSurface {
+                    PlayerChromeView(controller: controller, overlay: overlay, size: size,
+                                     fullscreen: role == .fullscreen, verticalScreen: verticalScreen,
+                                     showsPicture: holdsSurface && !controller.isVideoSwipeActive,
+                                     showsControls: isActive)
+                        .modifier(VerticalVideoPanelFading(live: controller.storyPanel.live, active: verticalScreen))
+                }
+            }
+            .frame(width: size.width, height: size.height)
+            .offset(y: -gap)
+            if verticalScreen, let content = controller.storyPanelContent, let router = controller.pageRouter {
+                VerticalVideoPanelHost(state: controller.storyPanel, live: controller.storyPanel.live, content: content)
+                    .environmentObject(router)
             }
         }
-        .frame(width: size.width, height: size.height)
-        .offset(y: -gap)
         .onAppear { stageChanged(verticalScreen: verticalScreen) }
         .onChange(of: verticalScreen) { stageChanged(verticalScreen: $0) }
     }
@@ -301,19 +312,32 @@ struct PlayerChromeView: View {
                 .transition(.opacity)
         }
         if controller.isBoosting {
-            PlayerPill {
-                HStack(spacing: 4) {
-                    Image(systemName: "forward.fill").font(.system(size: 11))
-                    Text("\(PlayerFormat.rate(Double(controller.playerRate)))倍速中")
+            if verticalScreen {
+                let rate = PlayerFormat.rate(Double(controller.playerRate))
+                VerticalVideoSpeedPill(mode: overlay.seekPreview != nil ? .seeking
+                    : controller.isBoostLocked ? .locked(rate) : .speed(rate))
+            } else {
+                PlayerPill {
+                    HStack(spacing: 4) {
+                        Image(systemName: "forward.fill").font(.system(size: 11))
+                        Text("\(PlayerFormat.rate(Double(controller.playerRate)))倍速中")
+                    }
                 }
+                .padding(.top, fullscreen ? 56 : 30)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .allowsHitTesting(false)
+                .transition(.opacity)
             }
-            .padding(.top, fullscreen ? 56 : 30)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .allowsHitTesting(false)
-            .transition(.opacity)
         }
         if let preview = overlay.seekPreview {
-            seekPreviewView(preview)
+            if verticalScreen {
+                VerticalVideoSeekBar(target: preview.target, duration: preview.duration, shot: controller.videoShot)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                    .offset(y: VerticalVideoMetrics.progressOverhang)
+                    .opacity(preview.cancelled ? 0.5 : 1)
+            } else {
+                seekPreviewView(preview)
+            }
         }
         if let hud = overlay.levelHUD {
             PlayerLevelPill(hud: hud)
@@ -532,22 +556,28 @@ struct PlayerChromeView: View {
                 .id(controller.item?.cid)
                 .padding(.horizontal, 12)
                 .offset(y: VerticalVideoMetrics.progressOverhang)
+                .opacity(overlay.seekPreview == nil ? 1 : 0)
         }
         .opacity(controller.isVideoSwipeActive || overlay.danmakuBubbleOpen ? 0 : 1)
         .allowsHitTesting(!controller.isSwitchingBySwipe && !overlay.danmakuBubbleOpen)
     }
 
     private var verticalBottomBar: some View {
-        VerticalVideoBottomBar(danmakuOn: settings.danmaku.enabled, landscape: !controller.isVerticalVideo,
-                               cleared: controller.storyCleared,
-                               onSend: { overlay.sheet = .danmakuSend },
-                               onToggle: { controller.toggleDanmaku() },
-                               onSettings: { overlay.sheet = .danmakuSettings },
-                               onDetail: { controller.exitFullscreen() },
-                               onClear: { controller.setStoryCleared(!controller.storyCleared) },
-                               onFullscreen: { controller.turnStoryLandscape() })
-            .opacity(controller.isBoosting ? 0 : 1)
-            .allowsHitTesting(!controller.isBoosting)
+        ZStack {
+            VerticalVideoBottomBar(danmakuOn: settings.danmaku.enabled, landscape: !controller.isVerticalVideo,
+                                   cleared: controller.storyCleared,
+                                   onSend: { overlay.sheet = .danmakuSend },
+                                   onToggle: { controller.toggleDanmaku() },
+                                   onSettings: { overlay.sheet = .danmakuSettings },
+                                   onDetail: { controller.goToPageFromVerticalScreen() },
+                                   onClear: { controller.setStoryCleared(!controller.storyCleared) },
+                                   onFullscreen: { controller.turnStoryLandscape() })
+                .opacity(controller.isBoosting ? 0 : 1)
+                .allowsHitTesting(!controller.isBoosting)
+            if controller.isBoosting, overlay.seekPreview == nil, !controller.isBoostLocked {
+                VerticalVideoSpeedLockHint(active: overlay.isOverSpeedLock)
+            }
+        }
     }
 
     // MARK: Bars

@@ -42,6 +42,11 @@ final class ShortVideoPlayback: ObservableObject {
     @Published private(set) var isFastForward = false
     /// Not the video on screen: it keeps what it has and downloads no further than a swipe to it needs.
     @Published private(set) var isStandingBy = false
+    /// Where it shows now, if it does.
+    weak var surfaceView: ShortVideoSurface.PlayerLayerView?
+    /// Pictures of its moments, for dragging the progress.
+    @Published private(set) var videoShot: VideoShotInfo?
+    private var videoShotAsked = false
 
     private var session: PlaybackSession?
     /// The stream with no item in the player: what the next `prepare` installs at once.
@@ -258,6 +263,17 @@ final class ShortVideoPlayback: ObservableObject {
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero,
                     toleranceAfter: .zero) { [weak self] _ in
             Task { @MainActor in self?.seeking = false }
+        }
+    }
+
+    /// Asked for when the progress is first dragged.
+    func ensureVideoShot() {
+        guard !videoShotAsked, let cid = resolvedCid else { return }
+        videoShotAsked = true
+        let (aid, bvid) = (item.aid, item.bvid)
+        Task { [weak self] in
+            let shot = try? await VideoAPI.videoshot(aid: aid, bvid: bvid, cid: cid)
+            if let shot, !shot.isEmpty { self?.videoShot = shot }
         }
     }
 
@@ -649,6 +665,8 @@ struct ShortVideoSurface: UIViewRepresentable {
     let player: AVPlayer
     var fill: Bool
     @Binding var readyForDisplay: Bool
+    /// Told which view it is.
+    var onView: ((PlayerLayerView) -> Void)?
 
     func makeUIView(context: Context) -> PlayerLayerView {
         let view = PlayerLayerView()
@@ -662,21 +680,36 @@ struct ShortVideoSurface: UIViewRepresentable {
     func updateUIView(_ view: PlayerLayerView, context: Context) {
         if view.playerLayer.player !== player { view.playerLayer.player = player }
         view.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        onView?(view)
     }
 
+    /// SwiftUI has this one. The picture is in a view inside it, which can be lent (`VideoMorph`).
     final class PlayerLayerView: UIView {
-        override static var layerClass: AnyClass { AVPlayerLayer.self }
-        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+        let picture = PlayerVideoLayerView()
+        var playerLayer: AVPlayerLayer { picture.playerLayer }
         var onReadyChange: ((Bool) -> Void)?
         private var observation: NSKeyValueObservation?
 
         override init(frame: CGRect) {
             super.init(frame: frame)
+            picture.isUserInteractionEnabled = false
+            addSubview(picture)
             observation = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
                 self?.onReadyChange?(layer.isReadyForDisplay)
             }
         }
 
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            if picture.superview === self { picture.frame = bounds }
+        }
+
+        func takeBackPicture() {
+            picture.transform = .identity
+            addSubview(picture)
+            picture.frame = bounds
+        }
     }
 }

@@ -1,3 +1,4 @@
+import AVFoundation
 import Combine
 import SwiftUI
 import UIKit
@@ -40,7 +41,7 @@ struct VideoDetailView: View {
     var body: some View {
         GeometryReader { geo in
             let fullHeight = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-            let height = playerHeight(width: geo.size.width, fullHeight: fullHeight)
+            let height = Self.playerHeight(width: geo.size.width, fullHeight: fullHeight, isVertical: model.isVerticalVideo)
             VStack(spacing: 0) {
                 playerArea(width: geo.size.width, height: height)
                 pageContent(foldDistance: height - Self.collapsedBarHeight)
@@ -65,6 +66,14 @@ struct VideoDetailView: View {
             model.pageAppeared()
             model.attach(player)
             player.pageRouter = router
+            player.inlinePictureFrame = { size in
+                guard let window = PlayerFullscreenPresenter.keyWindow() else { return .zero }
+                return Self.inlinePictureFrame(video: size, in: window)
+            }
+            if player.goingOn != nil {
+                let page = self
+                player.onStoryInstead = { page.goBackToScreen() }
+            }
             model.startIfNeeded()
             if resumeOnAppear {
                 resumeOnAppear = false
@@ -125,15 +134,49 @@ struct VideoDetailView: View {
     /// 16:9 for horizontal videos; vertical videos get `max(longestSide × 0.65, shortestSide)`. Both are capped at
     /// 65 % of the screen height: a landscape iPad would otherwise give a 16:9 player all but ~110 pt of it
     /// (the video is letterboxed inside the shorter area).
-    private func playerHeight(width: CGFloat, fullHeight: CGFloat) -> CGFloat {
+    static func playerHeight(width: CGFloat, fullHeight: CGFloat, isVertical: Bool) -> CGFloat {
         let horizontal = (width * 9 / 16).rounded()
         guard fullHeight > 0 else { return horizontal }
         let cap = (fullHeight * 0.65).rounded()
-        guard model.isVerticalVideo else { return min(horizontal, cap) }
+        guard isVertical else { return min(horizontal, cap) }
         let shortest = min(width, fullHeight)
         let longest = max(width, fullHeight)
         let vertical = min(max(longest * 0.65, shortest), fullHeight * 0.65)
         return min(max(horizontal, vertical.rounded()), cap)
+    }
+
+    /// Where this page has the picture of a video of this size, in the coordinates of `window`.
+    @MainActor static func inlinePictureFrame(video: CGSize, in window: UIWindow) -> CGRect {
+        let width = window.bounds.width
+        let height = playerHeight(width: width, fullHeight: window.bounds.height, isVertical: video.height > video.width)
+        let area = CGRect(x: 0, y: window.safeAreaInsets.top, width: width, height: height)
+        guard video.width > 0, video.height > 0 else { return area }
+        return AVMakeRect(aspectRatio: video, insideRect: area)
+    }
+
+    /// Back on this page: to the screen its video came from, the way it came (`ShortVideoFeedModel.openPage`). Not when the
+    /// page has moved on to another video or folded the picture away: then it is a page like any other.
+    private func goBackToScreen() -> Bool {
+        guard !VideoMorph.isRunning, let goingOn = player.goingOn, let item = player.item,
+              goingOn.isVideo(aid: item.aid, cid: item.cid), !playerCollapsed, !player.isPiPBusy, !player.isFullscreen,
+              let goingBack = goingOn.onGoingBack, player.surface.window != nil,
+              let target = goingBack(player.displayTime()),
+              let morph = player.surface.lendPicture(backdropAlpha: 0) else { return false }
+        let (pagePlayer, pageRouter) = (player, router)
+        // The page goes while the picture is still on this player.
+        pagePlayer.holdStop()
+        pagePlayer.pause()
+        morph.move(to: target, backdropAlpha: 1) {
+            pageRouter.popWithoutAnimation()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                morph.finish(fade: 0.15) { pagePlayer.releaseStop() }
+            }
+        }
+        return true
+    }
+
+    private func goBack() {
+        if !goBackToScreen() { dismiss() }
     }
 
     private var statusBarBackground: Color {
@@ -175,7 +218,7 @@ struct VideoDetailView: View {
     /// (the player's 更多设置). A tap anywhere else on it unfolds the player and plays.
     private var collapsedBar: some View {
         HStack(spacing: 0) {
-            Button { dismiss() } label: {
+            Button { goBack() } label: {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 17, weight: .semibold))
                     .frame(width: 44, height: Self.collapsedBarHeight)
@@ -285,7 +328,7 @@ struct VideoDetailView: View {
 
     private var backButton: some View {
         Button {
-            dismiss()
+            goBack()
         } label: {
             Image(systemName: "chevron.left")
                 .font(.system(size: 17, weight: .semibold))
@@ -315,14 +358,16 @@ struct VideoDetailView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 0) {
-                VideoDetailTabStrip(comments: model.comments, fallbackCount: model.counts.reply, tab: $tab) {
-                    openRootComposer()
-                }
+                VideoDetailTabStrip(comments: model.comments, fallbackCount: model.counts.reply, tab: $tab,
+                                    danmakuClosed: player.surface.danmaku.isClosedByUploader,
+                                    onSendDanmaku: sendDanmaku,
+                                    onToggleDanmaku: { player.toggleDanmaku() },
+                                    onDanmakuSettings: { player.overlay.sheet = .danmakuSettings })
                 Divider()
                 TabView(selection: $tab) {
                     VideoIntroView(model: model, onSeek: { player.seek(to: $0) })
                         .tag(VideoDetailTab.intro)
-                    VideoCommentsListView(model: model.comments, hostsComposer: false, showsComposerBar: false,
+                    VideoCommentsListView(model: model.comments, hostsComposer: false, showsComposerBar: true,
                                           onSeek: { player.seek(to: $0) },
                                           onScroll: { commentsScrolled($0, foldDistance: foldDistance) })
                         .id(ObjectIdentifier(model.comments))
@@ -333,18 +378,12 @@ struct VideoDetailView: View {
         }
     }
 
-    private func openRootComposer() {
+    private func sendDanmaku() {
         guard BiliHTTP.shared.isLoggedIn else {
             router.push(.login)
             return
         }
-        guard model.comments.oid > 0 else { return }
-        if model.comments.inputDisabled {
-            ToastCenter.shared.show("评论区已关闭")
-            return
-        }
-        withAnimation(.easeInOut(duration: 0.2)) { tab = .comments }
-        model.comments.composerTarget = VideoCommentComposerTarget()
+        player.overlay.sheet = .danmakuSend
     }
 }
 
@@ -356,12 +395,16 @@ final class CommentsScrollTracker {
     var lastMetrics: VideoCommentsScrollMetrics?
 }
 
-/// 简介 | 评论 N strip with the 「发个友善的评论吧」 fake input on the right.
+/// 简介 | 评论 N strip with 发弹幕 and the 弹幕 switch on the right, as in the official app.
 struct VideoDetailTabStrip: View {
     @ObservedObject var comments: VideoCommentsModel
+    @ObservedObject private var settings = AppSettings.shared
     let fallbackCount: Int64
     @Binding var tab: VideoDetailTab
-    let onCompose: () -> Void
+    var danmakuClosed = false
+    let onSendDanmaku: () -> Void
+    let onToggleDanmaku: () -> Void
+    let onDanmakuSettings: () -> Void
 
     private var commentCount: Int64 {
         comments.totalCount > 0 ? Int64(comments.totalCount) : fallbackCount
@@ -372,20 +415,33 @@ struct VideoDetailTabStrip: View {
             tabButton(.intro, title: "简介", badge: nil)
             tabButton(.comments, title: "评论", badge: commentCount > 0 ? Fmt.count(commentCount) : nil)
             Spacer(minLength: 8)
-            Button(action: onCompose) {
-                HStack(spacing: 4) {
-                    Image(systemName: "square.and.pencil")
-                    Text(comments.inputDisabled ? "评论区已关闭" : "发个友善的评论吧")
+            HStack(spacing: 0) {
+                Button(action: onSendDanmaku) {
+                    Text(danmakuClosed ? "弹幕功能关闭" : "点我发弹幕")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
                         .lineLimit(1)
+                        .padding(.leading, 12)
+                        .padding(.trailing, 8)
+                        .frame(height: 30)
+                        .contentShape(Rectangle())
                 }
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 12)
-                .frame(height: 28)
-                .background(Color(.secondarySystemBackground), in: Capsule())
+                .buttonStyle(.plain)
+                .disabled(danmakuClosed)
+                Rectangle()
+                    .fill(Color.primary.opacity(0.1))
+                    .frame(width: 1, height: 14)
+                VerticalVideoDanmakuSwitch(on: settings.danmaku.enabled, color: .primary)
+                    .frame(width: 42, height: 30)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onToggleDanmaku)
+                    .onLongPressGesture(minimumDuration: 0.5, perform: onDanmakuSettings)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityLabel(Text(settings.danmaku.enabled ? "关闭弹幕" : "开启弹幕"))
+                    .accessibilityAction(.default, onToggleDanmaku)
             }
-            .buttonStyle(.plain)
-            .disabled(comments.oid == 0)
+            .background(Color(.secondarySystemBackground), in: Capsule())
         }
         .padding(.leading, 2)
         .padding(.trailing, 12)
@@ -541,6 +597,9 @@ final class VideoDetailModel: ObservableObject {
     private var swipeContents: [SwipeContent] = []
     /// The video ended with the fullscreen comments sheet open: 连播 goes on when that closes.
     private var autoNextHeldBySheet = false
+    private var storyPanelObservation: AnyCancellable?
+    /// What the panel on the vertical-video screen last showed, for coming back to it.
+    private var storyPanelKept: VerticalVideoPanelContent?
     private var sheetObservation: AnyCancellable?
     /// Bumped by every content load; stale responses are dropped.
     private var generation = 0
@@ -1502,11 +1561,16 @@ final class VideoDetailModel: ObservableObject {
     /// Going to another comment area would close the open composer (losing the draft) or the reply thread the user is
     /// reading. The comments sheet over the fullscreen player has a list of its own, which would stay on the video left.
     private var commentsHoldAutoNext: Bool {
-        comments.composerTarget != nil || comments.subRepliesRoot != nil || player?.overlay.sheet == .page("comments")
+        comments.composerTarget != nil || comments.subRepliesRoot != nil || commentsOverPlayer
+    }
+
+    /// Over the fullscreen player: a sheet, or the panel on the vertical-video screen.
+    private var commentsOverPlayer: Bool {
+        player?.overlay.sheet == .page("comments") || player?.storyPanel.isOpen == true
     }
 
     private func noteAutoNextHeld() {
-        autoNextHeldBySheet = player?.overlay.sheet == .page("comments")
+        autoNextHeldBySheet = commentsOverPlayer
     }
 
     fileprivate func resumeAutoNextIfHeld() {
@@ -1981,6 +2045,10 @@ extension VideoDetailModel {
             guard sheet == nil else { return }
             Task { @MainActor [weak self] in self?.resumeAutoNextIfHeld() }
         }
+        storyPanelObservation = player.storyPanel.$detent.sink { [weak self] detent in
+            guard detent == .closed else { return }
+            Task { @MainActor [weak self] in self?.resumeAutoNextIfHeld() }
+        }
         player.videoSwipeTarget = { [weak self] swipe in self?.swipeTarget(swipe) }
         player.videoSwipeNothingNext = { [weak self] in self?.swipeNothingNextReason }
         player.onBackOnTheSwipes = { [weak self] in self?.refreshSwipePreload() }
@@ -2187,11 +2255,21 @@ extension VideoDetailModel {
     private func openPlayerComments() {
         guard let player, let router = player.pageRouter, comments.oid > 0 else { return }
         let aid = comments.oid
+        // The list stays when the next video starts behind it: a time in these comments means this video.
+        let seek: (Double) -> Void = { [weak player] time in
+            if player?.item?.aid == aid { player?.seek(to: time) }
+        }
+        if player.isOnVerticalScreen {
+            if storyPanelKept?.id != String(aid) {
+                let ref = VideoRef(aid: aid, bvid: detail?.bvid ?? currentEpisode?.bvid ?? "", title: title)
+                storyPanelKept = VerticalVideoPanelContent(id: String(aid), comments: VideoCommentsModel(oid: aid, type: 1),
+                                                           intro: VerticalVideoIntroModel(ref: ref), onSeek: seek)
+            }
+            if let storyPanelKept { player.openStoryPanel(storyPanelKept) }
+            return
+        }
         let sheet = NavigationStack {
-            // The sheet stays when the next video starts behind it: a time in these comments means this video.
-            VideoCommentsView(oid: aid, type: 1, onSeek: { [weak player] time in
-                if player?.item?.aid == aid { player?.seek(to: time) }
-            })
+            VideoCommentsView(oid: aid, type: 1, onSeek: seek)
                 .navigationTitle("评论")
                 .navigationBarTitleDisplayMode(.inline)
         }

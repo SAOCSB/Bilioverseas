@@ -776,6 +776,8 @@ final class PlayerController: ObservableObject {
     @Published private(set) var fullscreenIsStory = false
     /// That landscape video is showing landscape (全屏, or the phone turned); back comes back to that screen.
     @Published private(set) var storyTurned = false
+    /// The video this page was opened with came from another screen, which goes on from where it gets to here.
+    var goingOn: VideoGoingOn?
     /// 清屏: nothing but the picture on that screen, also for the videos swiped to; a tap brings the rest back.
     @Published private(set) var storyCleared = false
 
@@ -1589,7 +1591,8 @@ final class PlayerController: ObservableObject {
         if start > 0 {
             timeline.update(time: start, duration: duration, buffered: 0)
             currentTime = start
-            if userStart == nil, !(itemCameFromSwipe && target.startTime != nil) { showResumeChip(at: start) }
+            let goesOn = itemCameFromSwipe || goingOn?.isVideo(aid: target.aid, cid: target.cid) == true
+            if userStart == nil, !(goesOn && target.startTime != nil) { showResumeChip(at: start) }
         }
         if userStart == nil, target.startTime == nil, AppSettings.shared.player.resumeProgress,
            info.lastPlayCid > 0, info.lastPlayCid != target.cid {
@@ -2615,7 +2618,10 @@ final class PlayerController: ObservableObject {
         }
         timeline.update(time: t, duration: duration, buffered: bufferedEnd)
         if Int(t) != Int(currentTime) || abs(t - currentTime) >= 1 { currentTime = t }
-        if startupDone, !isSeeking { lastKnownPosition = t }
+        if startupDone, !isSeeking {
+            lastKnownPosition = t
+            if let item, goingOn?.isVideo(aid: item.aid, cid: item.cid) == true { goingOn?.time = t }
+        }
         let playing = isActuallyPlaying
         // The layer's readiness KVO only reports changes; if it stayed true across an item replacement the cover
         // would never hide. Once the new item is ready and positioned, a ready layer shows its frame.

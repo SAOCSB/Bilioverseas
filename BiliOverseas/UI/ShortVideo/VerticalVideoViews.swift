@@ -5,7 +5,7 @@ import UIKit
 // bar stays and the picture sits between it and a black bar with 发弹幕 and the 弹幕 switch. Over the picture: back and
 // 「N人正在看」 top left, search and ⋮ top right, 点赞 / 评论 / 投币 / 收藏 / 转发 down the right, the uploader and title
 // bottom left, the progress line along the bottom edge. Swipes also bring landscape videos here, which show whole
-// (`wholePictureFrame`), and for which the bar offers 全屏.
+// (`wholePictureFrame`), and for which the bar offers 全屏 in the place of 清屏.
 
 enum VerticalVideoMetrics {
     /// The bar below the picture, not counting the home indicator's inset.
@@ -277,7 +277,7 @@ struct VerticalVideoInfoView: View {
     }
 }
 
-/// Below the picture: 发弹幕 with the 弹幕 switch inside it (held: 弹幕设置), then 详情页 and 清屏 for a vertical video and
+/// Below the picture: 发弹幕 with the 弹幕 switch inside it (held: 弹幕设置), then 详情页, and 清屏 for a vertical video or
 /// 全屏 for a landscape one. With the screen cleared, only the way back.
 struct VerticalVideoBottomBar: View {
     let danmakuOn: Bool
@@ -307,14 +307,14 @@ struct VerticalVideoBottomBar: View {
                 .padding(.trailing, 8)
             } else {
                 danmakuField
+                detailButton
                 if landscape {
                     glyphButton("全屏", action: onFullscreen) {
                         VerticalVideoFullscreenGlyph()
                             .stroke(style: Self.glyphStroke)
-                            .frame(width: 18, height: 18)
+                            .frame(width: 16, height: 16)
                     }
                 } else {
-                    detailButton
                     glyphButton("清屏", action: onClear) {
                         VerticalVideoClearGlyph()
                             .stroke(style: Self.glyphStroke)
@@ -329,7 +329,7 @@ struct VerticalVideoBottomBar: View {
         .frame(height: VerticalVideoMetrics.bottomBarHeight)
     }
 
-    private static let glyphStroke = StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round)
+    private static let glyphStroke = StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round)
 
     private var danmakuField: some View {
         HStack(spacing: 0) {
@@ -366,17 +366,22 @@ struct VerticalVideoBottomBar: View {
 
     private var detailButton: some View {
         Button(action: onDetail) {
-            VStack(spacing: 1) {
-                Text("详情页")
-                    .font(.system(size: 9))
-                    .foregroundColor(.white.opacity(0.85))
-                    .padding(.horizontal, 4)
-                    .overlay(Capsule().stroke(.white.opacity(0.35), lineWidth: 0.5))
-                Image(systemName: "arrow.down.right.and.arrow.up.left")
-                    .font(.system(size: 17, weight: .medium))
-            }
-            .frame(width: 44, height: VerticalVideoMetrics.bottomBarHeight)
-            .contentShape(Rectangle())
+            VerticalVideoDetailGlyph()
+                .stroke(style: Self.glyphStroke)
+                .frame(width: 15, height: 16)
+                // Up and to the right of it, as in the official app.
+                .overlay {
+                    Text("详情页")
+                        .font(.system(size: 8))
+                        .foregroundColor(.white.opacity(0.85))
+                        .fixedSize()
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .overlay(Capsule().stroke(.white.opacity(0.35), lineWidth: 0.5))
+                        .offset(x: 9, y: -18.5)
+                }
+                .frame(width: 44, height: VerticalVideoMetrics.bottomBarHeight)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text("详情页"))
@@ -397,7 +402,7 @@ struct VerticalVideoBottomBar: View {
 /// 全屏: two corners of the screen.
 private struct VerticalVideoFullscreenGlyph: Shape {
     func path(in rect: CGRect) -> Path {
-        let arm = rect.width * 0.45
+        let arm = rect.width * 0.55
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: rect.minY + arm))
         path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
@@ -405,6 +410,21 @@ private struct VerticalVideoFullscreenGlyph: Shape {
         path.move(to: CGPoint(x: rect.maxX, y: rect.maxY - arm))
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
         path.addLine(to: CGPoint(x: rect.maxX - arm, y: rect.maxY))
+        return path
+    }
+}
+
+/// 详情页: four corners of the screen, turned in.
+private struct VerticalVideoDetailGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        let (gapX, gapY) = (rect.width * 0.2, rect.height * 0.26)
+        var path = Path()
+        for (x, y) in [(rect.minX, rect.minY), (rect.maxX, rect.minY), (rect.minX, rect.maxY), (rect.maxX, rect.maxY)] {
+            let corner = CGPoint(x: rect.midX + (x < rect.midX ? -gapX : gapX), y: rect.midY + (y < rect.midY ? -gapY : gapY))
+            path.move(to: CGPoint(x: x, y: corner.y))
+            path.addLine(to: corner)
+            path.addLine(to: CGPoint(x: corner.x, y: y))
+        }
         return path
     }
 }

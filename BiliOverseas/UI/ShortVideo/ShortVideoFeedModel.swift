@@ -55,6 +55,8 @@ final class ShortVideoFeedModel: ObservableObject {
     private var pageVisible = false
     /// How far streams are kept each way. Less once the system said it is short of memory.
     private var streamReach = PlayerStreamPreload.swipeWindow
+    /// The video whose page was last opened from here, which goes on from where it gets to there.
+    private var wentToPage: (id: String, goingOn: VideoGoingOn)?
 
     init(start: ShortVideoItem?) {
         self.start = start
@@ -271,6 +273,29 @@ final class ShortVideoFeedModel: ObservableObject {
         }
     }
 
+    // MARK: 详情页
+
+    /// The video's page, which goes on from where the video is here.
+    func pageRef(for item: ShortVideoItem) -> VideoRef {
+        let playback = playback(for: item)
+        var ref = item.videoRef
+        ref.cid = playback.resolvedCid ?? item.cid
+        ref.startTime = playback.position
+        let goingOn = VideoGoingOn(aid: item.aid, cid: ref.cid)
+        ref.goingOn = goingOn
+        wentToPage = (item.id, goingOn)
+        return ref
+    }
+
+    /// That page has gone.
+    private func goOnFromPage() {
+        guard let wentToPage else { return }
+        self.wentToPage = nil
+        guard let time = wentToPage.goingOn.time, let playback = playbacks[wentToPage.id],
+              abs(time - playback.position) >= 1 else { return }
+        playback.seek(to: time)
+    }
+
     // MARK: Players
 
     /// The player for an item on screen (created on demand; only the current video and its
@@ -298,7 +323,10 @@ final class ShortVideoFeedModel: ObservableObject {
         if isVisible, portraitOnly != AppSettings.shared.general.swipesOnlyPortrait {
             setPortraitOnly(AppSettings.shared.general.swipesOnlyPortrait)
         }
-        if isVisible { sourceMayHaveChanged() }
+        if isVisible {
+            sourceMayHaveChanged()
+            goOnFromPage()
+        }
         visible = isVisible
         PlayerNowPlayingCenter.shared.shortVideosVisible = isVisible
         if !isVisible { reportCurrentHistory() }
@@ -343,7 +371,8 @@ final class ShortVideoFeedModel: ObservableObject {
         if visible && appActive && !userPaused {
             if now.isPaused { now.play() }
         } else {
-            now.pause()
+            // What the viewer did not pause shows no sign of it, while a swipe back brings this into view.
+            if userPaused { now.pause() } else { now.standBy() }
             now.prepare()
         }
         let next = visible && items.indices.contains(index + 1) ? playback(for: items[index + 1]) : nil

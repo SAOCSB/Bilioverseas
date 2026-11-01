@@ -16,6 +16,8 @@ struct ShortVideoFeedView: View {
     @State private var showsDanmakuSettings = false
     /// 清屏: nothing but the picture, also on the videos swiped to; a tap brings the rest back.
     @State private var cleared = false
+    /// Navigation depth when this page first appeared: back at it, the pages opened from here have gone.
+    @State private var stackDepth: Int?
 
     init(start: ShortVideoItem? = nil) {
         _model = StateObject(wrappedValue: ShortVideoFeedModel(start: start))
@@ -50,12 +52,19 @@ struct ShortVideoFeedView: View {
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
         .task { await model.loadInitialIfNeeded() }
-        .onAppear { model.setVisible(true) }
+        .onAppear {
+            let depth = stackDepth ?? router.path.count
+            stackDepth = depth
+            // A swipe back brings this on while the video's page above it still plays, and may stop halfway. Its path update
+            // lands when it is done.
+            if router.path.count <= depth { model.setVisible(true) }
+        }
         .onDisappear { model.setVisible(false) }
         // A push from inside the comments (a commenter's space, login…) lands under the sheet: close it.
-        .onChange(of: router.path.count) { _ in
+        .onChange(of: router.path.count) { count in
             if commentsFor != nil { commentsFor = nil }
             model.closeLandscape()
+            if count == stackDepth { model.setVisible(true) }
         }
         .sheet(item: $commentsFor) { item in
             NavigationStack {
@@ -115,7 +124,7 @@ struct ShortVideoFeedView: View {
             uploader: { item in
                 if item.ownerMid != 0 { router.push(.user(mid: item.ownerMid)) }
             },
-            fullVideo: { item in router.push(.video(item.videoRef)) },
+            fullVideo: { item in router.push(.video(model.pageRef(for: item))) },
             dislike: { item, reason in Task { await model.dislike(item, reason: reason) } }
         )
     }
@@ -211,12 +220,6 @@ struct ShortVideoFeedView: View {
         Menu {
             Button { showsDanmakuSettings = true } label: {
                 Label("弹幕设置", systemImage: "slider.horizontal.3")
-            }
-            // The bar has no room for it on a landscape video.
-            if !item.isPortrait {
-                Button { actions.fullVideo(item) } label: {
-                    Label("详情页", systemImage: "arrow.down.right.and.arrow.up.left")
-                }
             }
             Button { Task { await model.social(for: item).addToWatchLater() } } label: {
                 Label("稍后再看", systemImage: "clock")

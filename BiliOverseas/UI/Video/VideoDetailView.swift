@@ -73,7 +73,13 @@ struct VideoDetailView: View {
             refullscreenIfPageReturned()
         }
         // The path update of a swipe back lands after `onAppear`.
-        .onChange(of: router.path.count) { _ in refullscreenIfPageReturned() }
+        .onChange(of: router.path.count) { count in
+            refullscreenIfPageReturned()
+            // On its way out, and what comes back from under it may have a video of its own.
+            if let stackDepth, count < stackDepth, !player.isPiPBusy {
+                player.pause()
+            }
+        }
         // Playing (from the bar, a comment's timestamp, the lock screen …), another tab, fullscreen, PiP or a
         // vertical video: show the player again.
         .onChange(of: player.wantsToPlay) { if $0 { setPlayerCollapsed(false) } }
@@ -622,6 +628,8 @@ final class VideoDetailModel: ObservableObject {
 
     func attach(_ player: PlayerController) {
         self.player = player
+        // Swipes on the page leave it with other refs, and may come back to this video.
+        if let goingOn = ref.goingOn { player.goingOn = goingOn }
         player.onEnded = { [weak self] in
             Task { @MainActor in self?.advance(manual: false) }
         }

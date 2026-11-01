@@ -241,8 +241,9 @@ final class ShortVideoPlayback: ObservableObject {
 
     func seek(to seconds: Double) {
         let target = max(0, min(seconds, duration > 0 ? duration - 0.5 : seconds))
-        guard player.currentItem != nil else {
-            // Dragged while it is still loading: it starts there (`install`).
+        guard player.currentItem != nil, session?.isEndpointValid != false else {
+            // Dragged while it is still loading: it starts there (`install`). Its stream gone, the item would only fail: `play`
+            // starts over from here.
             resumeAt = target
             position = target
             timeline.update(time: target, duration: duration, buffered: 0)

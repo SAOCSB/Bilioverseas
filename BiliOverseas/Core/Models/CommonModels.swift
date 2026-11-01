@@ -71,6 +71,25 @@ struct VideoCard: Identifiable, Hashable {
     }
 }
 
+/// A video going on from its screen to its page and back. Both hold this: the page says where it has got to for as long as
+/// it has the video, and that screen reads it when the page has gone.
+final class VideoGoingOn: Hashable {
+    let aid: Int64
+    let cid: Int64
+    /// Where the page has got to with it.
+    var time: Double?
+
+    init(aid: Int64, cid: Int64) {
+        self.aid = aid
+        self.cid = cid
+    }
+
+    func isVideo(aid: Int64, cid: Int64) -> Bool { aid == self.aid && cid == self.cid }
+
+    static func == (lhs: VideoGoingOn, rhs: VideoGoingOn) -> Bool { lhs === rhs }
+    func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
+}
+
 /// Everything needed to open a video detail page.
 struct VideoRef: Hashable {
     var aid: Int64 = 0
@@ -87,6 +106,8 @@ struct VideoRef: Hashable {
     var startTime: Double? = nil
     /// 播放全部 list (稍后再看 / 收藏夹) the video page continues through after this video; nil for a single video.
     var playlist: VideoPlaylist? = nil
+    /// `startTime` is where another screen had got to with this video, and the page takes over from it.
+    var goingOn: VideoGoingOn? = nil
 
     var isPGC: Bool { epId != 0 || seasonId != 0 }
 

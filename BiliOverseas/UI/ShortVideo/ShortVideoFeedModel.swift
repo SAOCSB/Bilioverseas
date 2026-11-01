@@ -3,7 +3,8 @@ import SwiftUI
 
 /// State of the 短视频 feed: the videos loaded so far, the one on screen, and its players. The current
 /// video plays while the screen is visible and the app is active; the next one is prepared so a swipe
-/// starts at once; the previous one keeps its player for a quick swipe back. Others are released.
+/// starts at once; the previous one keeps its player for a quick swipe back. Those further away, five each
+/// way, hold only their streams, and others are released.
 @MainActor
 final class ShortVideoFeedModel: ObservableObject {
     @Published private(set) var items: [ShortVideoItem] = []
@@ -11,7 +12,10 @@ final class ShortVideoFeedModel: ObservableObject {
         didSet {
             guard index != oldValue else { return }
             userPaused = false
+            landing.isSpeeding = false
             activate()
+            let kept = playbacks.values
+            PlaybackTrace.log("feed at \(current?.id ?? "?") kept=\(kept.count) keptMB=\(kept.reduce(0) { $0 + $1.cachedBytes } / 1_000_000)")
         }
     }
     @Published private(set) var isLoading = false
@@ -49,6 +53,8 @@ final class ShortVideoFeedModel: ObservableObject {
     private var landscapePlayback: ShortVideoPlayback?
     /// What the page last said about itself, which while 全屏 covers it does not count until that has gone.
     private var pageVisible = false
+    /// How far streams are kept each way. Less once the system said it is short of memory.
+    private var streamReach = PlayerStreamPreload.swipeWindow
 
     init(start: ShortVideoItem?) {
         self.start = start
@@ -60,6 +66,12 @@ final class ShortVideoFeedModel: ObservableObject {
             .store(in: &cancellables)
         center.publisher(for: UIApplication.willEnterForegroundNotification)
             .sink { [weak self] _ in self?.setAppActive(true) }
+            .store(in: &cancellables)
+        center.publisher(for: UIApplication.didReceiveMemoryWarningNotification)
+            .sink { [weak self] _ in
+                self?.streamReach = 1
+                self?.activate()
+            }
             .store(in: &cancellables)
         // `@Published` emits before the value is stored: hop once so the players read the new settings.
         AppSettings.shared.$acceleration
@@ -177,6 +189,12 @@ final class ShortVideoFeedModel: ObservableObject {
         }
     }
 
+    /// 长按倍速 on the video on screen. The bars around the pages step aside for as long as it lasts.
+    func setFastForward(_ on: Bool, item: ShortVideoItem) {
+        playbacks[item.id]?.setFastForward(on)
+        landing.isSpeeding = on
+    }
+
     /// Tap to pause / resume the video on screen.
     func togglePlay(_ item: ShortVideoItem) {
         guard let playback = playbacks[item.id] else { return }
@@ -258,6 +276,7 @@ final class ShortVideoFeedModel: ObservableObject {
     func playback(for item: ShortVideoItem) -> ShortVideoPlayback {
         if let existing = playbacks[item.id] { return existing }
         let made = ShortVideoPlayback(item: item)
+        made.onStreamFetched = { [weak self] in self?.fetchStreamsAround() }
         playbacks[item.id] = made
         return made
     }
@@ -296,23 +315,26 @@ final class ShortVideoFeedModel: ObservableObject {
         if let current { playbacks[current.id]?.reportHistoryIfNeeded() }
     }
 
-    /// Plays the current video (when it can be seen), prepares the next, pauses the previous,
-    /// releases the rest, and asks for more videos near the end. At most three engine sessions stay
-    /// open (the engine keeps four), and only the current one while another page covers the feed.
+    /// Plays the current video (when it can be seen), prepares its neighbours, pauses the previous, holds
+    /// the streams further away, releases the rest, and asks for more videos near the end. Only the current
+    /// one stays open while another page covers the feed.
     private func activate() {
         guard let current else { return }
-        let range = visible ? (index - 1...index + 1) : (index...index)
-        let window = Set(range.filter { items.indices.contains($0) }.map { items[$0].id })
+        func ids(within reach: Int) -> Set<String> {
+            Set((index - reach...index + reach).filter { items.indices.contains($0) }.map { items[$0].id })
+        }
+        let near = ids(within: visible ? 1 : 0)
+        let window = visible ? ids(within: streamReach) : near
         for (id, playback) in playbacks where !window.contains(id) {
             playback.close()
             playbacks[id] = nil
         }
-        for id in socials.keys where !window.contains(id) && id != current.id { socials[id] = nil }
+        for (id, playback) in playbacks where !near.contains(id) { playback.keepStreamOnly() }
+        for id in socials.keys where !near.contains(id) && id != current.id { socials[id] = nil }
 
-        if visible, items.indices.contains(index - 1), let previous = playbacks[items[index - 1].id] {
-            previous.standBy()
-            previous.reportHistoryIfNeeded()
-        }
+        let previous = visible && items.indices.contains(index - 1) ? playbacks[items[index - 1].id] : nil
+        previous?.standBy()
+        previous?.reportHistoryIfNeeded()
         let now = playback(for: current)
         if visible && appActive && !userPaused {
             if now.isPaused { now.play() }
@@ -320,20 +342,34 @@ final class ShortVideoFeedModel: ObservableObject {
             now.pause()
             now.prepare()
         }
-        if visible, items.indices.contains(index + 1) {
-            let next = playback(for: items[index + 1])
-            next.standBy()
-            // Once the video on screen has started: until then they would share the connection.
-            now.whenStarted { [weak self, weak next] in
-                guard let self, let next, self.playbacks[next.item.id] === next else { return }
-                next.prepare()
+        let next = visible && items.indices.contains(index + 1) ? playback(for: items[index + 1]) : nil
+        next?.standBy()
+        // Once the video on screen has started: until then they would share the connection.
+        now.whenStarted { [weak self, weak previous, weak next] in
+            guard let self else { return }
+            for neighbour in [next, previous].compactMap({ $0 }) where self.playbacks[neighbour.item.id] === neighbour {
+                neighbour.prepare()
             }
+            self.fetchStreamsAround()
         }
         Task { await social(for: current).loadRelationIfNeeded() }
         Task { await social(for: current).loadFansIfNeeded(mid: current.ownerMid) }
         loadOnlineIfNeeded(current)
-        if index >= items.count - 3 {
+        // Enough for the streams kept ahead, and a little more.
+        if index >= items.count - (streamReach + 2) {
             Task { await loadMore() }
+        }
+    }
+
+    /// The videos further away get their streams, nearest first and a couple at a time, once this one has started.
+    private func fetchStreamsAround() {
+        guard visible, appActive, streamReach >= 2, let current, playbacks[current.id]?.isOutOfTheWay == true else { return }
+        playbacks[current.id]?.markInUse()
+        var fetching = playbacks.values.filter(\.isFetchingStream).count
+        for distance in 2...streamReach {
+            for page in [index + distance, index - distance] where fetching < 2 && items.indices.contains(page) {
+                if playback(for: items[page]).fetchStream() { fetching += 1 }
+            }
         }
     }
 
@@ -378,6 +414,8 @@ final class ShortVideoFeedModel: ObservableObject {
 @MainActor
 final class ShortVideoLanding: ObservableObject {
     @Published var index: Int?
+    /// 长按倍速 is on: the bars step aside like the page's own controls (the danmaku stay).
+    @Published var isSpeeding = false
 }
 
 /// Like / coin / favourite / follow state of one item, loaded when it comes on screen.

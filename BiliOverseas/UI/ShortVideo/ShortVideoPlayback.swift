@@ -6,8 +6,8 @@ import SwiftUI
 /// acceleration settings give. They start faster than the html5 MP4, which is rarely watched and often has
 /// to come from further away the first time. That MP4 remains the fallback, through the proxy and then straight from the
 /// CDN. It feeds the engine session the signals the main player does (see the wiring notes in AccelerationEngine.swift).
-/// The feed keeps the current item and its neighbours prepared so a swipe starts at once; the video loops like the
-/// official app's.
+/// The feed keeps the current item and its neighbours prepared so a swipe starts at once, and the streams of those further
+/// away without an item (`fetchStream`, `keepStreamOnly`); the video loops like the official app's.
 @MainActor
 final class ShortVideoPlayback: ObservableObject {
     enum Phase: Equatable {
@@ -22,7 +22,13 @@ final class ShortVideoPlayback: ObservableObject {
     /// Its place on the page.
     weak var danmakuHost: ShortVideoDanmakuHost?
     /// 全屏 has it, and the page's place waits for it to come back.
-    var danmakuInLandscape = false
+    var danmakuInLandscape = false {
+        didSet { danmaku.usesWholeHeight = danmakuAbovePicture && !danmakuInLandscape }
+    }
+    /// Its place on the page is the black above a landscape picture.
+    var danmakuAbovePicture = false {
+        didSet { danmaku.usesWholeHeight = danmakuAbovePicture && !danmakuInLandscape }
+    }
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var isPlaying = false
     /// Waiting for data while it should be playing.
@@ -38,6 +44,14 @@ final class ShortVideoPlayback: ObservableObject {
     @Published private(set) var isStandingBy = false
 
     private var session: PlaybackSession?
+    /// The stream with no item in the player: what the next `prepare` installs at once.
+    private var heldAsset: AVURLAsset?
+    /// The stream goes into the player when it is here, rather than being held.
+    private var itemWanted = false
+    /// Its stream has arrived, or will not: the feed can go on to the next one.
+    var onStreamFetched: (() -> Void)?
+    /// Where the playlists told the player to start, until it has opened.
+    private var startingAt: Double?
     /// Whether the stream was loaded for acceleration.
     private var usesAcceleration = false
     /// AVPlayer refused the DASH item, a codec it cannot play for instance, which only shows once it has it: the MP4.
@@ -82,12 +96,74 @@ final class ShortVideoPlayback: ObservableObject {
 
     /// Resolves the stream and installs the item, paused. Safe to call repeatedly.
     func prepare() {
+        itemWanted = true
         switch phase {
         case .idle, .failed: break
         case .loading, .ready: return
         }
+        if let held = heldAsset {
+            heldAsset = nil
+            if let session {
+                // A new asset: it reads the playlists again, which may now say where to start.
+                if session.isEndpointValid {
+                    install(AVURLAsset(url: session.url))
+                    return
+                }
+                teardown()
+            } else {
+                install(held)
+                return
+            }
+        }
         phase = .loading
         loadTask = Task { [weak self] in await self?.load() }
+    }
+
+    /// Far from the video on screen: gets the stream to hold, if it has none and is not getting one. Whether that started
+    /// now. A failed attempt waits until a swipe comes near.
+    func fetchStream() -> Bool {
+        guard phase == .idle, heldAsset == nil, session == nil else { return false }
+        itemWanted = false
+        setStandingBy(true)
+        phase = .loading
+        loadTask = Task { [weak self] in await self?.load() }
+        return true
+    }
+
+    /// Far from the video on screen: the player's item goes and the stream stays, with little in it. `prepare` brings the
+    /// item back at once, going on from here.
+    func keepStreamOnly() {
+        stopPlaying()
+        itemWanted = false
+        setStandingBy(true)
+        if let current = player.currentItem {
+            heldAsset = current.asset as? AVURLAsset
+            if resumeAt == nil { resumeAt = position > 1 && (duration <= 0 || position < duration - 5) ? position : nil }
+            itemObservers.removeAll()
+            player.replaceCurrentItem(with: nil)
+            startedPlaying = false
+            seeking = false
+            startingAt = nil
+            phase = .idle
+        }
+        guard let session else { return }
+        session.limitPrefetch(toSeconds: PlayerStreamPreload.farPrefetchSeconds)
+        session.update(time: resumeAt ?? position, rate: 1, playing: false, bufferedAhead: 0, cacheFull: false)
+        session.trimCache(toBytes: PlayerStreamPreload.leftBytes)
+    }
+
+    /// The streams around it may share the connection now: it has started, or is not meant to.
+    var isOutOfTheWay: Bool { startedPlaying || !wantsPlay }
+
+    /// It is getting its stream to hold, not to play yet.
+    var isFetchingStream: Bool { phase == .loading && !itemWanted }
+
+    /// What it holds now, for the playback log.
+    var cachedBytes: Int64 { session?.store.cachedByteCount ?? 0 }
+
+    /// The new sessions around it must not push out the one on screen (`AccelerationEngine.noteInUse`).
+    func markInUse() {
+        session?.markInUse()
     }
 
     func play() {
@@ -118,6 +194,8 @@ final class ShortVideoPlayback: ObservableObject {
     func standBy() {
         stopPlaying()
         setStandingBy(true)
+        // It may have been further away, with less.
+        session?.limitPrefetch(toSeconds: PlayerStreamPreload.prefetchSeconds)
     }
 
     private func stopPlaying() {
@@ -209,7 +287,7 @@ final class ShortVideoPlayback: ObservableObject {
 
     /// 启用海外加速 / 竖屏视频禁用加速 changed: loads again on the matching path, from where it is.
     func accelerationChanged() {
-        guard phase != .idle, wantsAcceleration != usesAcceleration else { return }
+        guard phase != .idle || heldAsset != nil, wantsAcceleration != usesAcceleration else { return }
         if resumeAt == nil, position > 1 { resumeAt = position }
         teardown()
         prepare()
@@ -232,6 +310,8 @@ final class ShortVideoPlayback: ObservableObject {
         player.replaceCurrentItem(with: nil)
         session?.close()
         session = nil
+        heldAsset = nil
+        startingAt = nil
         startedPlaying = false
         if phase != .idle { phase = .idle }
     }
@@ -269,16 +349,14 @@ final class ShortVideoPlayback: ObservableObject {
                     return
                 }
                 if dash.duration > 0 { duration = dash.duration }
-                danmaku.load(cid: cid, aid: aid, duration: duration)
                 session = dash.session
-                install(AVPlayerItem(asset: AVURLAsset(url: dash.session.url)))
+                streamIsHere(AVURLAsset(url: dash.session.url))
                 return
             }
             let info = try await VideoAPI.progressivePlayInfo(aid: aid, bvid: bvid, cid: cid, qn: qn)
             try Task.checkCancellation()
             guard let segment = info.durl.first else { throw BiliError.other("视频资源不存在") }
             if info.duration > 0 { duration = info.duration }
-            danmaku.load(cid: cid, aid: aid, duration: duration)
 
             let refresher = AccelerationEngine.progressiveRefresher(for: segment) {
                 try await VideoAPI.progressivePlayInfo(aid: aid, bvid: bvid, cid: cid, qn: qn).durl
@@ -303,12 +381,26 @@ final class ShortVideoPlayback: ObservableObject {
                 let headers = ["Referer": "https://www.bilibili.com/", "User-Agent": BiliHTTP.webUserAgent]
                 asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
             }
-            install(AVPlayerItem(asset: asset))
+            streamIsHere(asset)
         } catch {
             if Task.isCancelled || ListMapping.isCancellation(error) { return }
             phase = .failed((error as? LocalizedError)?.errorDescription ?? "加载失败")
             runStartedAction()
+            onStreamFetched?()
         }
+    }
+
+    private func streamIsHere(_ asset: AVURLAsset) {
+        if itemWanted {
+            install(asset)
+        } else {
+            heldAsset = asset
+            phase = .idle
+            PlaybackTrace.log("feed stream \(item.id) route=[\(session?.routeDescription ?? "-")]")
+            session?.limitPrefetch(toSeconds: PlayerStreamPreload.farPrefetchSeconds)
+            session?.playerWillSeek(to: resumeAt ?? 0, outsideBuffer: true)
+        }
+        onStreamFetched?()
     }
 
     /// nil: no usable DASH answer or session, which the MP4 path below may still be able to play.
@@ -335,7 +427,21 @@ final class ShortVideoPlayback: ObservableObject {
         return nil
     }
 
-    private func install(_ playerItem: AVPlayerItem) {
+    private func install(_ asset: AVURLAsset) {
+        if let cid = resolvedCid { danmaku.load(cid: cid, aid: item.aid, duration: duration) }
+        // Going on from a position: the playlists say so, so nothing shows from before it. Not close to the end, where
+        // AVPlayer can report the end and never get ready.
+        session?.startPlaylists(at: nil)
+        if let start = resumeAt, session?.isHLS == true, duration <= 0 || start < duration - 5 {
+            resumeAt = nil
+            startingAt = start
+            session?.startPlaylists(at: start)
+            session?.playerWillSeek(to: start, outsideBuffer: true)
+            position = start
+            timeline.update(time: start, duration: duration, buffered: 0)
+            danmaku.seek(to: start)
+        }
+        let playerItem = AVPlayerItem(asset: asset)
         playerItem.preferredForwardBufferDuration = forwardBuffer
         if isStandingBy { session?.limitPrefetch(toSeconds: PlayerStreamPreload.prefetchSeconds) }
         PlaybackTrace.log("feed install \(item.id) accel=\(usesAcceleration) route=[\(session?.routeDescription ?? "-")] "
@@ -385,7 +491,13 @@ final class ShortVideoPlayback: ObservableObject {
         playerItem.publisher(for: \.status)
             .receive(on: RunLoop.main)
             .sink { [weak self, weak playerItem] status in
-                guard status == .failed, let self, playerItem === self.player.currentItem else { return }
+                guard let self, playerItem === self.player.currentItem else { return }
+                if status == .readyToPlay, let start = self.startingAt {
+                    self.startingAt = nil
+                    // Not where the playlists said: a seek does it after all.
+                    if abs(self.player.currentTime().seconds - start) > 1 { self.seek(to: start) }
+                }
+                guard status == .failed else { return }
                 self.itemFailed(message: playerItem?.error?.localizedDescription)
             }
             .store(in: &itemObservers)
@@ -421,9 +533,11 @@ final class ShortVideoPlayback: ObservableObject {
         prepare()
     }
 
-    private func tick(_ seconds: Double) {
-        guard seconds.isFinite else { return }
+    private func tick(_ time: Double) {
+        guard time.isFinite else { return }
         if wantsPlay, rebuildIfEndpointLost() { return }
+        // Until it has opened, the clock does not say where the playlists told it to start.
+        let seconds = startingAt ?? time
         if !seeking { position = seconds }
         if isPlaying { furthest = max(furthest, seconds) }
         guard let current = player.currentItem else { return }
@@ -494,6 +608,8 @@ struct ShortVideoDanmakuLayer: UIViewRepresentable {
     let playback: ShortVideoPlayback
     /// In 全屏 (`ShortVideoLandscapeView`), not on the page.
     var landscape = false
+    /// In the black above a landscape picture.
+    var abovePicture = false
 
     func makeUIView(context: Context) -> ShortVideoDanmakuHost {
         let host = ShortVideoDanmakuHost()
@@ -502,7 +618,10 @@ struct ShortVideoDanmakuLayer: UIViewRepresentable {
     }
 
     func updateUIView(_ host: ShortVideoDanmakuHost, context: Context) {
-        if !landscape { playback.danmakuHost = host }
+        if !landscape {
+            playback.danmakuHost = host
+            playback.danmakuAbovePicture = abovePicture
+        }
         if landscape == playback.danmakuInLandscape { host.claim(playback.danmaku) }
     }
 }

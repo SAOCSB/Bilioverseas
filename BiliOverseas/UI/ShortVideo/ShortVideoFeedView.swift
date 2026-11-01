@@ -93,6 +93,7 @@ struct ShortVideoFeedView: View {
     private var actions: ShortVideoActions {
         ShortVideoActions(
             togglePlay: { model.togglePlay($0) },
+            fastForward: { model.setFastForward($1, item: $0) },
             restoreControls: { cleared = false },
             comments: { commentsFor = $0 },
             coin: { item in
@@ -177,6 +178,7 @@ struct ShortVideoFeedView: View {
                     }
                 }
             }
+            .modifier(ShortVideoSpeedingHidden(speeding: model.landing.isSpeeding))
         }
     }
 
@@ -192,6 +194,7 @@ struct ShortVideoFeedView: View {
                                    },
                                    onClear: { cleared.toggle() },
                                    onFullscreen: { model.showLandscape() })
+                .modifier(ShortVideoSpeedingHidden(speeding: model.landing.isSpeeding))
         }
     }
 
@@ -255,6 +258,18 @@ struct ShortVideoFeedView: View {
     }
 }
 
+/// 长按倍速 clears the screen like 清屏, with no way back to show: it lasts as long as the finger.
+private struct ShortVideoSpeedingHidden: ViewModifier {
+    let speeding: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(speeding ? 0 : 1)
+            .allowsHitTesting(!speeding)
+            .animation(.easeInOut(duration: 0.15), value: speeding)
+    }
+}
+
 /// Rebuilds its content when a swipe starts coming to rest on another page, without rebuilding the pages.
 private struct ShortVideoLandingReader<Content: View>: View {
     @ObservedObject var landing: ShortVideoLanding
@@ -266,6 +281,7 @@ private struct ShortVideoLandingReader<Content: View>: View {
 /// What the page's buttons do; navigation, sheets and the play state belong to the feed screen.
 struct ShortVideoActions {
     var togglePlay: (ShortVideoItem) -> Void
+    var fastForward: (ShortVideoItem, Bool) -> Void
     var restoreControls: () -> Void
     var comments: (ShortVideoItem) -> Void
     var coin: (ShortVideoItem) -> Void
@@ -289,6 +305,8 @@ struct ShortVideoPageView: View {
     @State private var titleExpanded = false
     @State private var bursts: [VerticalVideoLikeBurst] = []
     @State private var scrubbing: Double?
+    /// A tap that a second one may turn into a double tap.
+    @State private var pendingTap: DispatchWorkItem?
 
     var body: some View {
         GeometryReader { geo in
@@ -319,7 +337,7 @@ struct ShortVideoPageView: View {
                     .frame(maxHeight: .infinity, alignment: .top)
                     .allowsHitTesting(false)
             }
-            if !cleared {
+            if !showsCleared {
                 LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
                     .frame(height: 110)
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -331,47 +349,47 @@ struct ShortVideoPageView: View {
             }
             // Below the top bar; the controls below it stay readable over the danmaku.
             let lanes = danmakuLanes(in: geo.size, pictureHeight: pictureHeight)
-            ShortVideoDanmakuLayer(playback: playback)
-                .frame(width: lanes.width, height: lanes.height)
-                .position(x: lanes.midX, y: lanes.midY)
+            ShortVideoDanmakuLayer(playback: playback, abovePicture: lanes.abovePicture)
+                .frame(width: lanes.frame.width, height: lanes.frame.height)
+                .position(x: lanes.frame.midX, y: lanes.frame.midY)
                 .allowsHitTesting(false)
             statusOverlay
             ForEach(bursts) { burst in
                 VerticalVideoLikeBurstView(burst: burst)
                     .position(burst.location)
             }
-            if !cleared { overlay }
+            if !showsCleared { overlay }
         }
         .frame(width: geo.size.width, height: geo.size.height)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2, coordinateSpace: .local) { location in doubleTap(at: location) }
-        .onTapGesture {
-            if cleared {
-                actions.restoreControls()
-            } else {
-                actions.togglePlay(item)
-            }
-        }
-        .onLongPressGesture(minimumDuration: 0.4, maximumDistance: 12, perform: {
+        // The long press first: after a tap gesture it would wait for that to give up, about 0.8 s after the touch. For the
+        // same reason there is one tap gesture, which tells a double tap by the time between them.
+        .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 12, perform: {
             guard AppSettings.shared.player.longPressSpeedEnabled, !playback.isPaused else { return }
-            playback.setFastForward(true)
+            actions.fastForward(item, true)
         }, onPressingChanged: { pressing in
-            if !pressing, playback.isFastForward { playback.setFastForward(false) }
+            if !pressing, playback.isFastForward { actions.fastForward(item, false) }
         })
+        .onTapGesture(coordinateSpace: .local) { location in tapped(at: location) }
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: Text(playback.isPaused ? "播放" : "暂停")) { actions.togglePlay(item) }
     }
+
+    /// 清屏, which 长按倍速 does too for as long as it lasts (the danmaku stay).
+    private var showsCleared: Bool { cleared || playback.isFastForward }
 
     private func fills(in size: CGSize) -> Bool {
         item.isPortrait && VerticalVideoMetrics.fills(video: CGSize(width: item.width, height: item.height), area: size)
     }
 
-    /// A landscape video's are over its picture, not over the black around it.
-    private func danmakuLanes(in size: CGSize, pictureHeight: CGFloat) -> CGRect {
+    /// A landscape video's go in the black above its picture (`VerticalVideoMetrics.danmakuLanes`).
+    private func danmakuLanes(in size: CGSize, pictureHeight: CGFloat) -> (frame: CGRect, abovePicture: Bool) {
         let page = CGRect(origin: .zero, size: size).inset(by: UIEdgeInsets(top: VerticalVideoMetrics.topBarHeight, left: 0, bottom: 0, right: 0))
-        guard !item.isPortrait else { return page }
+        guard !item.isPortrait else { return (page, false) }
         let area = CGRect(x: 0, y: 0, width: size.width, height: pictureHeight)
-        return page.intersection(AVMakeRect(aspectRatio: CGSize(width: item.width, height: item.height), insideRect: area))
+        let picture = AVMakeRect(aspectRatio: CGSize(width: item.width, height: item.height), insideRect: area)
+        if let above = VerticalVideoMetrics.danmakuLanes(above: picture, in: page) { return (above, true) }
+        return (page.intersection(picture), false)
     }
 
     @ViewBuilder private var statusOverlay: some View {
@@ -466,6 +484,25 @@ struct ShortVideoPageView: View {
         a.onFollow = { Task { await social.follow() } }
         a.onUploader = { actions.uploader(item) }
         return a
+    }
+
+    private func tapped(at location: CGPoint) {
+        if let first = pendingTap {
+            first.cancel()
+            pendingTap = nil
+            doubleTap(at: location)
+            return
+        }
+        let single = DispatchWorkItem {
+            pendingTap = nil
+            if cleared {
+                actions.restoreControls()
+            } else {
+                actions.togglePlay(item)
+            }
+        }
+        pendingTap = single
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28, execute: single)
     }
 
     private func doubleTap(at location: CGPoint) {

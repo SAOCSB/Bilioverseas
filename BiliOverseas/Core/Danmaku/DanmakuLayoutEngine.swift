@@ -30,6 +30,9 @@ struct DanmakuLayoutConfig: Equatable, Sendable {
     /// Extra horizontal spacing kept between consecutive scroll items in a track.
     var minGap: Double = 0
 
+    /// The picture is below these tracks: its subtitles need no room left for them.
+    var subtitlesElsewhere: Bool = false
+
     /// `floor(H × area / h)`; one less at 100 % to leave room for subtitles; at least one when a
     /// track fits at all.
     var trackCount: Int {
@@ -37,7 +40,7 @@ struct DanmakuLayoutConfig: Equatable, Sendable {
         let usable = max(0, viewHeight - topInset)
         let area = min(max(areaFraction, 0), 1)
         var n = Int((usable * area / trackHeight + 1e-9).rounded(.down))
-        if area >= 0.999 { n -= 1 }
+        if area >= 0.999, !subtitlesElsewhere { n -= 1 }
         if n < 1 { n = usable >= trackHeight ? 1 : 0 }
         return n
     }

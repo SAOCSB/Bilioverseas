@@ -93,6 +93,15 @@ final class DanmakuOverlayView: UIView {
         didSet { if oldValue != isFullscreen { styleDidChange() } }
     }
 
+    /// All of this view is for danmaku, whatever 「显示区域」 says: the black above a landscape video on the vertical-video
+    /// screen, which is little enough already.
+    var usesWholeHeight: Bool = false {
+        didSet {
+            guard oldValue != usesWholeHeight else { return }
+            if engine.reconfigure(makeLayoutConfig()) { reflow(at: renderTime) }
+        }
+    }
+
     /// Called once per video when the server reports the uploader closed danmaku (state == 1).
     /// When nil, the toast 「UP主已关闭弹幕」 is shown instead.
     var onClosedByUploader: (() -> Void)?
@@ -916,7 +925,8 @@ final class DanmakuOverlayView: UIView {
         var c = DanmakuLayoutConfig()
         c.viewWidth = Double(bounds.width)
         c.viewHeight = Double(bounds.height)
-        c.areaFraction = settings.area.rawValue
+        c.areaFraction = usesWholeHeight ? 1 : settings.area.rawValue
+        c.subtitlesElsewhere = usesWholeHeight
         c.trackHeight = max(1, Double(fontSize) * min(max(settings.lineHeight, 1), 3))
         c.topInset = Double(DanmakuOverlayView.topInset)
         c.scrollDuration = min(max(settings.scrollDuration, 1), 50)

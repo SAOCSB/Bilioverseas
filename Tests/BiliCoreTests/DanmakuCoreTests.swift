@@ -372,6 +372,17 @@ final class DanmakuLayoutTests: XCTestCase {
         return c
     }
 
+    func testTrackCountWithSubtitlesElsewhere() {
+        var c = DanmakuLayoutConfig()
+        c.viewHeight = 180
+        c.topInset = 0
+        c.trackHeight = 30
+        c.areaFraction = 1
+        XCTAssertEqual(c.trackCount, 5, "room left for subtitles")
+        c.subtitlesElsewhere = true
+        XCTAssertEqual(c.trackCount, 6)
+    }
+
     func testTrackCountPerArea() {
         // Usable height 400, track 24.
         XCTAssertEqual(config(area: 0.25).trackCount, 4)

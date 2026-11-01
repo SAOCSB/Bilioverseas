@@ -36,6 +36,13 @@ enum VerticalVideoMetrics {
         CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: max(bounds.height - infoHeight, 0))
     }
 
+    /// Where a landscape video's danmaku go in `lanes` (the page below its top bar): in the black above its `picture`, like
+    /// the official app. nil when that has room for less than about three lines: then they go over the picture.
+    static func danmakuLanes(above picture: CGRect, in lanes: CGRect) -> CGRect? {
+        let room = picture.minY - lanes.minY
+        return room >= 90 ? CGRect(x: lanes.minX, y: lanes.minY, width: lanes.width, height: room) : nil
+    }
+
     /// A video about the shape of the picture area fills it, like the official app (a sliver of it is cut off); anything
     /// else shows whole.
     static func fills(video: CGSize, area: CGSize) -> Bool {

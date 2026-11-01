@@ -23,6 +23,8 @@ struct ShortVideoPager<Item: Identifiable, Page: View>: UIViewRepresentable {
         layout.minimumInteritemSpacing = 0
         let view = PagingCollectionView(frame: .zero, collectionViewLayout: layout)
         view.isPagingEnabled = true
+        // A press on the page counts from the touch: scrolling can still take it over.
+        view.delaysContentTouches = false
         view.showsVerticalScrollIndicator = false
         view.contentInsetAdjustmentBehavior = .never
         view.scrollsToTop = false

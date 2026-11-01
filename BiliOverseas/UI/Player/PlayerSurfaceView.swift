@@ -138,8 +138,12 @@ final class PlayerSurfaceView: UIView {
         if !swipeCover.isHidden, let swipeCoverTarget { swipeCover.show(picture(of: swipeCoverTarget)) }
         if !leavingCover.isHidden, let leavingCoverTarget { leavingCover.show(picture(of: leavingCoverTarget)) }
         var lanes = bounds.inset(by: UIEdgeInsets(top: danmakuTopInset, left: 0, bottom: 0, right: 0))
-        // Over the picture, not over the black around it.
-        if let picture = wholePictureRect { lanes = lanes.intersection(picture) }
+        var abovePicture: CGRect?
+        if let picture = wholePictureRect {
+            abovePicture = VerticalVideoMetrics.danmakuLanes(above: picture, in: lanes)
+            lanes = abovePicture ?? lanes.intersection(picture)
+        }
+        danmaku.usesWholeHeight = abovePicture != nil
         danmaku.bounds = CGRect(origin: .zero, size: lanes.size)
         danmaku.center = CGPoint(x: lanes.midX, y: lanes.midY)
         gestureView.frame = bounds

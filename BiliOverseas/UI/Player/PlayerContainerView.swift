@@ -481,7 +481,7 @@ struct PlayerChromeView: View {
     /// `VerticalVideoViews.swift`. Nothing here hides by itself; while a swipe goes to another video only the top bar stays.
     private var verticalControls: some View {
         ZStack {
-            if !controller.storyCleared {
+            if !showsCleared {
                 LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
                     .frame(height: 110)
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -493,7 +493,7 @@ struct PlayerChromeView: View {
                     .opacity(controller.isVideoSwipeActive ? 0 : 1)
             }
             VStack(spacing: 0) {
-                if !controller.storyCleared {
+                if !showsCleared {
                     VerticalVideoTopBar(online: controller.onlineCount, onBack: { controller.fullscreenBack() },
                                         onSearch: controller.pageRouter.map { router in { router.push(.searchHome) } }) {
                         Button { open(.more) } label: {
@@ -509,9 +509,12 @@ struct PlayerChromeView: View {
         }
     }
 
+    /// 清屏, which 长按倍速 does too for as long as it lasts (the danmaku stay).
+    private var showsCleared: Bool { controller.storyCleared || controller.isBoosting }
+
     private var verticalPageControls: some View {
         VStack(spacing: 0) {
-            if !controller.storyCleared {
+            if !showsCleared {
                 HStack(alignment: .bottom, spacing: 8) {
                     // A downloaded video has no page behind it: only its title.
                     VerticalVideoInfoView(actions: controller.fullscreenActions ?? PlayerFullscreenActions(),
@@ -543,6 +546,8 @@ struct PlayerChromeView: View {
                                onDetail: { controller.exitFullscreen() },
                                onClear: { controller.setStoryCleared(!controller.storyCleared) },
                                onFullscreen: { controller.turnStoryLandscape() })
+            .opacity(controller.isBoosting ? 0 : 1)
+            .allowsHitTesting(!controller.isBoosting)
     }
 
     // MARK: Bars

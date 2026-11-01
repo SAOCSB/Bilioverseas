@@ -74,13 +74,17 @@ struct ShortVideoFeedView: View {
         .onAppear {
             // A swipe back begins with this.
             VideoMorph.endWaiting()
+            model.pageOnScreenChanged(true)
             let depth = stackDepth ?? router.path.count
             stackDepth = depth
             // A swipe back brings this on while the video's page above it still plays, and may stop halfway. Its path update
             // lands when it is done.
             if router.path.count <= depth { model.setVisible(true) }
         }
-        .onDisappear { model.setVisible(false) }
+        .onDisappear {
+            model.pageOnScreenChanged(false)
+            model.setVisible(false)
+        }
         .onChange(of: router.path.count) { count in
             model.closeLandscape()
             if count == stackDepth { model.setVisible(true) }
@@ -457,7 +461,7 @@ struct ShortVideoPageView: View {
                 : VerticalVideoMetrics.wholePictureFrame(in: CGRect(origin: .zero, size: geo.size)).height
             ZStack {
                 ShortVideoSurface(player: playback.player, fill: fills(in: geo.size), readyForDisplay: $readyForDisplay,
-                                  onView: { playback.surfaceView = $0 })
+                                  onView: { playback.surfaceView = $0 }, detached: playback.pictureDetached)
                     .frame(height: pictureHeight)
                     .frame(maxHeight: .infinity, alignment: .top)
                 if !readyForDisplay || playback.phase != .ready {

@@ -425,7 +425,11 @@ final class PlayerController: ObservableObject {
 
     let timeline = PlayerTimeline()
     let overlay = PlayerOverlayModel()
-    let player: AVPlayer
+    /// Its own, or the one it has on loan.
+    private(set) var player: AVPlayer
+    private let ownPlayer: AVPlayer
+    /// What this page goes on with instead of opening the video itself.
+    private var loan: PlayerStreamLoan?
     let surface: PlayerSurfaceView
     let heartbeat = HeartbeatReporter()
     let bag = PlayerObserverBag()
@@ -538,6 +542,7 @@ final class PlayerController: ObservableObject {
         // AirPlay video would hand 127.0.0.1 URLs to the receiver; audio routes / mirroring still work.
         avPlayer.allowsExternalPlayback = false
         player = avPlayer
+        ownPlayer = avPlayer
         surface = PlayerSurfaceView(frame: .zero)
         let speed = AppSettings.shared.player.defaultSpeed
         rate = speed.isFinite && speed > 0 ? min(max(speed, 0.25), 4) : 1
@@ -599,6 +604,10 @@ final class PlayerController: ObservableObject {
 
     func load(_ newItem: PlaybackItem) {
         if SmokeTest.isEnabled { SmokeTest.activePlayer = self }
+        if loan != nil, let current = item, current.aid == newItem.aid, current.cid == newItem.cid, newItem.epId == 0 {
+            if current != newItem { learned(newItem) }
+            return
+        }
         if let current = item, current == newItem {
             switch status {
             case .idle, .failed: break
@@ -619,6 +628,7 @@ final class PlayerController: ObservableObject {
         // swipe from a paused video (the swipe itself paused it).
         let continuing = item != nil && (wantsToPlay || status == .ended || swiped)
         autoExitTask?.cancel()
+        endLoan()
         let preload = swapStreamPreloads(for: newItem)
         teardown(reportHeartbeat: true)
         takenPreload = preload
@@ -664,12 +674,109 @@ final class PlayerController: ObservableObject {
             goOnAfterLanding()
         } else {
             releaseSwipePicture()
+            // The picture of the screen this came from stands in until its own comes (`VideoMorph`).
+            if VideoMorph.isRunning, goingOn?.isVideo(aid: newItem.aid, cid: newItem.cid) == true { isHoldingSwipePicture = true }
         }
         startTicking()
         let gen = loadGeneration
         loadTask = Task { [weak self] in await self?.performInitialLoad(newItem, generation: gen) }
         sideTask = Task { [weak self] in await self?.loadSideData(newItem, generation: gen) }
         PlayerNowPlayingCenter.shared.playbackChanged(self)
+    }
+
+    // MARK: A video on loan
+
+    var isOnLoan: Bool { loan != nil }
+
+    /// Goes on with a video another screen is playing, on its player: this is `load`, `installItem` and the start of the
+    /// playback all at once, with nothing to wait for. What the page learns about the video later comes through `load`.
+    func takeOver(_ lent: PlayerStreamLoan) {
+        guard item == nil, loan == nil else {
+            lent.giveBack(lent.isPlaying, false)
+            return
+        }
+        loan = lent
+        waitBegan = ProcessInfo.processInfo.systemUptime
+        tracedPlaying = true
+        let time = lent.player.currentTime().seconds
+        let position = time.isFinite ? max(0, time) : 0
+        trace("load \(lent.item.bvid) cid=\(lent.item.cid) vertical=\(lent.item.isVertical) on loan at \(position)")
+        item = lent.item
+        isVerticalVideo = lent.item.isVertical
+        aspectMode = .stored(forVertical: lent.item.isVertical)
+        duration = lent.info.duration > 0 ? lent.info.duration : max(0, lent.item.duration)
+        currentTime = position
+        lastKnownPosition = position
+        timeline.update(time: position, duration: duration, buffered: position)
+        wantsToPlay = lent.isPlaying
+        hasFirstFrame = false
+        // The picture that came with it stands in until this layer has one (`VideoMorph`).
+        isHoldingSwipePicture = true
+        switchPlayer(to: lent.player)
+        player.actionAtItemEnd = .pause
+        session = lent.session
+        playerItem = lent.playerItem
+        choice = lent.choice
+        playInfo = lent.info
+        playInfoFetchedAt = lent.fetchedAt
+        isAccelerated = lent.accelerated
+        accelerationWanted = lent.accelerationWanted
+        isProgressive = false
+        refreshStreamMenus()
+        player.defaultRate = playerRate
+        observeItem(lent.playerItem, generation: streamGeneration)
+        surface.danmaku.load(cid: lent.item.cid, aid: lent.item.aid, duration: duration)
+        surface.setNeedsLayout()
+        overlay.prepareForNewItem()
+        startTicking()
+        status = wantsToPlay ? .buffering : .paused
+        itemReady = true
+        finishStartup()
+        if !wantsToPlay {
+            // A paused player gives a layer just put on it nothing to show.
+            player.seek(to: player.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+    }
+
+    /// The page has the detail of the video it has on loan. Nothing about the stream changes.
+    private func learned(_ newItem: PlaybackItem) {
+        item = newItem
+        if newItem.isVertical != isVerticalVideo {
+            isVerticalVideo = newItem.isVertical
+            aspectMode = .stored(forVertical: newItem.isVertical)
+            surface.setNeedsLayout()
+        }
+        sideTask?.cancel()
+        let gen = loadGeneration
+        sideTask = Task { [weak self] in await self?.loadSideData(newItem, generation: gen) }
+        PlayerNowPlayingCenter.shared.playbackChanged(self)
+    }
+
+    /// The page goes on to something else, or goes away. The player and the stream go back as they are.
+    func endLoan(playing: Bool? = nil, returning: Bool = false) {
+        guard let lent = loan else { return }
+        loan = nil
+        let wasPlaying = playing ?? wantsToPlay
+        let time = lent.player.currentTime().seconds
+        if time.isFinite { lastKnownPosition = max(0, time) }
+        trace("gave back at \(lastKnownPosition) playing=\(wasPlaying) returning=\(returning)")
+        removeItemObservers()
+        session = nil
+        playerItem = nil
+        itemReady = false
+        startupDone = false
+        isSeeking = false
+        seekToken += 1
+        if isBoosting { isBoosting = false }
+        switchPlayer(to: ownPlayer)
+        lent.giveBack(wasPlaying, returning)
+    }
+
+    private func switchPlayer(to next: AVPlayer) {
+        guard next !== player else { return }
+        player = next
+        observePlayer()
+        surface.playerChanged()
     }
 
     func play() {
@@ -761,24 +868,52 @@ final class PlayerController: ObservableObject {
     /// From the page up to the vertical-video screen, the same way as the 短视频 page's 详情页 comes down.
     private func morphIntoVerticalScreen() -> Bool {
         guard inlinePictureFrame != nil, !isPiPBusy, let window = surface.window,
-              let morph = surface.lendPicture(backdropAlpha: 0) else { return false }
-        morph.move(to: VerticalVideoMetrics.storyPicture(video: morph.pictureSize, in: window), backdropAlpha: 1) { [weak self] in
-            self?.enterFullscreen(byRotation: false, deviceOrientation: nil, animated: false)
-            // The surface is in the new place by then.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { morph.finish(fade: 0) }
+              let morph = surface.makeMorph(backdropAlpha: 0) else { return false }
+        morph.whenReady {
+            morph.move(to: VerticalVideoMetrics.storyPicture(video: morph.pictureSize, in: window), backdropAlpha: 1) { [weak self] in
+                guard let self else {
+                    morph.finish(fade: 0)
+                    return
+                }
+                self.enterFullscreen(byRotation: false, deviceOrientation: nil, animated: false) { [weak self] in
+                    self?.finishMorph(morph)
+                }
+                // Should the presentation not come.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { morph.finish() }
+            }
         }
         return true
     }
 
     /// 详情页 on the vertical-video screen: down to the page under it.
     func goToPageFromVerticalScreen() {
-        guard isOnVerticalScreen, !isPiPBusy, let inlinePictureFrame, let morph = surface.lendPicture(backdropAlpha: 1) else {
+        guard !VideoMorph.isRunning else { return }
+        guard isOnVerticalScreen, !isPiPBusy, let inlinePictureFrame, let morph = surface.makeMorph(backdropAlpha: 1) else {
             exitFullscreen()
             return
         }
-        let target = inlinePictureFrame(morph.pictureSize)
-        exitFullscreen(animated: false)
-        morph.move(to: target, backdropAlpha: 0) { morph.finish(fade: 0) }
+        morph.whenReady { [weak self] in
+            let target = inlinePictureFrame(morph.pictureSize)
+            self?.exitFullscreen(animated: false)
+            morph.move(to: target, backdropAlpha: 0) { [weak self] in
+                guard let self else {
+                    morph.finish(fade: 0)
+                    return
+                }
+                self.finishMorph(morph)
+            }
+        }
+    }
+
+    /// Into the same picture in its new place, once that has it.
+    private func finishMorph(_ morph: VideoMorph) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else {
+                morph.finish()
+                return
+            }
+            self.surface.whenPictureShows { morph.finish() }
+        }
     }
 
     /// Back from the page fullscreen gave way to (`pagePathChanged`).
@@ -932,8 +1067,12 @@ final class PlayerController: ObservableObject {
         canSwipeVideos || (storyTurned && item?.epId == 0)
     }
 
-    /// This page is the 详情页 of a screen that does the swiping itself, so it does not (until it has a fullscreen of its own).
-    private var cameFromSwipingScreen: Bool { goingOn != nil && !isFullscreen }
+    /// This page shows the video of a screen that does the swiping itself, so it does not (until it has a fullscreen of its
+    /// own, or goes on to another video).
+    var cameFromSwipingScreen: Bool {
+        guard goingOn != nil, !isFullscreen else { return false }
+        return item.map { goingOn?.isVideo(aid: $0.aid, cid: $0.cid) == true } ?? true
+    }
 
     /// This video is on the swipes, whatever Picture in Picture is doing for now.
     var isOnTheSwipes: Bool {
@@ -1234,6 +1373,7 @@ final class PlayerController: ObservableObject {
     }
 
     func performStop() {
+        endLoan()
         if let current = item { PlaybackTrace.log("left \(current.bvid)") }
         onStoryInstead = nil
         inlinePictureFrame = nil
@@ -2000,6 +2140,8 @@ final class PlayerController: ObservableObject {
                              position: Double?, generation sgen: Int) {
         // A seek made while this was being prepared wins over what it was asked to open at.
         let start = max(0, pendingStartTime ?? position ?? displayTime())
+        // Another stream of it (another quality, the fallback ladder): that one goes back, and this one is this page's own.
+        endLoan()
         let initial = !heartbeatStarted
         removeItemObservers()
         startupDone = false
@@ -2786,7 +2928,8 @@ final class PlayerController: ObservableObject {
 
     // MARK: Fullscreen
 
-    func enterFullscreen(byRotation: Bool, deviceOrientation: UIDeviceOrientation?, story keepStory: Bool = false, animated: Bool = true) {
+    func enterFullscreen(byRotation: Bool, deviceOrientation: UIDeviceOrientation?, story keepStory: Bool = false,
+                         animated: Bool = true, then: (() -> Void)? = nil) {
         guard !isFullscreen, item != nil else { return }
         autoExitTask?.cancel()
         let story = isVerticalVideo || keepStory
@@ -2814,6 +2957,7 @@ final class PlayerController: ObservableObject {
         // on screen); back once it stands still.
         overlay.hideControls()
         let shown: () -> Void = { [weak self] in
+            then?()
             guard let self, self.isFullscreen else { return }
             self.overlay.showControls()
         }
@@ -2828,6 +2972,7 @@ final class PlayerController: ObservableObject {
             fullscreenByRotation = false
             overlay.fullscreenChanged()
             OrientationManager.shared.restorePortrait()
+            then?()
         }
     }
 

@@ -1,9 +1,11 @@
+import AVFoundation
 import UIKit
 
 /// The picture moving between two places on the screen while what is around it changes: the vertical-video screen becoming
-/// the video's page and back, as in the official app, with nothing sliding in as a new window would. The view that shows the
-/// video is lent to a window above everything, so it stays up while the pages change underneath: it has its picture already,
-/// where a new layer on the same player can take a moment to get one, or never while that is paused.
+/// the video's page and back, as in the official app, with nothing sliding in as a new window would. A layer of its own on
+/// the same player, in a window above everything, lines up over the picture and moves from there, so the video plays on
+/// throughout whatever the pages underneath do. Moving the layer that shows it from one window to another would leave a frame
+/// with nothing in it.
 @MainActor
 final class VideoMorph {
     /// One at a time, kept until it has gone.
@@ -14,43 +16,66 @@ final class VideoMorph {
     private let window: UIWindow
     private let root = VideoMorphController()
     private let backdrop = UIView()
-    private let moving: UIView
-    private let giveBack: () -> Void
+    private let moving = PlayerVideoLayerView()
     /// Where the video is on the screen before it moves.
-    private let start: CGRect
+    let start: CGRect
+    private let startBackdrop: CGFloat
+    private var readyObservation: NSKeyValueObservation?
+    private var onReady: (() -> Void)?
     private var finished = false
     private var isWaiting = false
 
     /// The video's shape.
     var pictureSize: CGSize { start.size }
 
-    /// `moving` is in its place on the screen, `picture` is where the video shows in it. `giveBack` puts it back where it
-    /// came from, when this has gone.
-    init?(moving view: UIView, picture: CGRect, backdropAlpha: CGFloat, giveBack: @escaping () -> Void) {
-        guard VideoMorph.current == nil, let scene = view.window?.windowScene, picture.width > 0, picture.height > 0,
+    /// Over `view`, which shows the video in `layer`. `backdropAlpha`: how much black it starts with once it has the picture.
+    init?(over view: UIView, layer: AVPlayerLayer, backdropAlpha: CGFloat) {
+        guard VideoMorph.current == nil, let scene = view.window?.windowScene, let player = layer.player,
               view.bounds.width > 0, view.bounds.height > 0 else { return nil }
-        moving = view
-        self.giveBack = giveBack
-        start = view.convert(picture, to: nil)
+        let shown = layer.videoRect
+        start = view.convert(shown.isEmpty ? view.bounds : shown, to: nil)
+        guard start.width > 0, start.height > 0 else { return nil }
+        startBackdrop = backdropAlpha
         let frame = view.convert(view.bounds, to: nil)
         window = UIWindow(windowScene: scene)
         window.windowLevel = .normal + 1
         window.backgroundColor = .clear
         root.view.backgroundColor = .clear
+        root.statusBarOverBlack = backdropAlpha > 0.5
         window.rootViewController = root
         backdrop.frame = root.view.bounds
         backdrop.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         backdrop.backgroundColor = .black
-        backdrop.alpha = backdropAlpha
-        root.statusBarOverBlack = backdropAlpha > 0.5
+        backdrop.alpha = 0
         root.view.addSubview(backdrop)
-        view.removeFromSuperview()
-        view.transform = .identity
-        view.bounds = CGRect(origin: .zero, size: frame.size)
-        view.center = CGPoint(x: frame.midX, y: frame.midY)
-        root.view.addSubview(view)
+        moving.isUserInteractionEnabled = false
+        moving.bounds = CGRect(origin: .zero, size: frame.size)
+        moving.center = CGPoint(x: frame.midX, y: frame.midY)
+        moving.playerLayer.videoGravity = layer.videoGravity
+        moving.playerLayer.player = player
+        root.view.addSubview(moving)
         window.isHidden = false
+        // A paused player gives a layer just put on it nothing to show.
+        if player.rate == 0 { player.seek(to: player.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero) }
         VideoMorph.current = self
+    }
+
+    /// `go` once it shows the picture, which until then it leaves to what is underneath.
+    func whenReady(_ go: @escaping () -> Void) {
+        onReady = go
+        readyObservation = moving.playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
+            guard layer.isReadyForDisplay else { return }
+            DispatchQueue.main.async { self?.becomeReady() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.becomeReady() }
+    }
+
+    private func becomeReady() {
+        readyObservation = nil
+        guard let go = onReady, !finished else { return }
+        onReady = nil
+        backdrop.alpha = startBackdrop
+        go()
     }
 
     /// `target`: where the video goes on the screen. `backdropAlpha`: how much black is left around it there.
@@ -81,12 +106,13 @@ final class VideoMorph {
         current.finish(fade: 0)
     }
 
-    /// Gone, over `fade`; none when what is underneath shows the same picture only once this has given it back.
+    /// Gone, over `fade`, into the same picture underneath.
     func finish(fade: TimeInterval = 0.12, done: (() -> Void)? = nil) {
         guard !finished else { return }
         finished = true
         let end = {
-            self.giveBack()
+            self.readyObservation = nil
+            self.moving.playerLayer.player = nil
             self.window.isHidden = true
             if VideoMorph.current === self { VideoMorph.current = nil }
             done?()

@@ -86,7 +86,12 @@ struct VideoDetailView: View {
             refullscreenIfPageReturned()
             // On its way out, and what comes back from under it may have a video of its own.
             if let stackDepth, count < stackDepth, !player.isPiPBusy {
-                player.pause()
+                if player.isOnLoan {
+                    // Unless it is on that one's player: then it just goes on there.
+                    player.endLoan(playing: player.wantsToPlay || resumeOnAppear, returning: count == stackDepth - 1)
+                } else {
+                    player.pause()
+                }
             }
         }
         // Playing (from the bar, a comment's timestamp, the lock screen …), another tab, fullscreen, PiP or a
@@ -174,22 +179,31 @@ struct VideoDetailView: View {
         guard !VideoMorph.isRunning, let goingOn = player.goingOn, let item = player.item,
               goingOn.isVideo(aid: item.aid, cid: item.cid), !playerCollapsed, !player.isPiPBusy, !player.isFullscreen,
               let goingBack = goingOn.onGoingBack, player.surface.window != nil,
-              let target = goingBack(player.displayTime()),
-              let morph = player.surface.lendPicture(backdropAlpha: 0) else { return false }
-        let (pagePlayer, pageRouter) = (player, router)
+              let target = goingBack(player.displayTime()) else { return false }
+        let (pagePlayer, pageRouter, depth) = (player, router, stackDepth)
+        // On loan it just goes on, on that screen.
+        if !pagePlayer.isOnLoan { pagePlayer.pause() }
+        guard let morph = pagePlayer.surface.makeMorph(backdropAlpha: 0) else { return false }
         // The page goes while the picture is still on this player.
         pagePlayer.holdStop()
-        pagePlayer.pause()
-        morph.move(to: target, backdropAlpha: 1) {
-            pageRouter.popWithoutAnimation()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                morph.finish(fade: 0.15) { pagePlayer.releaseStop() }
+        morph.whenReady {
+            morph.move(to: target, backdropAlpha: 1) {
+                pagePlayer.endLoan(returning: true)
+                if pageRouter.path.count == depth { pageRouter.popWithoutAnimation() }
+                let finish = { morph.finish(fade: 0.15) { pagePlayer.releaseStop() } }
+                // Its place there may need a moment to have the picture too.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    if let whenBack = goingOn.whenBack { whenBack(finish) } else { finish() }
+                }
             }
         }
         return true
     }
 
     private func goBack() {
+        VideoMorph.endWaiting()
+        // Going already.
+        if VideoMorph.isRunning { return }
         if !goBackToScreen() { dismiss() }
     }
 
@@ -664,7 +678,8 @@ final class VideoDetailModel: ObservableObject {
         if let ep = currentEpisode, season != nil {
             return VideoDetailModel.isVertical(width: ep.width, height: ep.height, rotate: ep.rotate)
         }
-        guard let d = detail else { return false }
+        // The screen it came from knows.
+        guard let d = detail else { return ref.goingOn?.isVertical ?? false }
         if let p = currentPart, p.width > 0, p.height > 0 { return p.isVertical }
         return d.isVertical
     }
@@ -702,7 +717,13 @@ final class VideoDetailModel: ObservableObject {
     func attach(_ player: PlayerController) {
         self.player = player
         // Swipes on the page leave it with other refs, and may come back to this video.
-        if let goingOn = ref.goingOn { player.goingOn = goingOn }
+        if let goingOn = ref.goingOn {
+            player.goingOn = goingOn
+            if let lent = goingOn.loan as? PlayerStreamLoan {
+                goingOn.loan = nil
+                player.takeOver(lent)
+            }
+        }
         player.onEnded = { [weak self] in
             Task { @MainActor in self?.advance(manual: false) }
         }
@@ -921,7 +942,8 @@ final class VideoDetailModel: ObservableObject {
             player?.videoSwipeFailed()
             return
         }
-        if item.isVertical || player?.goesOnBySwipes == true { prefetchSwipeQueueIfNeeded() }
+        let swipesElsewhere = player?.goingOn?.isVideo(aid: item.aid, cid: item.cid) == true
+        if !swipesElsewhere, item.isVertical || player?.goesOnBySwipes == true { prefetchSwipeQueueIfNeeded() }
         // A content switch that finishes while another page covers this one (auto-next, lock-screen 下一集)
         // is loaded on the next appearance instead of auto-playing behind that page.
         if let player, !isCovered {

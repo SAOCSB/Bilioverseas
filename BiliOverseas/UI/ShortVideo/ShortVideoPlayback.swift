@@ -44,6 +44,22 @@ final class ShortVideoPlayback: ObservableObject {
     @Published private(set) var isStandingBy = false
     /// Where it shows now, if it does.
     weak var surfaceView: ShortVideoSurface.PlayerLayerView?
+    /// A page has this player and its stream for now (`lend`), and all that goes on here is keeping up with it.
+    private(set) var isLent = false
+    /// Off the page's layer while it is lent: the system pauses a player with a layer on screen when the app goes to the
+    /// background, which the page's own takes care of.
+    var pictureDetached = false {
+        didSet { surfaceView?.playerLayer.player = pictureDetached ? nil : player }
+    }
+    /// What it takes to lend the stream, when it came from DASH through the proxy.
+    private struct LendableStream {
+        let info: PlayInfo
+        let fetchedAt: Date
+        let choice: PlayerStreamChoice
+        let accelerated: Bool
+        let wanted: Bool
+    }
+    private var lendable: LendableStream?
     /// Pictures of its moments, for dragging the progress.
     @Published private(set) var videoShot: VideoShotInfo?
     private var videoShotAsked = false
@@ -86,6 +102,8 @@ final class ShortVideoPlayback: ObservableObject {
         timeline.reset(duration: duration)
         player.actionAtItemEnd = .none
         player.automaticallyWaitsToMinimizeStalling = true
+        // AirPlay video would hand 127.0.0.1 URLs to the receiver; audio routes / mirroring still work.
+        player.allowsExternalPlayback = false
         danmaku.isFullscreen = true
         // Swiping through videos: a toast for each one whose uploader closed danmaku would only get in the way.
         danmaku.onClosedByUploader = {}
@@ -138,6 +156,7 @@ final class ShortVideoPlayback: ObservableObject {
     /// Far from the video on screen: the player's item goes and the stream stays, with little in it. `prepare` brings the
     /// item back at once, going on from here.
     func keepStreamOnly() {
+        guard !isLent else { return }
         stopPlaying()
         itemWanted = false
         setStandingBy(true)
@@ -173,6 +192,7 @@ final class ShortVideoPlayback: ObservableObject {
 
     func play() {
         wantsPlay = true
+        guard !isLent else { return }
         reportedHistory = false
         setStandingBy(false)
         if !isPlaying, playAskedAt == nil { playAskedAt = ProcessInfo.processInfo.systemUptime }
@@ -192,11 +212,13 @@ final class ShortVideoPlayback: ObservableObject {
     }
 
     func pause() {
+        guard !isLent else { return }
         stopPlaying()
         setStandingBy(false)
     }
 
     func standBy() {
+        guard !isLent else { return }
         stopPlaying()
         setStandingBy(true)
         // It may have been further away, with less.
@@ -245,6 +267,7 @@ final class ShortVideoPlayback: ObservableObject {
     var isPaused: Bool { !wantsPlay }
 
     func seek(to seconds: Double) {
+        guard !isLent else { return }
         let target = max(0, min(seconds, duration > 0 ? duration - 0.5 : seconds))
         guard player.currentItem != nil, session?.isEndpointValid != false else {
             // Dragged while it is still loading: it starts there (`install`). Its stream gone, the item would only fail: `play`
@@ -305,7 +328,7 @@ final class ShortVideoPlayback: ObservableObject {
 
     /// 启用海外加速 / 竖屏视频禁用加速 changed: loads again on the matching path, from where it is.
     func accelerationChanged() {
-        guard phase != .idle || heldAsset != nil, wantsAcceleration != usesAcceleration else { return }
+        guard !isLent, phase != .idle || heldAsset != nil, wantsAcceleration != usesAcceleration else { return }
         if resumeAt == nil, position > 1 { resumeAt = position }
         // One only holding its stream gets it again when its turn comes (`fetchStream`).
         let wanted = itemWanted
@@ -330,10 +353,81 @@ final class ShortVideoPlayback: ObservableObject {
         player.replaceCurrentItem(with: nil)
         session?.close()
         session = nil
+        lendable = nil
         heldAsset = nil
         startingAt = nil
         startedPlaying = false
         if phase != .idle { phase = .idle }
+    }
+
+    // MARK: Lending it to a page
+
+    /// The video as it plays, for its page to go on with. nil: it has no stream of that kind to lend, or is not far enough.
+    func lend(giveBack: @escaping (Bool, Bool) -> Void) -> PlayerStreamLoan? {
+        guard !isLent, phase == .ready, !seeking, startingAt == nil, let session, session.isEndpointValid, let lendable,
+              let current = player.currentItem, current.status == .readyToPlay else { return nil }
+        isLent = true
+        setFastForward(false)
+        var known = PlaybackItem(aid: item.aid, bvid: item.bvid, cid: resolvedCid ?? item.cid, title: item.title)
+        known.cover = item.cover
+        known.ownerName = item.ownerName
+        known.ownerMid = item.ownerMid
+        known.duration = duration
+        known.isVertical = isPortraitPicture
+        return PlayerStreamLoan(player: player, playerItem: current, session: session, info: lendable.info,
+                                fetchedAt: lendable.fetchedAt, choice: lendable.choice, accelerated: lendable.accelerated,
+                                accelerationWanted: lendable.wanted, item: known, isPlaying: wantsPlay, giveBack: giveBack)
+    }
+
+    /// The shape of what it plays, as far as it knows.
+    var isPortraitPicture: Bool {
+        if let size = player.currentItem?.presentationSize, size.width > 0, size.height > 0 { return size.height > size.width }
+        return item.isPortrait
+    }
+
+    /// Back from the page, which may have gone on with something else since.
+    func takeBack(playing: Bool) {
+        guard isLent else { return }
+        isLent = false
+        pictureDetached = false
+        wantsPlay = playing
+        reportedHistory = false
+        player.actionAtItemEnd = .none
+        player.defaultRate = 1
+        if player.rate > 0, player.rate != 1 { player.rate = 1 }
+        let time = player.currentTime().seconds
+        if time.isFinite { position = time }
+        timeline.update(time: position, duration: duration, buffered: timeline.snapshot.buffered)
+        danmaku.seek(to: position)
+        if player.currentItem?.status == .failed {
+            if position > 1 { resumeAt = position }
+            teardown()
+        } else if duration > 0, position >= duration - 0.6 {
+            loop()
+        } else if playing {
+            // The page may have paused it on its way out.
+            if player.rate == 0 { player.playImmediately(atRate: 1) }
+        } else {
+            player.pause()
+            // A paused player gives a layer just put on it nothing to show.
+            player.seek(to: player.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        accelerationChanged()
+    }
+
+    /// `done` once its place on the page shows the video, or after a moment if that does not come.
+    func whenPictureShows(tries: Int = 15, _ done: @escaping () -> Void) {
+        guard tries > 0, surfaceView?.playerLayer.isReadyForDisplay != true else {
+            done()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+            guard let self else {
+                done()
+                return
+            }
+            self.whenPictureShows(tries: tries - 1, done)
+        }
     }
 
     /// Records how far this video was watched (when 「记录观看历史」 is on), once per viewing.
@@ -370,6 +464,7 @@ final class ShortVideoPlayback: ObservableObject {
                 }
                 if dash.duration > 0 { duration = dash.duration }
                 session = dash.session
+                lendable = dash.stream
                 streamIsHere(AVURLAsset(url: dash.session.url))
                 return
             }
@@ -425,7 +520,7 @@ final class ShortVideoPlayback: ObservableObject {
 
     /// nil: no usable DASH answer or session, which the MP4 path below may still be able to play.
     private func prepareDash(cid: Int64, qn: Int, routeKey: String, accelerate: Bool)
-    async -> (session: PlaybackSession, duration: Double)? {
+    async -> (session: PlaybackSession, duration: Double, stream: LendableStream)? {
         let (aid, bvid) = (item.aid, item.bvid)
         let player = AppSettings.shared.player
         let hdr = player.allowHDR && PlayerDeviceSupport.hdrEligible
@@ -440,7 +535,8 @@ final class ShortVideoPlayback: ObservableObject {
                                           duration: info.duration, accelerate: attempt, allowHDR: hdr,
                                           refreshURLs: refresher)
             if let made = try? await AccelerationEngine.shared.prepare(request) {
-                return (made, info.duration)
+                let stream = LendableStream(info: info, fetchedAt: Date(), choice: picked, accelerated: attempt, wanted: accelerate)
+                return (made, info.duration, stream)
             }
             if Task.isCancelled { return nil }
         }
@@ -506,13 +602,16 @@ final class ShortVideoPlayback: ObservableObject {
             .store(in: &itemObservers)
         center.publisher(for: .AVPlayerItemPlaybackStalled, object: playerItem)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.session?.playerDidStall() }
+            .sink { [weak self] _ in
+                guard let self, !self.isLent else { return }
+                self.session?.playerDidStall()
+            }
             .store(in: &itemObservers)
         // Not on the run loop, which waits while a finger is on the page, and the clock would have moved on from the start.
         playerItem.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
             .sink { [weak self, weak playerItem] status in
-                guard let self, playerItem === self.player.currentItem else { return }
+                guard let self, !self.isLent, playerItem === self.player.currentItem else { return }
                 if status == .readyToPlay, let start = self.startingAt {
                     self.startingAt = nil
                     // Not where the playlists said: a seek does it after all.
@@ -556,6 +655,12 @@ final class ShortVideoPlayback: ObservableObject {
 
     private func tick(_ time: Double) {
         guard time.isFinite else { return }
+        if isLent {
+            // The page tells the stream how it is going.
+            position = time
+            if isPlaying { furthest = max(furthest, time) }
+            return
+        }
         if wantsPlay, rebuildIfEndpointLost() { return }
         // Until it has opened, the clock does not say where the playlists told it to start.
         let seconds = startingAt ?? time
@@ -583,13 +688,14 @@ final class ShortVideoPlayback: ObservableObject {
             }
             runStartedAction()
         }
-        if status == .waitingToPlayAtSpecifiedRate, startedPlaying, !seeking,
+        if status == .waitingToPlayAtSpecifiedRate, startedPlaying, !seeking, !isLent,
            player.reasonForWaitingToPlay == .toMinimizeStalls {
             session?.playerDidStall()
         }
     }
 
     private func loop() {
+        guard !isLent else { return }
         reportHistoryIfNeeded()
         reportedHistory = false
         furthest = 0
@@ -667,6 +773,8 @@ struct ShortVideoSurface: UIViewRepresentable {
     @Binding var readyForDisplay: Bool
     /// Told which view it is.
     var onView: ((PlayerLayerView) -> Void)?
+    /// Not showing the player for now (`ShortVideoPlayback.pictureDetached`).
+    var detached = false
 
     func makeUIView(context: Context) -> PlayerLayerView {
         let view = PlayerLayerView()
@@ -678,38 +786,25 @@ struct ShortVideoSurface: UIViewRepresentable {
     }
 
     func updateUIView(_ view: PlayerLayerView, context: Context) {
-        if view.playerLayer.player !== player { view.playerLayer.player = player }
+        let shown = detached ? nil : player
+        if view.playerLayer.player !== shown { view.playerLayer.player = shown }
         view.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
         onView?(view)
     }
 
-    /// SwiftUI has this one. The picture is in a view inside it, which can be lent (`VideoMorph`).
     final class PlayerLayerView: UIView {
-        let picture = PlayerVideoLayerView()
-        var playerLayer: AVPlayerLayer { picture.playerLayer }
+        override static var layerClass: AnyClass { AVPlayerLayer.self }
+        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
         var onReadyChange: ((Bool) -> Void)?
         private var observation: NSKeyValueObservation?
 
         override init(frame: CGRect) {
             super.init(frame: frame)
-            picture.isUserInteractionEnabled = false
-            addSubview(picture)
             observation = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
                 self?.onReadyChange?(layer.isReadyForDisplay)
             }
         }
 
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            if picture.superview === self { picture.frame = bounds }
-        }
-
-        func takeBackPicture() {
-            picture.transform = .identity
-            addSubview(picture)
-            picture.frame = bounds
-        }
     }
 }

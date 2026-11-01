@@ -184,14 +184,15 @@ struct VerticalVideoPanelHost: View {
         VStack(spacing: 0) {
             header
             TabView(selection: $state.tab) {
-                VerticalVideoIntroTab(model: content.intro)
+                // The videos run on to the screen's edge. The input stays clear of the home indicator.
+                VerticalVideoIntroTab(model: content.intro, bottomInset: live.metrics.safeBottom)
                     .tag(VideoDetailTab.intro)
                 VideoCommentsListView(model: content.comments, onSeek: content.onSeek)
                     .id(ObjectIdentifier(content.comments))
+                    .padding(.bottom, live.metrics.safeBottom)
                     .tag(VideoDetailTab.comments)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
-            .padding(.bottom, live.metrics.safeBottom)
         }
         .background(Self.color)
         .environment(\.videoCommentsPanelColor, Self.color)
@@ -353,6 +354,7 @@ final class VerticalVideoIntroModel: ObservableObject {
 
 struct VerticalVideoIntroTab: View {
     @ObservedObject var model: VerticalVideoIntroModel
+    var bottomInset: CGFloat = 0
     @EnvironmentObject private var router: TabRouter
     @Environment(\.videoCommentsPanelColor) private var panelColor
 
@@ -377,6 +379,7 @@ struct VerticalVideoIntroTab: View {
                         .padding(.horizontal, 12)
                         .padding(.top, 8)
                 }
+                // Flush with the tabs when it sticks: nothing shows between them.
                 Section {
                     grid
                 } header: {
@@ -385,12 +388,12 @@ struct VerticalVideoIntroTab: View {
                         .foregroundColor(.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
+                        .padding(.top, 14)
+                        .padding(.bottom, 10)
                         .background(panelColor ?? Color(.systemBackground))
                 }
-                .padding(.top, 8)
             }
-            .padding(.bottom, 16)
+            .padding(.bottom, 16 + bottomInset)
         }
         .task { await model.loadIfNeeded() }
     }

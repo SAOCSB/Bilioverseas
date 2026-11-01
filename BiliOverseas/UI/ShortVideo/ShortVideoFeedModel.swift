@@ -226,6 +226,7 @@ final class ShortVideoFeedModel: ObservableObject {
             playback.play()
         } else {
             userPaused = true
+            PlaybackTrace.log("feed paused by tap \(item.id)")
             playback.pause()
         }
     }
@@ -300,62 +301,116 @@ final class ShortVideoFeedModel: ObservableObject {
         var ref = item.videoRef
         ref.cid = playback.resolvedCid ?? item.cid
         ref.startTime = playback.position
-        let goingOn = VideoGoingOn(aid: item.aid, cid: ref.cid)
+        let goingOn = VideoGoingOn(aid: item.aid, cid: ref.cid, isVertical: playback.isPortraitPicture)
         ref.goingOn = goingOn
         wentToPage = (item.id, goingOn)
         return ref
     }
 
     /// 详情页: no new page slides in. The bars go, the video moves to where the page has it, and the page comes up around
-    /// it. Going back from the page it moves back the same way (`VideoDetailView.goBackToScreen`).
+    /// it. It goes on playing throughout: the page takes over this very player (`ShortVideoPlayback.lend`). Going back from
+    /// the page it moves back the same way (`VideoDetailView.goBackToScreen`).
     func openPage(of item: ShortVideoItem, router: TabRouter) {
         guard !VideoMorph.isRunning else { return }
         let playback = playback(for: item)
-        let ref = pageRef(for: item)
-        guard let surface = playback.surfaceView, let window = surface.window else {
-            router.push(.video(ref))
+        guard let surface = playback.surfaceView, let window = surface.window, surface.playerLayer.isReadyForDisplay else {
+            // No picture yet to move: the page shows its own place filling up.
+            router.pushWithoutAnimation(.video(pageRef(for: item)))
             return
         }
-        let shown = surface.playerLayer.videoRect
-        let inPicture = shown.isEmpty ? surface.picture.bounds : shown
-        let picture = surface.picture.convert(inPicture, to: nil)
-        guard let morph = VideoMorph(moving: surface.picture, picture: inPicture, backdropAlpha: 1,
-                                     giveBack: { surface.takeBackPicture() }) else {
-            router.push(.video(ref))
+        guard let morph = VideoMorph(over: surface, layer: surface.playerLayer, backdropAlpha: 1) else {
+            router.push(.video(pageRef(for: item)))
             return
         }
-        ref.goingOn?.onGoingBack = { [weak self] time in
-            guard let kept = self?.playbacks[item.id] else { return nil }
-            // Ahead of the page's going: by the time this screen shows, the picture is there.
-            kept.seek(to: time)
-            return picture
-        }
-        // It holds the last frame until the page's own player has the same one.
-        var arrived = false
-        var pageShows = false
-        ref.goingOn?.onPagePicture = {
-            pageShows = true
-            if arrived { morph.finish() }
-        }
-        router.pushWithoutAnimation(.video(ref))
-        morph.move(to: VideoDetailView.inlinePictureFrame(video: picture.size, in: window), backdropAlpha: 0) {
-            arrived = true
-            morph.letTouchesThrough()
-            if pageShows {
-                morph.finish()
-            } else {
-                // Slow to come: its own loading shows instead.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { morph.finish() }
+        let picture = morph.start
+        morph.whenReady { [weak self] in
+            guard let self else {
+                morph.finish(fade: 0)
+                return
+            }
+            let ref = self.pageRef(for: item)
+            guard let goingOn = ref.goingOn else { return }
+            if item.id == self.current?.id, self.landingStarted == nil {
+                self.landing.isSpeeding = false
+                self.landing.resetPress()
+                goingOn.loan = playback.lend { [weak self] playing, returning in
+                    playback.takeBack(playing: playing)
+                    guard let self else {
+                        playback.close()
+                        return
+                    }
+                    self.loanCameBack(playback, playing: playing, returning: returning)
+                }
+            }
+            goingOn.onGoingBack = { [weak self, weak playback] time in
+                guard self != nil, let playback else { return nil }
+                if playback.isLent {
+                    playback.pictureDetached = false
+                } else {
+                    // Ahead of the page's going: by the time this screen shows, the picture is there.
+                    playback.seek(to: time)
+                }
+                return picture
+            }
+            goingOn.whenBack = { [weak playback] done in
+                if let playback {
+                    playback.whenPictureShows(done)
+                } else {
+                    done()
+                }
+            }
+            // It stays until the page's own layer has the same picture underneath.
+            var arrived = false
+            var pageShows = false
+            goingOn.onPagePicture = {
+                pageShows = true
+                if arrived { morph.finish() }
+            }
+            router.pushWithoutAnimation(.video(ref))
+            morph.move(to: VideoDetailView.inlinePictureFrame(video: picture.size, in: window), backdropAlpha: 0) {
+                arrived = true
+                morph.letTouchesThrough()
+                if pageShows {
+                    morph.finish()
+                } else {
+                    // Slow to come (with no stream to lend, the page opens the video itself): its own loading shows instead.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { morph.finish() }
+                }
             }
         }
+    }
+
+    /// The page is going away and this comes back on, with the player where the page left it. Or the page has gone on to
+    /// something else and this stays covered: it holds still until it is back, and what the page does has no say in that.
+    private func loanCameBack(_ playback: ShortVideoPlayback, playing: Bool, returning: Bool) {
+        if returning {
+            wentToPage = nil
+            if playback.item.id == current?.id { userPaused = !playing }
+            setVisible(true)
+        } else {
+            activate()
+        }
+    }
+
+    /// In view, also while a swipe back from the page may yet stop halfway. The video shows under the page sliding away.
+    func pageOnScreenChanged(_ onScreen: Bool) {
+        guard let wentToPage, let playback = playbacks[wentToPage.id], playback.isLent else { return }
+        playback.pictureDetached = !onScreen
     }
 
     /// That page has gone.
     private func goOnFromPage() {
         guard let wentToPage else { return }
         self.wentToPage = nil
+        // It never took what it was lent.
+        if let lent = wentToPage.goingOn.loan as? PlayerStreamLoan {
+            wentToPage.goingOn.loan = nil
+            lent.giveBack(lent.isPlaying, false)
+        }
         guard let time = wentToPage.goingOn.time, let playback = playbacks[wentToPage.id],
               abs(time - playback.position) >= 1 else { return }
+        // Near its end it starts over, rather than ending at once.
+        guard playback.duration <= 0 || time < playback.duration - PlayerController.startsOverNearEnd else { return }
         playback.seek(to: time)
     }
 
@@ -417,8 +472,10 @@ final class ShortVideoFeedModel: ObservableObject {
         func ids(within reach: Int) -> Set<String> {
             Set((index - reach...index + reach).filter { items.indices.contains($0) }.map { items[$0].id })
         }
-        let near = ids(within: visible ? 1 : 0)
-        let window = visible ? ids(within: streamReach) : near
+        // With its page going on on this one's player it comes back on at once, ready as it was.
+        let keeps = visible || playbacks[current.id]?.isLent == true
+        let near = ids(within: keeps ? 1 : 0)
+        let window = keeps ? ids(within: streamReach) : near
         for (id, playback) in playbacks where !window.contains(id) {
             playback.close()
             playbacks[id] = nil

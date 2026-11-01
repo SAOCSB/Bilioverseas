@@ -33,6 +33,7 @@ final class PlayerSurfaceView: UIView {
     private var chromeLocked = false
     private var zoomedCid: Int64?
     private var cancellables: [AnyCancellable] = []
+    private var videoSizeObservation: AnyCancellable?
     /// The video a swipe goes to: its picture comes in with the finger and stays until the video shows its own.
     private let swipeCover = PlayerSwipeCoverView()
     /// What `swipeCover` shows.
@@ -108,12 +109,23 @@ final class PlayerSurfaceView: UIView {
                 self?.dismissDanmakuBubble()
                 if !fullscreen { self?.resetZoom(animated: false) }
             },
-            controller.player.publisher(for: \.currentItem?.presentationSize).receive(on: RunLoop.main).sink { [weak self] size in
-                self?.videoSize = size ?? .zero
-                self?.updateVideoGravity()
-                self?.setNeedsLayout()
-            },
         ]
+        observeVideoSize(of: controller.player)
+    }
+
+    private func observeVideoSize(of player: AVPlayer) {
+        videoSizeObservation = player.publisher(for: \.currentItem?.presentationSize).receive(on: RunLoop.main).sink { [weak self] size in
+            self?.videoSize = size ?? .zero
+            self?.updateVideoGravity()
+            self?.setNeedsLayout()
+        }
+    }
+
+    /// The controller goes on with another player (`PlayerStreamLoan`).
+    func playerChanged() {
+        guard let player = controller?.player else { return }
+        videoView.playerLayer.player = player
+        observeVideoSize(of: player)
     }
 
     /// After background play (the layer is detached to keep audio running).
@@ -126,11 +138,9 @@ final class PlayerSurfaceView: UIView {
         super.layoutSubviews()
         updateVideoGravity()
         // Bounds and centre, not frame: the zoom transform stays applied while the size changes.
-        if videoView.superview === self {
-            let video = videoFrame()
-            videoView.bounds = CGRect(origin: .zero, size: video.size)
-            videoView.center = CGPoint(x: video.midX, y: video.midY)
-        }
+        let video = videoFrame()
+        videoView.bounds = CGRect(origin: .zero, size: video.size)
+        videoView.center = CGPoint(x: video.midX, y: video.midY)
         // Bounds and centre here too: a swipe moves these with a transform.
         for moving in [leavingCover, swipeCover] {
             moving.bounds = CGRect(origin: .zero, size: bounds.size)
@@ -151,26 +161,27 @@ final class PlayerSurfaceView: UIView {
         layoutRestoreButton()
     }
 
-    // MARK: Lending the picture
+    // MARK: The picture moving away
 
-    /// The picture, to move over everything (`VideoMorph`), and back here when that has gone.
-    func lendPicture(backdropAlpha: CGFloat) -> VideoMorph? {
+    /// Over the picture, to move it over everything else (`VideoMorph`).
+    func makeMorph(backdropAlpha: CGFloat) -> VideoMorph? {
         resetZoom(animated: false)
-        let shown = videoView.playerLayer.videoRect
-        let morph = VideoMorph(moving: videoView, picture: shown.isEmpty ? videoView.bounds : shown, backdropAlpha: backdropAlpha) { [weak self] in
-            self?.takeBackPicture()
-        }
-        // On its way it has no black around it.
-        if morph != nil { videoView.backgroundColor = .clear }
-        return morph
+        return VideoMorph(over: videoView, layer: videoView.playerLayer, backdropAlpha: backdropAlpha)
     }
 
-    private func takeBackPicture() {
-        videoView.backgroundColor = .black
-        videoView.transform = .identity
-        insertSubview(videoView, at: 0)
-        setNeedsLayout()
-        layoutIfNeeded()
+    /// `done` once the picture shows here, or after a moment if that does not come.
+    func whenPictureShows(tries: Int = 15, _ done: @escaping () -> Void) {
+        guard tries > 0, window == nil || !videoView.playerLayer.isReadyForDisplay else {
+            done()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+            guard let self else {
+                done()
+                return
+            }
+            self.whenPictureShows(tries: tries - 1, done)
+        }
     }
 
     // MARK: Swiping to another video

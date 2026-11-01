@@ -76,6 +76,8 @@ struct VideoCard: Identifiable, Hashable {
 final class VideoGoingOn: Hashable {
     let aid: Int64
     let cid: Int64
+    /// The video's shape, for laying the page out before it has the detail.
+    let isVertical: Bool
     /// Where the page has got to with it.
     var time: Double?
     /// The page shows the video's picture.
@@ -83,10 +85,15 @@ final class VideoGoingOn: Hashable {
     /// The page is going back to that screen, with the video at this time: where the picture is there, nil if it cannot
     /// have it back.
     var onGoingBack: ((Double) -> CGRect?)?
+    /// Calls back once that screen shows the picture again.
+    var whenBack: ((@escaping () -> Void) -> Void)?
+    /// The video as it plays on that screen, for the page to go on with: a `PlayerStreamLoan`, which only the app knows.
+    var loan: AnyObject?
 
-    init(aid: Int64, cid: Int64) {
+    init(aid: Int64, cid: Int64, isVertical: Bool) {
         self.aid = aid
         self.cid = cid
+        self.isVertical = isVertical
     }
 
     func isVideo(aid: Int64, cid: Int64) -> Bool { aid == self.aid && cid == self.cid }

@@ -1,8 +1,8 @@
 import Foundation
 
-/// A video's stream, ready before a swipe goes to it: the playurl answer, then a session with its first seconds in the
-/// proxy's cache. Or the video a swipe just left, which has all that already. `PlayerController.load` takes it over;
-/// until then nothing plays and little is downloaded.
+/// A video's stream, ready before a swipe goes to it or a page opening it has the detail: the playurl answer, then a
+/// session with its first seconds in the proxy's cache. Or the video a swipe just left, which has all that already.
+/// `PlayerController.load` takes it over; until then nothing plays and little is downloaded.
 @MainActor
 final class PlayerStreamPreload {
     /// How far ahead a video that may never play downloads.
@@ -11,6 +11,7 @@ final class PlayerStreamPreload {
     private static let maxAge: TimeInterval = 20 * 60
 
     let aid: Int64
+    let bvid: String
     let cid: Int64
     /// The video a swipe left, as opposed to the one the next swipe goes to.
     let wasLeft: Bool
@@ -26,6 +27,7 @@ final class PlayerStreamPreload {
     init(item: PlaybackItem, constraints: PlayerStreamConstraints, quality: Int, accelerate: Bool, allowHDR: Bool,
          start: @escaping (PlayInfo) -> Double) {
         aid = item.aid
+        bvid = item.bvid
         cid = item.cid
         wasLeft = false
         task = Task { [weak self] in
@@ -38,6 +40,7 @@ final class PlayerStreamPreload {
     init(left item: PlaybackItem, info: PlayInfo, fetchedAt: Date, session: PlaybackSession,
          choice: PlayerStreamChoice, accelerated: Bool) {
         aid = item.aid
+        bvid = item.bvid
         cid = item.cid
         wasLeft = true
         self.info = info
@@ -89,7 +92,8 @@ final class PlayerStreamPreload {
     }
 
     func matches(_ item: PlaybackItem) -> Bool {
-        guard item.epId == 0, item.aid == aid, item.cid == cid, !closed else { return false }
+        guard item.epId == 0, item.cid == cid, !closed,
+              (aid != 0 && item.aid == aid) || (!bvid.isEmpty && item.bvid == bvid) else { return false }
         return fetchedAt.map { Date().timeIntervalSince($0) < Self.maxAge } ?? true
     }
 

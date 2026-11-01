@@ -226,9 +226,15 @@ struct PlayerChromeView: View {
         if let text = controller.subtitleText {
             // 「字幕设置」 style (PlayerSurfaceView.swift).
             PlayerSubtitleView(text: text, style: settings.player, fullscreen: fullscreen,
-                               minBottom: verticalScreen ? VerticalVideoMetrics.infoHeight
+                               minBottom: verticalScreen ? verticalSubtitleBottom
                                    : showsControls && overlay.controlsVisible ? bottomBarHeight + 6 : 0)
         }
+    }
+
+    /// Clear of the uploader and title; a landscape video's stay on its picture, which ends well above those.
+    private var verticalSubtitleBottom: CGFloat {
+        guard let picture = controller.surface.wholePictureRect else { return VerticalVideoMetrics.infoHeight }
+        return max(pictureHeight - picture.maxY + 6, VerticalVideoMetrics.infoHeight)
     }
 
     @ViewBuilder

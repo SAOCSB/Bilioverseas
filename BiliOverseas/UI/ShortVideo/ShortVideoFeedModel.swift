@@ -44,6 +44,9 @@ final class ShortVideoFeedModel: ObservableObject {
     /// 全屏 of a landscape video (`ShortVideoLandscapeView`).
     private let landscapePresenter = PlayerFullscreenPresenter()
     private var isLandscape = false
+    private var landscapePlayback: ShortVideoPlayback?
+    /// What the page last said about itself, which while 全屏 covers it does not count until that has gone.
+    private var pageVisible = false
 
     init(start: ShortVideoItem?) {
         self.start = start
@@ -200,22 +203,31 @@ final class ShortVideoFeedModel: ObservableObject {
         guard !isLandscape, let item = showing else { return }
         let playback = playback(for: item)
         isLandscape = true
+        landscapePlayback = playback
         playback.danmakuInLandscape = true
         let screen = ShortVideoLandscapeView(playback: playback, title: item.title,
                                              onTogglePlay: { [weak self] in self?.togglePlay(item) },
-                                             onBack: { [weak self] in self?.closeLandscape(playback) })
+                                             onBack: { [weak self] in self?.closeLandscape() })
         if !landscapePresenter.present(screen, mask: .landscape, orientation: .landscapeRight, onShown: {}) {
             isLandscape = false
+            landscapePlayback = nil
             playback.danmakuInLandscape = false
         }
     }
 
-    private func closeLandscape(_ playback: ShortVideoPlayback) {
-        guard isLandscape else { return }
+    /// Also when a page was pushed under it (a link from outside): that page shows once this has gone.
+    func closeLandscape() {
+        guard isLandscape, let playback = landscapePlayback else { return }
+        landscapePlayback = nil
         landscapePresenter.dismiss(releasingSurface: {}) { [weak self] in
             self?.isLandscape = false
             playback.danmakuInLandscape = false
             playback.danmakuHost?.claim(playback.danmaku)
+            // A page back on top has said so by now, on the way here.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.pageVisible else { return }
+                self.setVisible(false)
+            }
         }
     }
 
@@ -238,8 +250,13 @@ final class ShortVideoFeedModel: ObservableObject {
     }
 
     func setVisible(_ isVisible: Bool) {
+        pageVisible = isVisible
         // The fullscreen presentation covers this page, and the video goes on there.
         if !isVisible, isLandscape { return }
+        // 「只看竖屏」 can be changed from the video's page too.
+        if isVisible, portraitOnly != AppSettings.shared.general.swipesOnlyPortrait {
+            setPortraitOnly(AppSettings.shared.general.swipesOnlyPortrait)
+        }
         visible = isVisible
         PlayerNowPlayingCenter.shared.shortVideosVisible = isVisible
         if !isVisible { reportCurrentHistory() }

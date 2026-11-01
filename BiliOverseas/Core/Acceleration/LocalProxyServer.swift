@@ -125,15 +125,6 @@ final class LocalProxyServer: LocalProxyServing, @unchecked Sendable {
         }
     }
 
-    /// Something connecting here was refused: rebuilds the listener on the same port, whatever it reports.
-    func restartListening() {
-        lock.lock()
-        let starting = phase == .starting
-        let port = preferredPort
-        lock.unlock()
-        if !starting { startListener(port: port, allowFallback: true) }
-    }
-
     private func connectToSelf(port: UInt16, done: @escaping (Bool) -> Void) {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             done(false)

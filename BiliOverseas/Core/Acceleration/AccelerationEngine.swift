@@ -195,18 +195,19 @@ final class AccelerationEngine: LocalProxyRequestHandler {
         server.ensureListening()
     }
 
-    /// AVPlayer could not reach the local proxy.
-    func restartListening() {
-        server.restartListening()
+    /// AVPlayer was refused by the local proxy: the check of coming back to the foreground, which leaves a listener
+    /// that answers where it is.
+    func proxyRefusedConnection() {
+        server.ensureListening()
     }
 
-    /// AVPlayer talks only to the local proxy, whose own trouble with a CDN reaches it as HTTP status: a URL error on
-    /// a proxied item is about the connection to the proxy, not about the stream.
+    /// AVPlayer was refused by the local proxy. Only that: its answers about a CDN's or a closed session's trouble are
+    /// HTTP statuses, which AVPlayer reports as other URL errors.
     static func isLoopbackError(_ error: Error?) -> Bool {
         guard let error else { return false }
+        func refused(_ e: NSError) -> Bool { e.domain == NSURLErrorDomain && e.code == NSURLErrorCannotConnectToHost }
         let ns = error as NSError
-        if ns.domain == NSURLErrorDomain { return true }
-        return (ns.userInfo[NSUnderlyingErrorKey] as? NSError)?.domain == NSURLErrorDomain
+        return refused(ns) || (ns.userInfo[NSUnderlyingErrorKey] as? NSError).map(refused) == true
     }
 
     func applicationDidEnterBackground() {

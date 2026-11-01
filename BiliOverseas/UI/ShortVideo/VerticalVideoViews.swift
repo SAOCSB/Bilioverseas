@@ -345,8 +345,10 @@ struct VerticalVideoBottomBar: View {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     onSettings()
                 }
+                .accessibilityElement(children: .ignore)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel(Text(danmakuOn ? "关闭弹幕" : "开启弹幕"))
+                .accessibilityAction(.default, onToggle)
                 .accessibilityAction(named: Text("弹幕设置"), onSettings)
         }
         .background(.white.opacity(0.14), in: Capsule())

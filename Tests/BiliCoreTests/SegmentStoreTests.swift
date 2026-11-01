@@ -243,6 +243,36 @@ final class SegmentStoreTests: XCTestCase {
         store.close()
     }
 
+    func testMediaAvailableCountsWholeSegmentsThenWhatHasArrived() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [4000, 4000, 4000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        downloader.plainStallAfterBytes = 48 * 1024
+        let store = try makeStore(file, downloader: downloader, accelerate: false, forward: 1)
+        XCTAssertEqual(store.mediaSecondsAvailable(from: 0), 0, "nothing asked for yet")
+        let seg = file.segments[0]
+        let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+        let task = Task { try await engineDrain(reader) }
+        let arrived = await engineEventually { store.mediaSecondsAvailable(from: 0) > 1.5 }
+        XCTAssertTrue(arrived, "about half of a 4 s segment")
+        XCTAssertLessThan(store.mediaSecondsAvailable(from: 0), 2.5)
+        XCTAssertLessThan(store.mediaSecondsAvailable(from: 3), 0.01, "that half lies behind 3 s")
+        store.close()
+        task.cancel()
+    }
+
+    func testMediaAvailableGoesOnThroughCachedSegments() async throws {
+        let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [4000, 4000, 4000])
+        let downloader = EngineFakeDownloader(files: [.video: file.data])
+        let store = try makeStore(file, downloader: downloader, accelerate: false, forward: 1)
+        for seg in file.segments.prefix(2) {
+            let reader = try XCTUnwrap(store.reader(kind: .video, range: seg))
+            _ = try await engineDrain(reader)
+        }
+        let cached = await engineEventually { store.mediaSecondsAvailable(from: 1) >= 6.99 }
+        XCTAssertTrue(cached, "3 s of the first segment, all of the second")
+        store.close()
+    }
+
     func testASeekWhilePausedIsWaitedFor() async throws {
         let file = EngineSyntheticMP4.make(segmentSizes: [100_000, 80_000, 70_000], durations: [4000, 4000, 4000])
         let downloader = EngineFakeDownloader(files: [.video: file.data])

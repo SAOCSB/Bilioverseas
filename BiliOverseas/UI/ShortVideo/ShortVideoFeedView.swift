@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 /// 短视频: the official app's vertical "story" mode (`VerticalVideoViews.swift`). Videos with danmaku between the
@@ -54,6 +55,7 @@ struct ShortVideoFeedView: View {
         // A push from inside the comments (a commenter's space, login…) lands under the sheet: close it.
         .onChange(of: router.path.count) { _ in
             if commentsFor != nil { commentsFor = nil }
+            model.closeLandscape()
         }
         .sheet(item: $commentsFor) { item in
             NavigationStack {
@@ -180,6 +182,12 @@ struct ShortVideoFeedView: View {
             Button { showsDanmakuSettings = true } label: {
                 Label("弹幕设置", systemImage: "slider.horizontal.3")
             }
+            // The bar has no room for it on a landscape video.
+            if !item.isPortrait {
+                Button { actions.fullVideo(item) } label: {
+                    Label("详情页", systemImage: "arrow.down.right.and.arrow.up.left")
+                }
+            }
             Button { Task { await model.social(for: item).addToWatchLater() } } label: {
                 Label("稍后再看", systemImage: "clock")
             }
@@ -297,8 +305,10 @@ struct ShortVideoPageView: View {
                     .allowsHitTesting(false)
             }
             // Below the top bar; the controls below it stay readable over the danmaku.
+            let lanes = danmakuLanes(in: geo.size, pictureHeight: pictureHeight)
             ShortVideoDanmakuLayer(playback: playback)
-                .padding(.top, VerticalVideoMetrics.topBarHeight)
+                .frame(width: lanes.width, height: lanes.height)
+                .position(x: lanes.midX, y: lanes.midY)
                 .allowsHitTesting(false)
             statusOverlay
             ForEach(bursts) { burst in
@@ -328,7 +338,15 @@ struct ShortVideoPageView: View {
     }
 
     private func fills(in size: CGSize) -> Bool {
-        VerticalVideoMetrics.fills(video: CGSize(width: item.width, height: item.height), area: size)
+        item.isPortrait && VerticalVideoMetrics.fills(video: CGSize(width: item.width, height: item.height), area: size)
+    }
+
+    /// A landscape video's are over its picture, not over the black around it.
+    private func danmakuLanes(in size: CGSize, pictureHeight: CGFloat) -> CGRect {
+        let page = CGRect(origin: .zero, size: size).inset(by: UIEdgeInsets(top: VerticalVideoMetrics.topBarHeight, left: 0, bottom: 0, right: 0))
+        guard !item.isPortrait else { return page }
+        let area = CGRect(x: 0, y: 0, width: size.width, height: pictureHeight)
+        return page.intersection(AVMakeRect(aspectRatio: CGSize(width: item.width, height: item.height), insideRect: area))
     }
 
     @ViewBuilder private var statusOverlay: some View {

@@ -315,8 +315,6 @@ final class EngineFakeServer: LocalProxyServing {
     var onPortChange: ((UInt16) -> Void)?
     private(set) var startCount = 0
     private(set) var ensureCount = 0
-    private(set) var restartCount = 0
-    func restartListening() { restartCount += 1 }
     func start() { startCount += 1 }
     func waitUntilReady(timeout: TimeInterval) async throws -> UInt16 { port }
     func ensureListening() { ensureCount += 1 }

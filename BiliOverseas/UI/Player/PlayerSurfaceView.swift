@@ -103,6 +103,7 @@ final class PlayerSurfaceView: UIView {
             controller.player.publisher(for: \.currentItem?.presentationSize).receive(on: RunLoop.main).sink { [weak self] size in
                 self?.videoSize = size ?? .zero
                 self?.updateVideoGravity()
+                self?.setNeedsLayout()
             },
         ]
     }
@@ -122,11 +123,12 @@ final class PlayerSurfaceView: UIView {
         videoView.center = CGPoint(x: video.midX, y: video.midY)
         // Bounds and centre here too: a swipe moves these with a transform.
         for moving in [leavingCover, swipeCover] {
-            moving.isOnVerticalScreen = onVerticalScreen
             moving.bounds = CGRect(origin: .zero, size: bounds.size)
             moving.center = CGPoint(x: bounds.midX, y: bounds.midY)
         }
-        let lanes = bounds.inset(by: UIEdgeInsets(top: danmakuTopInset, left: 0, bottom: 0, right: 0))
+        var lanes = bounds.inset(by: UIEdgeInsets(top: danmakuTopInset, left: 0, bottom: 0, right: 0))
+        // Over the picture, not over the black around it.
+        if let picture = wholePictureRect { lanes = lanes.intersection(picture) }
         danmaku.bounds = CGRect(origin: .zero, size: lanes.size)
         danmaku.center = CGPoint(x: lanes.midX, y: lanes.midY)
         gestureView.frame = bounds
@@ -139,15 +141,21 @@ final class PlayerSurfaceView: UIView {
         swipeGeneration += 1
         dismissDanmakuBubble()
         swipeCover.showsSpinner = false
+        leavingCover.showsWhole = showsWholeOnVerticalScreen
         leavingCover.setCover(cover ?? "")
         leavingCover.isHidden = cover == nil
     }
 
-    /// `targetCover` nil: nothing to go to (yet), so the picture only gives a little.
-    func moveVideoSwipe(offset: CGFloat, targetCover: String?) {
-        swipeCover.isHidden = targetCover == nil
-        if let targetCover { swipeCover.setCover(targetCover) }
-        setVideoSwipe(offset: targetCover == nil ? offset * 0.3 : offset, coverFromBelow: offset < 0)
+    /// `target` nil: nothing to go to (yet), so the picture only gives a little.
+    func moveVideoSwipe(offset: CGFloat, target: PlayerVideoSwipeTarget?) {
+        swipeCover.isHidden = target == nil
+        if let target { setSwipeCover(target) }
+        setVideoSwipe(offset: target == nil ? offset * 0.3 : offset, coverFromBelow: offset < 0)
+    }
+
+    private func setSwipeCover(_ target: PlayerVideoSwipeTarget) {
+        swipeCover.showsWhole = onVerticalScreen && target.isLandscape
+        swipeCover.setCover(target.cover)
     }
 
     private func setVideoSwipe(offset: CGFloat, coverFromBelow: Bool) {
@@ -161,8 +169,8 @@ final class PlayerSurfaceView: UIView {
     }
 
     /// The picture leaves and the cover takes its place; `completion` then switches the video.
-    func commitVideoSwipe(toNext: Bool, targetCover: String, completion: @escaping () -> Void) {
-        swipeCover.setCover(targetCover)
+    func commitVideoSwipe(toNext: Bool, target: PlayerVideoSwipeTarget, completion: @escaping () -> Void) {
+        setSwipeCover(target)
         // The target may have arrived after the finger's last move: then the cover is not in place yet.
         if swipeCover.isHidden {
             swipeCover.isHidden = false
@@ -400,13 +408,23 @@ final class PlayerSurfaceView: UIView {
     /// says for landscape fullscreen.
     private var showsWholeOnVerticalScreen: Bool { onVerticalScreen && controller?.isVerticalVideo == false }
 
+    /// Where that picture is, once its shape is known.
+    var wholePictureRect: CGRect? {
+        guard showsWholeOnVerticalScreen, videoSize.width > 0, videoSize.height > 0 else { return nil }
+        return AVMakeRect(aspectRatio: videoSize, insideRect: VerticalVideoMetrics.wholePictureFrame(in: bounds))
+    }
+
     /// 自适应 on the vertical-video screen goes by the video's shape (`VerticalVideoMetrics.fills`).
     private func updateVideoGravity() {
         let gravity: AVLayerVideoGravity
-        switch showsWholeOnVerticalScreen ? .fit : aspectMode {
-        case .fit: gravity = onVerticalScreen && VerticalVideoMetrics.fills(video: videoSize, area: bounds.size) ? .resizeAspectFill : .resizeAspect
-        case .fill: gravity = .resizeAspectFill
-        case .stretch, .ratio16x9, .ratio4x3: gravity = .resize
+        if showsWholeOnVerticalScreen {
+            gravity = .resizeAspect
+        } else {
+            switch aspectMode {
+            case .fit: gravity = onVerticalScreen && VerticalVideoMetrics.fills(video: videoSize, area: bounds.size) ? .resizeAspectFill : .resizeAspect
+            case .fill: gravity = .resizeAspectFill
+            case .stretch, .ratio16x9, .ratio4x3: gravity = .resize
+            }
         }
         guard videoView.playerLayer.videoGravity != gravity else { return }
         CATransaction.begin()
@@ -445,9 +463,9 @@ final class PlayerSwipeCoverView: UIView {
     var showsSpinner = false {
         didSet { showsSpinner ? spinner.startAnimating() : spinner.stopAnimating() }
     }
-    /// A landscape cover shows there as a landscape video does (`PlayerSurfaceView.videoFrame`).
-    var isOnVerticalScreen = false {
-        didSet { if isOnVerticalScreen != oldValue { setNeedsLayout() } }
+    /// On the vertical-video screen a landscape video's cover shows as that video will (`PlayerSurfaceView.videoFrame`).
+    var showsWhole = false {
+        didSet { if showsWhole != oldValue { setNeedsLayout() } }
     }
 
     override init(frame: CGRect) {
@@ -475,9 +493,8 @@ final class PlayerSwipeCoverView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let whole = isOnVerticalScreen && imageView.image.map { $0.size.width > $0.size.height } == true
-        imageView.contentMode = whole ? .scaleAspectFit : .scaleAspectFill
-        imageView.frame = whole ? VerticalVideoMetrics.wholePictureFrame(in: bounds) : bounds
+        imageView.contentMode = showsWhole ? .scaleAspectFit : .scaleAspectFill
+        imageView.frame = showsWhole ? VerticalVideoMetrics.wholePictureFrame(in: bounds) : bounds
     }
 
     func setCover(_ cover: String) {
@@ -485,13 +502,11 @@ final class PlayerSwipeCoverView: UIView {
         guard next != url else { return }
         url = next
         imageView.image = ImagePipeline.shared.cached(next)
-        setNeedsLayout()
         guard imageView.image == nil, !next.isEmpty else { return }
         Task { @MainActor [weak self] in
             let image = await ImagePipeline.shared.image(for: next)
             guard let self, self.url == next else { return }
             self.imageView.image = image
-            self.setNeedsLayout()
         }
     }
 }

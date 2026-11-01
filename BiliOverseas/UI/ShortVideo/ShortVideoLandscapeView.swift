@@ -23,14 +23,19 @@ struct ShortVideoLandscapeView: View {
             .allowsHitTesting(false)
             Color.clear
                 .contentShape(Rectangle())
+                .ignoresSafeArea()
                 .onTapGesture(count: 2, perform: onTogglePlay)
                 .onTapGesture {
                     controlsShown.toggle()
                     hideControlsLater()
                 }
-            if let scrubbing {
+            if case .failed(let message) = playback.phase {
+                PlayerErrorView(message: message) { playback.retry() }
+            } else if let scrubbing {
                 PlayerPill { Text("\(PlayerFormat.time(scrubbing))/\(PlayerFormat.time(playback.duration))").monospacedDigit() }
                     .allowsHitTesting(false)
+            } else if playback.isBuffering || playback.phase == .loading {
+                PlayerQuietSpinner()
             } else if playback.isPaused {
                 VerticalVideoPausedHint(time: "\(PlayerFormat.time(playback.position)) / \(PlayerFormat.time(playback.duration))")
             }

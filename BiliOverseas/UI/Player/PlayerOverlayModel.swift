@@ -11,7 +11,7 @@ enum PlayerPanel: String, Identifiable {
     var title: String {
         switch self {
         case .speed: return "倍速"
-        case .quality: return "画质"
+        case .quality: return "清晰度"
         case .audio: return "音质"
         case .codec: return "解码格式"
         case .subtitle: return "字幕"

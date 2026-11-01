@@ -390,23 +390,6 @@ final class LocalProxyServerTests: XCTestCase {
         try await EngineRawHTTPClient(port: rebuilt).connect()
     }
 
-    func testRestartListeningGivesAWorkingListener() async throws {
-        final class Handler: LocalProxyRequestHandler {
-            func handle(_ request: ProxyHTTPRequest) async -> LocalProxyResponse { .empty(204) }
-        }
-        let handler = Handler()
-        let server = LocalProxyServer(handler: handler)
-        defer { server.stop() }
-        let port = try await server.waitUntilReady(timeout: 3)
-        server.debugLoseListenerSilently()
-        server.restartListening()
-        let rebuilt = try await server.waitUntilReady(timeout: 3)
-        // Same port once the old socket is free; items on another port are rebuilt through `onPortChange`.
-        XCTAssertGreaterThan(rebuilt, 0)
-        XCTAssertGreaterThan(port, 0)
-        try await EngineRawHTTPClient(port: rebuilt).connect()
-    }
-
     func testLoopbackCheck() {
         XCTAssertTrue(LocalProxyServer.isLoopback(.ipv4(.loopback)))
         XCTAssertTrue(LocalProxyServer.isLoopback(.ipv4(IPv4Address("127.0.0.2")!)))

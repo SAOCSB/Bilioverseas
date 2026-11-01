@@ -271,13 +271,15 @@ struct PlayerMenuBuilder {
                                               controller.onNext?()
                                           }))
             }
-            rows.append(PlayerMenuRow(id: "more.portraitOnly", title: "只看竖屏",
-                                      kind: .toggle(Binding(get: { settings.general.swipesOnlyPortrait },
-                                                            set: { settings.general.swipesOnlyPortrait = $0 }))))
+            if controller.goesOnBySwipes {
+                rows.append(PlayerMenuRow(id: "more.portraitOnly", title: "只看竖屏",
+                                          kind: .toggle(Binding(get: { settings.general.swipesOnlyPortrait },
+                                                                set: { settings.general.swipesOnlyPortrait = $0 }))))
+            }
         }
         let qualityTitle = controller.qualityEntries.first { $0.qn == controller.currentQuality }?.title
         if !controller.qualityEntries.isEmpty {
-            rows.append(PlayerMenuRow(id: "more.quality", title: "画质", detail: qualityTitle, chevron: true,
+            rows.append(PlayerMenuRow(id: "more.quality", title: "清晰度", detail: qualityTitle, chevron: true,
                                       kind: .action { navigate(.quality) }))
         }
         if controller.audioEntries.count > 1 {
@@ -312,8 +314,11 @@ struct PlayerMenuBuilder {
             rows.append(PlayerMenuRow(id: "more.chapters", title: "分段信息", detail: "\(controller.chapters.count)段",
                                       chevron: true, kind: .action { navigate(.chapters) }))
         }
-        rows.append(PlayerMenuRow(id: "more.aspect", title: "画面比例", detail: controller.aspectMode.title, chevron: true,
-                                  kind: .action { navigate(.aspect) }))
+        // A landscape video on the vertical-video screen always shows whole.
+        if !controller.isOnVerticalScreen || controller.isVerticalVideo {
+            rows.append(PlayerMenuRow(id: "more.aspect", title: "画面比例", detail: controller.aspectMode.title, chevron: true,
+                                      kind: .action { navigate(.aspect) }))
+        }
         rows.append(PlayerMenuRow(id: "more.sleep", title: "定时关闭", detail: sleepSummary(), chevron: true,
                                   kind: .action { navigate(.sleepTimer) }))
         rows.append(PlayerMenuRow(id: "more.danmakuList", title: "弹幕列表", chevron: true,

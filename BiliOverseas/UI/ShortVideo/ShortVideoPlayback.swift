@@ -401,10 +401,10 @@ final class ShortVideoPlayback: ObservableObject {
 
     private func itemFailed(message: String?) {
         PlaybackTrace.log("feed item failed \(item.id) \(PlaybackTrace.describe(player.currentItem?.error))")
-        if session != nil, !loopbackRetried, AccelerationEngine.isLoopbackError(player.currentItem?.error) {
+        if let session, session.isEndpointValid, !loopbackRetried, AccelerationEngine.isLoopbackError(player.currentItem?.error) {
             // The proxy's listener is gone (the app was suspended): the stream is fine.
             loopbackRetried = true
-            AccelerationEngine.shared.restartListening()
+            AccelerationEngine.shared.proxyRefusedConnection()
             if resumeAt == nil, position > 1 { resumeAt = position }
             teardown()
             prepare()
@@ -440,6 +440,7 @@ final class ShortVideoPlayback: ObservableObject {
         danmaku.playbackStateDidChange()
         if status == .playing {
             startedPlaying = true
+            loopbackRetried = false
             if let asked = playAskedAt {
                 playAskedAt = nil
                 let waited = Int((ProcessInfo.processInfo.systemUptime - asked) * 1000)

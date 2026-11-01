@@ -94,6 +94,12 @@ struct ShortVideoPager<Item: Identifiable, Page: View>: UIViewRepresentable {
                 .background(Color.black)
         }
 
+        /// A cell kept or prefetched ahead was configured when it was made, and `updateUIView` only reaches visible ones.
+        func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
+                            forItemAt indexPath: IndexPath) {
+            configure(cell, at: indexPath)
+        }
+
         func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
                             sizeForItemAt indexPath: IndexPath) -> CGSize {
             collectionView.bounds.size

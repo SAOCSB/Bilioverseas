@@ -24,6 +24,13 @@ enum PlayerVideoSwipe {
     case next, previous
 }
 
+/// The video a swipe would go to.
+struct PlayerVideoSwipeTarget {
+    var cover: String
+    /// Its cover shows whole on the vertical-video screen, as the video will.
+    var isLandscape = false
+}
+
 struct PlaybackItem: Equatable {
     var aid: Int64
     var bvid: String
@@ -269,9 +276,9 @@ final class PlayerController: ObservableObject {
     }
     @Published private(set) var hasNext = false
 
-    /// Set by a page that can move on from a vertical video (not offline files): the cover of the video a swipe would
-    /// go to, nil when there is none (yet).
-    var videoSwipeCover: ((PlayerVideoSwipe) -> String?)?
+    /// Set by a page that can move on from a vertical video (not offline files): the video a swipe would go to, nil when
+    /// there is none (yet).
+    var videoSwipeTarget: ((PlayerVideoSwipe) -> PlayerVideoSwipeTarget?)?
     /// The page switches to that video in place. It ends with `load`, or with `videoSwipeFailed` when it cannot.
     var onVideoSwipe: ((PlayerVideoSwipe) -> Void)?
     /// A swipe is under way: the picture is moving, or the video it goes to is on its way. What is drawn with the
@@ -289,13 +296,15 @@ final class PlayerController: ObservableObject {
     private var streamPreloadWanted: PlaybackItem?
     /// The preload `load` took over, until the item is installed.
     private var takenPreload: PlayerStreamPreload?
+    /// Seconds of a video at the proxy that are enough for it to start (`startWithoutWaiting`).
+    private static let enoughToStart = 2.0
     /// Buffer this video has before the next one starts downloading next to it.
     private static let bufferBeforePreload = 4.0
     /// Since when the viewer has been waiting for this item: a swipe's lift, else `load`.
     private(set) var waitBegan = ProcessInfo.processInfo.systemUptime
     private var tracedPlaying = false
     private var lastItemError: Error?
-    /// This video already restarted the proxy once (`handleFailure`).
+    /// This item came from restarting the proxy (`handleFailure`), and has not started yet: no second time then.
     private var loopbackRetried = false
 
     /// Optional: when set, the fullscreen bar shows 「上一集」 and the lock screen offers "previous track".
@@ -587,6 +596,11 @@ final class PlayerController: ObservableObject {
         // The other shape takes another place on the vertical-video screen.
         surface.setNeedsLayout()
         if storyTurned, newItem.isVertical { turnBackToStory() }
+        // The phone is held sideways already: no turn of it is coming for this one (the end of a vertical video in a
+        // run of videos, or a turn during the swipe).
+        if isOnVerticalScreen, !newItem.isVertical, UIDevice.current.orientation.isLandscape {
+            applyDeviceOrientation(UIDevice.current.orientation)
+        }
         duration = max(0, newItem.duration)
         currentTime = 0
         lastKnownPosition = 0
@@ -709,7 +723,7 @@ final class PlayerController: ObservableObject {
         overlay.unlock()
         fullscreenByRotation = false
         isFullscreen = false
-        fullscreenIsStory = false
+        // `fullscreenIsStory` stays for the stage still fading out, and is set anew on entering.
         storyTurned = false
         storyCleared = false
         overlay.fullscreenChanged()
@@ -741,6 +755,7 @@ final class PlayerController: ObservableObject {
     /// 全屏 on a landscape video on that screen, or the phone turned with one on it.
     func turnStoryLandscape(byRotation: Bool = false, deviceOrientation: UIDeviceOrientation? = nil) {
         guard isOnVerticalScreen, !isVerticalVideo else { return }
+        autoExitTask?.cancel()
         // Device landscapeRight (home button left) = interface landscapeLeft.
         let device = deviceOrientation ?? UIDevice.current.orientation
         fullscreenByRotation = byRotation
@@ -750,6 +765,7 @@ final class PlayerController: ObservableObject {
 
     func turnBackToStory() {
         guard storyTurned else { return }
+        autoExitTask?.cancel()
         fullscreenByRotation = false
         storyTurned = false
         turnStoryScreen(to: .portrait, orientation: .portrait)
@@ -804,7 +820,7 @@ final class PlayerController: ObservableObject {
     /// a landscape one reached that way, unless the phone is turned for it. Not for bangumi episodes, and not while the
     /// video plays in Picture in Picture.
     var canSwipeVideos: Bool {
-        guard videoSwipeCover != nil, item?.epId == 0, !isPiPActive,
+        guard videoSwipeTarget != nil, item?.epId == 0, !isPiPActive,
               AppSettings.shared.general.portraitOpensShortVideo else { return false }
         if storyTurned { return false }
         return isVerticalVideo || (isFullscreen ? fullscreenIsStory : itemCameFromSwipe)
@@ -824,7 +840,7 @@ final class PlayerController: ObservableObject {
             // 听视频 has shown a frame of an earlier item, and has no picture now.
             surface.beginVideoSwipe(leavingCover: hasFirstFrame && audioOnlyStream == nil ? nil : item?.cover)
         }
-        surface.moveVideoSwipe(offset: offset, targetCover: videoSwipeCover?(offset < 0 ? .next : .previous))
+        surface.moveVideoSwipe(offset: offset, target: videoSwipeTarget?(offset < 0 ? .next : .previous))
     }
 
     /// The finger lifted (offset and velocity 0: the gesture was cancelled). Far or fast enough goes to that video,
@@ -835,7 +851,7 @@ final class PlayerController: ObservableObject {
         let fast = abs(velocity) > 600
         let flickedBack = fast && (velocity < 0) != (offset < 0)
         let far = !flickedBack && (fast || abs(offset) > max(surface.bounds.height, 1) * 0.2)
-        guard far, let cover = videoSwipeCover?(swipe) else {
+        guard far, let target = videoSwipeTarget?(swipe) else {
             if far { ToastCenter.shared.show(swipe == .next ? "下一个视频还在加载，稍后再滑" : "已经是第一个了") }
             surface.cancelVideoSwipe()
             endVideoSwipe()
@@ -847,7 +863,7 @@ final class PlayerController: ObservableObject {
         isSwitchingBySwipe = true
         playAfterFailedSwipe = wasPlaying
         waitBegan = ProcessInfo.processInfo.systemUptime
-        surface.commitVideoSwipe(toNext: swipe == .next, targetCover: cover) { [weak self] in
+        surface.commitVideoSwipe(toNext: swipe == .next, target: target) { [weak self] in
             guard let self, self.isSwitchingBySwipe else { return }
             self.onVideoSwipe?(swipe)
         }
@@ -904,7 +920,7 @@ final class PlayerController: ObservableObject {
 
     private func startWantedPreload(time: Double, bufferedAhead: Double) {
         // 听视频 stays on for the next video, which then uses none of this.
-        guard let wanted = streamPreloadWanted, startupDone, canSwipeVideos, !isCoveredByPage, !audioOnly else { return }
+        guard let wanted = streamPreloadWanted, startupDone, goesOnBySwipes, !isCoveredByPage, !audioOnly else { return }
         let rest = duration > 0 ? max(0, duration - time - 0.5) : .infinity
         guard bufferedAhead >= min(Self.bufferBeforePreload, rest) else { return }
         streamPreloadWanted = nil
@@ -912,12 +928,22 @@ final class PlayerController: ObservableObject {
         session?.markInUse()
         streamPreloads.filter { !$0.wasLeft }.forEach { $0.close() }
         streamPreloads.removeAll { !$0.wasLeft }
+        streamPreloads.append(makeStreamPreload(of: wanted))
+    }
+
+    /// A page is opening `item`, and its detail takes a round trip of its own: the stream starts next to it.
+    func prepareStreamAhead(of item: PlaybackItem) {
+        guard self.item == nil, streamPreloads.isEmpty, AppSettings.shared.player.autoPlay else { return }
+        streamPreloads = [makeStreamPreload(of: item)]
+    }
+
+    private func makeStreamPreload(of item: PlaybackItem) -> PlayerStreamPreload {
         let settings = AppSettings.shared
-        streamPreloads.append(PlayerStreamPreload(
-            item: wanted, constraints: startingConstraints(), quality: settings.player.preferredQuality,
-            accelerate: settings.acceleration.accelerates(pgc: false, vertical: wanted.isVertical),
+        return PlayerStreamPreload(
+            item: item, constraints: startingConstraints(), quality: settings.player.preferredQuality,
+            accelerate: settings.acceleration.accelerates(pgc: false, vertical: item.isVertical),
             allowHDR: settings.player.allowHDR && PlayerDeviceSupport.hdrEligible,
-            start: { [weak self] info in self?.resolveStartPosition(wanted, info) ?? 0 }))
+            start: { [weak self] info in self?.resolveStartPosition(item, info) ?? 0 })
     }
 
     /// `newItem` is about to load: its preload is taken, and the video a swipe leaves stays ready in place of the others.
@@ -1223,7 +1249,12 @@ final class PlayerController: ObservableObject {
         AppSettings.shared.player.preferredQuality = qn
         guard qn != currentQuality || isProgressive, !isProgressive || playInfo?.isDash == true else { return }
         beginSwitch(message: "正在切换至 \(entry.title)…", toast: "画质已变为：\(entry.title)")
-        // From the MP4 a fallback ended on, back to the streams: a failure keeps the MP4 playing (`installStreams`).
+        // From the MP4 a fallback ended on, back to the streams, with acceleration: a failure keeps the MP4 playing
+        // (`installStreams`).
+        if isProgressive {
+            forceDirect = false
+            resetRetake()
+        }
         forceNoProxy = false
         fallbackSteps.subtract([.direct, .noProxy])
         manualQuality = qn
@@ -1755,6 +1786,9 @@ final class PlayerController: ObservableObject {
         player.defaultRate = playerRate
         observeItem(newItem, generation: sgen)
         player.replaceCurrentItem(with: newItem)
+        // At rate 0 AVPlayer can hold `readyToPlay` back for seconds after the first frame; with the rate up it goes on
+        // about 0.1 s after that frame. A start seek comes first (`itemStatusChanged`).
+        if wantsToPlay, pendingStartTime == nil { player.play() }
         old?.close()
         if !initial { tracker?.replaceSegments(adSegments) }
     }
@@ -2000,6 +2034,7 @@ final class PlayerController: ObservableObject {
         guard itemReady, !startupDone, let target = item else { return }
         trace("ready")
         startupDone = true
+        loopbackRetried = false
         waitingSince = nil
         lastKnownPosition = displayTime()
         // A local file (离线缓存) reports no watch history.
@@ -2009,6 +2044,8 @@ final class PlayerController: ObservableObject {
         }
         if wantsToPlay {
             startPlayback()
+            // It may be going already (`installItem`), with no change left to report.
+            if player.timeControlStatus == .playing { timeControlChanged() }
         } else {
             status = .paused
         }
@@ -2054,6 +2091,7 @@ final class PlayerController: ObservableObject {
             switch tcs {
             case .playing:
                 waitingSince = nil
+                if stallReported, tracedPlaying { trace("resumed") }
                 stallReported = false
                 if !tracedPlaying {
                     tracedPlaying = true
@@ -2123,14 +2161,6 @@ final class PlayerController: ObservableObject {
             fail(message.map { "播放失败：\($0)" } ?? "播放失败")
             return
         }
-        if session != nil, !loopbackRetried, AccelerationEngine.isLoopbackError(lastItemError) {
-            // The proxy's listener is gone (the app was suspended): not the stream's fault, so no fallback step.
-            loopbackRetried = true
-            trace("proxy unreachable \(PlaybackTrace.describe(lastItemError)): restarting it")
-            AccelerationEngine.shared.restartListening()
-            rebuild(position: startupDone ? lastKnownPosition : nil, reason: .endpoint)
-            return
-        }
         if let session, !session.isEndpointValid {
             // Not the stream's fault: no fallback step. An idle page whose session the engine closed waits for
             // play() (see rebuildForLostEndpoint) instead of showing a spinner forever.
@@ -2139,6 +2169,14 @@ final class PlayerController: ObservableObject {
             } else if !startupDone, status == .loading || status == .buffering {
                 status = .paused
             }
+            return
+        }
+        if session != nil, !loopbackRetried, AccelerationEngine.isLoopbackError(lastItemError) {
+            // The proxy's listener is gone (the app was suspended): not the stream's fault, so no fallback step.
+            loopbackRetried = true
+            trace("proxy unreachable \(PlaybackTrace.describe(lastItemError)): restarting it")
+            AccelerationEngine.shared.proxyRefusedConnection()
+            rebuild(position: startupDone ? lastKnownPosition : nil, reason: .endpoint)
             return
         }
         let position = lastKnownPosition
@@ -2255,7 +2293,9 @@ final class PlayerController: ObservableObject {
                 try? await Task.sleep(nanoseconds: 300_000_000)
             }
             if waited { try? await Task.sleep(nanoseconds: 1_200_000_000) }
-            guard let self, !Task.isCancelled, self.status == .ended, self.overlay.sheet == nil else { return }
+            // A swipe's video on its way: only `load` ends what this waits for.
+            guard let self, !Task.isCancelled, self.status == .ended, self.overlay.sheet == nil,
+                  !self.isSwitchingBySwipe else { return }
             if self.storyTurned {
                 self.turnBackToStory()
             } else {
@@ -2412,6 +2452,7 @@ final class PlayerController: ObservableObject {
         clipTick(time: t)
         updateSubtitle(at: t)
         runWatchdog()
+        startWithoutWaiting()
         startWantedPreload(time: t, bufferedAhead: ahead)
         if tickCount % 4 == 0 { secondTick(time: t, playing: playing) }
     }
@@ -2422,6 +2463,20 @@ final class PlayerController: ObservableObject {
         sleepTimerTick()
         onlineCountTick()
         syncPiPSettings()
+    }
+
+    /// AVPlayer can hold a video on its first frame for seconds, until a whole first segment is in and it expects never
+    /// to stall: up to 11 s on fresh videos above 3 Mbps, whose first segment was cold at a node that had the file's
+    /// start. A video's start does not wait for that: with this much of each track at the proxy it goes. Right at the
+    /// first frame it stalled on most of those videos; with 2 s, one in 15, and none waited over 6 s.
+    private func startWithoutWaiting() {
+        guard !tracedPlaying, hasFirstFrame, wantsToPlay, !isSeeking, !isSwitchingBySwipe, pendingStartTime == nil,
+              player.timeControlStatus != .playing, let session, session.isHLS else { return }
+        let time = max(0, displayTime())
+        let here = session.store.mediaSecondsAvailable(from: time)
+        guard here >= min(Self.enoughToStart, max(0.5, duration - time - 0.5)) else { return }
+        trace("start without waiting, \(Int(here * 10)) tenths at the proxy")
+        player.playImmediately(atRate: playerRate)
     }
 
     /// Accelerated playback waiting ≥ 60 s (monotonic) while it should play → one fallback to direct.

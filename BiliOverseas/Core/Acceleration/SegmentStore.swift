@@ -453,6 +453,31 @@ final class SegmentStore {
         for task in cancels { task.cancel() }
     }
 
+    /// Seconds of media here for AVPlayer from `time` on, in the track with the least: whole segments, then as much of
+    /// the next one as has arrived.
+    func mediaSecondsAvailable(from time: Double) -> Double {
+        lock.lock()
+        defer { lock.unlock() }
+        var least = Double.infinity
+        for track in tracks.values {
+            var seconds = 0.0
+            for (index, segment) in track.segments.enumerated() where segment.endTime > time {
+                let usable = segment.endTime - max(segment.startTime, time)
+                if track.cache[index] != nil {
+                    seconds += usable
+                    continue
+                }
+                if let entry = inflight[SegmentKey(kind: track.spec.kind, index: index)], entry.fetch.range.length > 0 {
+                    let arrived = Double(entry.fetch.receivedCount) / Double(entry.fetch.range.length)
+                    seconds += max(0, arrived * segment.duration - max(0, time - segment.startTime))
+                }
+                break
+            }
+            least = min(least, seconds)
+        }
+        return least.isFinite ? least : 0
+    }
+
     /// The player is about to seek. Outside AVPlayer's buffer → a new startup at `time` (startup range kind again,
     /// far prefetches cancelled); inside → only the playhead moves.
     func seek(to time: Double, outsideBuffer: Bool) {

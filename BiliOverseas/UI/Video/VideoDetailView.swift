@@ -499,6 +499,8 @@ final class VideoDetailModel: ObservableObject {
     private var followEdits = 0
     /// Archives played on this page (auto-next skips them in 相关推荐 so A → B → A loops do not happen).
     private var playedAids: Set<Int64> = []
+    /// The videos shown here that turned out landscape, for what a swipe back to them shows.
+    private var landscapeAids: Set<Int64> = []
     /// 播放全部 list this page was opened with (稍后再看 / 收藏夹); kept across in-place switches.
     private let playlist: VideoPlaylist?
     /// The videos swiped through on this page, the one showing included (`syncSwipeTrail`), each with where it was left.
@@ -685,6 +687,12 @@ final class VideoDetailModel: ObservableObject {
             isRegionLocked = false
         }
         let known = inPlace ? swipeContent(for: target)?.task : nil
+        PlaybackTrace.log("open \(target.bvid)")
+        if !inPlace, !target.isPGC, target.cid != 0 {
+            var item = PlaybackItem(aid: target.aid, bvid: target.bvid, cid: target.cid, title: target.title)
+            item.startTime = target.startTime
+            player?.prepareStreamAhead(of: item)
+        }
         loadTask = Task { [weak self] in
             do {
                 let content: Content
@@ -777,6 +785,11 @@ final class VideoDetailModel: ObservableObject {
             playedAids.insert(d.aid)
             let preferred = target.cid != 0 ? d.pages.first(where: { $0.cid == target.cid }) : nil
             currentCid = (preferred ?? d.pages.first)?.cid ?? d.cid
+            if isVerticalVideo {
+                landscapeAids.remove(d.aid)
+            } else {
+                landscapeAids.insert(d.aid)
+            }
             counts = Counts(view: d.stat.view, danmaku: d.stat.danmaku, like: d.stat.like, coin: d.stat.coin,
                             favorite: d.stat.favorite, share: d.stat.share, reply: d.stat.reply)
             followedStaff = Set(d.staff.filter { $0.user.isFollowed }.map(\.user.mid))
@@ -1007,9 +1020,13 @@ final class VideoDetailModel: ObservableObject {
             if case .end? = position, AppSettings.shared.player.playRepeat == .listCycle, let first = firstListStep() {
                 return .list(first)
             }
-            if swipeTrail.indices.contains(swipeIndex + 1) { return .trail(swipeTrail[swipeIndex + 1]) }
-            // A list, 合集 or auto-next may have played these since they were queued, and 「只看竖屏」 may have come on.
+            // 「只看竖屏」 may have come on since these were played or queued, and a list, 合集 or auto-next may have played
+            // the queued ones.
             let onlyPortrait = AppSettings.shared.general.swipesOnlyPortrait
+            if onlyPortrait, swipeIndex + 1 < swipeTrail.count {
+                swipeTrail = Array(swipeTrail[...swipeIndex]) + swipeTrail[(swipeIndex + 1)...].filter { !landscapeAids.contains($0.aid) }
+            }
+            if swipeTrail.indices.contains(swipeIndex + 1) { return .trail(swipeTrail[swipeIndex + 1]) }
             swipeQueue.removeAll { playedAids.contains($0.aid) || (onlyPortrait && !Self.knownPortrait($0)) }
             return swipeQueue.first.map { .queue($0) }
         case .previous:
@@ -1033,14 +1050,17 @@ final class VideoDetailModel: ObservableObject {
         swipeIndex = swipeTrail.count - 1
     }
 
-    /// The cover of the video a swipe would go to; nil when there is none (yet), which also asks for more.
-    fileprivate func swipeCover(_ swipe: PlayerVideoSwipe) -> String? {
+    /// The video a swipe would go to; nil when there is none (yet), which also asks for more.
+    fileprivate func swipeTarget(_ swipe: PlayerVideoSwipe) -> PlayerVideoSwipeTarget? {
         switch swipeStep(swipe) {
-        case .list(.part)?: return detail?.cover
-        case .list(.episode(let episode))?: return episode.cover
-        case .list(.video(let ref))?: return ref.cover
-        case .trail(let ref)?: return ref.cover
-        case .queue(let item)?: return item.cover
+        case .list(.part)?:
+            return detail.map { PlayerVideoSwipeTarget(cover: $0.cover, isLandscape: !isVerticalVideo) }
+        case .list(.episode(let episode))?:
+            return PlayerVideoSwipeTarget(cover: episode.cover)
+        case .list(.video(let ref))?, .trail(let ref)?:
+            return PlayerVideoSwipeTarget(cover: ref.cover, isLandscape: landscapeAids.contains(ref.aid))
+        case .queue(let item)?:
+            return PlayerVideoSwipeTarget(cover: item.cover, isLandscape: !item.isPortrait)
         case nil:
             // Asked on every frame of a drag: a failing request is not repeated at that pace.
             if swipe == .next, Date() >= swipeFetchNotBefore {
@@ -1118,7 +1138,7 @@ final class VideoDetailModel: ObservableObject {
     /// Makes ready what a swipe to the next video needs, so that it needs nothing from the network: the video's detail,
     /// and the player's stream once that detail is here.
     private func refreshSwipePreload() {
-        guard !isSwitching, !isCovered, let player, player.canSwipeVideos, let target = nextSwipeRef() else { return }
+        guard !isSwitching, !isCovered, let player, player.goesOnBySwipes, let target = nextSwipeRef() else { return }
         let entry: SwipeContent
         if let known = swipeContent(for: target) {
             entry = known
@@ -1773,7 +1793,7 @@ extension VideoDetailModel {
             guard sheet == nil else { return }
             Task { @MainActor [weak self] in self?.resumeAutoNextIfHeld() }
         }
-        player.videoSwipeCover = { [weak self] swipe in self?.swipeCover(swipe) }
+        player.videoSwipeTarget = { [weak self] swipe in self?.swipeTarget(swipe) }
         player.onVideoSwipe = { [weak self] swipe in self?.performSwipe(swipe) }
     }
 

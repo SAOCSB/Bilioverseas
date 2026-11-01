@@ -157,6 +157,9 @@ final class AccelerationEngineTests: XCTestCase {
     func testAURLErrorOnAProxiedItemIsAboutTheProxy() {
         let refused = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)
         XCTAssertTrue(AccelerationEngine.isLoopbackError(refused))
+        // The proxy's own answers: a CDN's trouble (502), a closed session (404).
+        XCTAssertFalse(AccelerationEngine.isLoopbackError(NSError(domain: NSURLErrorDomain, code: NSURLErrorResourceUnavailable)))
+        XCTAssertFalse(AccelerationEngine.isLoopbackError(NSError(domain: NSURLErrorDomain, code: NSURLErrorFileDoesNotExist)))
         XCTAssertTrue(AccelerationEngine.isLoopbackError(NSError(domain: "AVFoundationErrorDomain", code: -11800,
                                                                  userInfo: [NSUnderlyingErrorKey: refused])))
         XCTAssertFalse(AccelerationEngine.isLoopbackError(NSError(domain: "AVFoundationErrorDomain", code: -11828)))

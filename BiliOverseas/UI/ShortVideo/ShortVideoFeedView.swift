@@ -307,6 +307,8 @@ struct ShortVideoPageView: View {
     @State private var scrubbing: Double?
     /// A tap that a second one may turn into a double tap.
     @State private var pendingTap: DispatchWorkItem?
+    /// That second one is on the screen.
+    @State private var secondTouch = false
 
     var body: some View {
         GeometryReader { geo in
@@ -318,7 +320,11 @@ struct ShortVideoPageView: View {
         }
         .ignoresSafeArea()
         .onChange(of: isCurrent) { current in
-            if !current { titleExpanded = false }
+            guard !current else { return }
+            titleExpanded = false
+            pendingTap?.cancel()
+            pendingTap = nil
+            secondTouch = false
         }
     }
 
@@ -349,7 +355,7 @@ struct ShortVideoPageView: View {
             }
             // Below the top bar; the controls below it stay readable over the danmaku.
             let lanes = danmakuLanes(in: geo.size, pictureHeight: pictureHeight)
-            ShortVideoDanmakuLayer(playback: playback, abovePicture: lanes.abovePicture)
+            ShortVideoDanmakuLayer(playback: playback, abovePicture: lanes.above)
                 .frame(width: lanes.frame.width, height: lanes.frame.height)
                 .position(x: lanes.frame.midX, y: lanes.frame.midY)
                 .allowsHitTesting(false)
@@ -364,11 +370,23 @@ struct ShortVideoPageView: View {
         .contentShape(Rectangle())
         // The long press first: after a tap gesture it would wait for that to give up, about 0.8 s after the touch. For the
         // same reason there is one tap gesture, which tells a double tap by the time between them.
-        .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 12, perform: {
-            guard AppSettings.shared.player.longPressSpeedEnabled, !playback.isPaused else { return }
+        // Not when it cannot speed anything up: a slower tap is still a tap then.
+        .onLongPressGesture(minimumDuration: canSpeedUp ? 0.3 : 3600, maximumDistance: 12, perform: {
+            guard canSpeedUp else { return }
             actions.fastForward(item, true)
         }, onPressingChanged: { pressing in
-            if !pressing, playback.isFastForward { actions.fastForward(item, false) }
+            if pressing {
+                // A second touch in time: how it ends decides.
+                if let first = pendingTap {
+                    first.cancel()
+                    pendingTap = nil
+                    secondTouch = true
+                }
+            } else {
+                // A tap has been told by now (`tapped`). This was something else, and the first tap goes with it.
+                secondTouch = false
+                if playback.isFastForward { actions.fastForward(item, false) }
+            }
         })
         .onTapGesture(coordinateSpace: .local) { location in tapped(at: location) }
         .accessibilityElement(children: .contain)
@@ -382,14 +400,13 @@ struct ShortVideoPageView: View {
         item.isPortrait && VerticalVideoMetrics.fills(video: CGSize(width: item.width, height: item.height), area: size)
     }
 
-    /// A landscape video's go in the black above its picture (`VerticalVideoMetrics.danmakuLanes`).
-    private func danmakuLanes(in size: CGSize, pictureHeight: CGFloat) -> (frame: CGRect, abovePicture: Bool) {
+    /// A landscape video's go in the black above its picture (`VerticalVideoMetrics.danmakuPlacement`).
+    private func danmakuLanes(in size: CGSize, pictureHeight: CGFloat) -> (frame: CGRect, above: DanmakuOverlayView.AbovePicture?) {
         let page = CGRect(origin: .zero, size: size).inset(by: UIEdgeInsets(top: VerticalVideoMetrics.topBarHeight, left: 0, bottom: 0, right: 0))
-        guard !item.isPortrait else { return (page, false) }
+        guard !item.isPortrait else { return (page, nil) }
         let area = CGRect(x: 0, y: 0, width: size.width, height: pictureHeight)
         let picture = AVMakeRect(aspectRatio: CGSize(width: item.width, height: item.height), insideRect: area)
-        if let above = VerticalVideoMetrics.danmakuLanes(above: picture, in: page) { return (above, true) }
-        return (page.intersection(picture), false)
+        return VerticalVideoMetrics.danmakuPlacement(picture: picture, in: page)
     }
 
     @ViewBuilder private var statusOverlay: some View {
@@ -486,10 +503,11 @@ struct ShortVideoPageView: View {
         return a
     }
 
+    private var canSpeedUp: Bool { AppSettings.shared.player.longPressSpeedEnabled && !playback.isPaused }
+
     private func tapped(at location: CGPoint) {
-        if let first = pendingTap {
-            first.cancel()
-            pendingTap = nil
+        if secondTouch {
+            secondTouch = false
             doubleTap(at: location)
             return
         }

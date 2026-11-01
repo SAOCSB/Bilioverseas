@@ -93,14 +93,23 @@ final class DanmakuOverlayView: UIView {
         didSet { if oldValue != isFullscreen { styleDidChange() } }
     }
 
-    /// All of this view is for danmaku, whatever 「显示区域」 says: the black above a landscape video on the vertical-video
-    /// screen, which is little enough already.
-    var usesWholeHeight: Bool = false {
+    /// On the vertical-video screen this view can cover the black above a landscape video and its picture. The tracks stay
+    /// in the black, all of it whatever 「显示区域」 says (little enough already), and what authors placed on the picture
+    /// (mode 7) stays there.
+    struct AbovePicture: Equatable {
+        var tracksHeight: CGFloat
+        /// In this view.
+        var picture: CGRect
+    }
+
+    var abovePicture: AbovePicture? {
         didSet {
-            guard oldValue != usesWholeHeight else { return }
+            guard oldValue != abovePicture else { return }
             if engine.reconfigure(makeLayoutConfig()) { reflow(at: renderTime) }
         }
     }
+
+    private var specialArea: CGRect { abovePicture?.picture ?? bounds }
 
     /// Called once per video when the server reports the uploader closed danmaku (state == 1).
     /// When nil, the toast 「UP主已关闭弹幕」 is shown instead.
@@ -766,8 +775,9 @@ final class DanmakuOverlayView: UIView {
         let elapsed = max(0, t - s.item.time)
         let p = s.spec.position(at: elapsed)
         let scale = pixelScale
-        let x = (CGFloat(p.x) * bounds.width * scale).rounded() / scale
-        let y = (CGFloat(p.y) * bounds.height * scale).rounded() / scale
+        let area = specialArea
+        let x = ((area.minX + CGFloat(p.x) * area.width) * scale).rounded() / scale
+        let y = ((area.minY + CGFloat(p.y) * area.height) * scale).rounded() / scale
         s.layer.position = CGPoint(x: x, y: y)
         s.layer.opacity = Float(s.spec.alpha(at: elapsed))
     }
@@ -924,9 +934,9 @@ final class DanmakuOverlayView: UIView {
     private func makeLayoutConfig() -> DanmakuLayoutConfig {
         var c = DanmakuLayoutConfig()
         c.viewWidth = Double(bounds.width)
-        c.viewHeight = Double(bounds.height)
-        c.areaFraction = usesWholeHeight ? 1 : settings.area.rawValue
-        c.subtitlesElsewhere = usesWholeHeight
+        c.viewHeight = Double(abovePicture?.tracksHeight ?? bounds.height)
+        c.areaFraction = abovePicture != nil ? 1 : settings.area.rawValue
+        c.subtitlesElsewhere = abovePicture != nil
         c.trackHeight = max(1, Double(fontSize) * min(max(settings.lineHeight, 1), 3))
         c.topInset = Double(DanmakuOverlayView.topInset)
         c.scrollDuration = min(max(settings.scrollDuration, 1), 50)
@@ -1051,8 +1061,9 @@ final class DanmakuOverlayView: UIView {
     /// Mode-7 bitmap: multi-line text, the item's size scaled from the 682 × 438 reference player to this view, an
     /// outline only when the spec asks for one. The user's font settings do not apply (the layout is the author's).
     private func specialBitmap(for item: DanmakuItem, spec: DanmakuAdvancedSpec) -> DanmakuTextBitmap? {
-        let scale = min(bounds.width / CGFloat(DanmakuAdvancedSpec.referenceWidth),
-                        bounds.height / CGFloat(DanmakuAdvancedSpec.referenceHeight))
+        let area = specialArea
+        let scale = min(area.width / CGFloat(DanmakuAdvancedSpec.referenceWidth),
+                        area.height / CGFloat(DanmakuAdvancedSpec.referenceHeight))
         let pointSize = min(max(CGFloat(min(max(item.fontSize, 12), 64)) * scale, 6), 96)
         let stroke: CGFloat = spec.hasStroke ? max(1, strokeWidth) : 0
         let key = "adv|\(Int((pointSize * 2).rounded()))|\(stroke)|\(item.color)|\(spec.text)" as NSString

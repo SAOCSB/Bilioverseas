@@ -81,6 +81,7 @@ final class ShortVideoFeedModel: ObservableObject {
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.playbacks.values.forEach { $0.accelerationChanged() }
+                    self?.activate()
                 }
             }
             .store(in: &cancellables)
@@ -197,7 +198,8 @@ final class ShortVideoFeedModel: ObservableObject {
 
     /// Tap to pause / resume the video on screen.
     func togglePlay(_ item: ShortVideoItem) {
-        guard let playback = playbacks[item.id] else { return }
+        // The tap waited to see if it was a double tap, and a swipe has left this video since.
+        guard item.id == showing?.id, let playback = playbacks[item.id] else { return }
         if playback.isPaused {
             userPaused = false
             playback.play()
@@ -332,7 +334,9 @@ final class ShortVideoFeedModel: ObservableObject {
         for (id, playback) in playbacks where !near.contains(id) { playback.keepStreamOnly() }
         for id in socials.keys where !near.contains(id) && id != current.id { socials[id] = nil }
 
-        let previous = visible && items.indices.contains(index - 1) ? playbacks[items[index - 1].id] : nil
+        // None yet after another page covered the feed.
+        let before = items.indices.contains(index - 1) ? items[index - 1] : nil
+        let previous = visible ? before.flatMap { streamReach >= 2 ? playback(for: $0) : playbacks[$0.id] } : nil
         previous?.standBy()
         previous?.reportHistoryIfNeeded()
         let now = playback(for: current)
@@ -363,7 +367,9 @@ final class ShortVideoFeedModel: ObservableObject {
 
     /// The videos further away get their streams, nearest first and a couple at a time, once this one has started.
     private func fetchStreamsAround() {
-        guard visible, appActive, streamReach >= 2, let current, playbacks[current.id]?.isOutOfTheWay == true else { return }
+        // While a swipe lands the video it comes to is what is starting, not the one `index` still says.
+        guard visible, appActive, streamReach >= 2, landingStarted == nil || landingStarted == index, let current,
+              playbacks[current.id]?.isOutOfTheWay == true else { return }
         playbacks[current.id]?.markInUse()
         var fetching = playbacks.values.filter(\.isFetchingStream).count
         for distance in 2...streamReach {

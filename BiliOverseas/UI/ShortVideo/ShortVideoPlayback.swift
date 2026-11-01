@@ -23,11 +23,11 @@ final class ShortVideoPlayback: ObservableObject {
     weak var danmakuHost: ShortVideoDanmakuHost?
     /// 全屏 has it, and the page's place waits for it to come back.
     var danmakuInLandscape = false {
-        didSet { danmaku.usesWholeHeight = danmakuAbovePicture && !danmakuInLandscape }
+        didSet { danmaku.abovePicture = danmakuInLandscape ? nil : danmakuAbovePicture }
     }
-    /// Its place on the page is the black above a landscape picture.
-    var danmakuAbovePicture = false {
-        didSet { danmaku.usesWholeHeight = danmakuAbovePicture && !danmakuInLandscape }
+    /// Its place on the page takes in the black above a landscape picture.
+    var danmakuAbovePicture: DanmakuOverlayView.AbovePicture? {
+        didSet { danmaku.abovePicture = danmakuInLandscape ? nil : danmakuAbovePicture }
     }
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var isPlaying = false
@@ -249,6 +249,7 @@ final class ShortVideoPlayback: ObservableObject {
             return
         }
         session?.playerWillSeek(to: target, outsideBuffer: !isBuffered(target))
+        if startingAt != nil { startingAt = target }
         seeking = true
         position = target
         timeline.update(time: target, duration: duration, buffered: timeline.snapshot.buffered)
@@ -289,8 +290,10 @@ final class ShortVideoPlayback: ObservableObject {
     func accelerationChanged() {
         guard phase != .idle || heldAsset != nil, wantsAcceleration != usesAcceleration else { return }
         if resumeAt == nil, position > 1 { resumeAt = position }
+        // One only holding its stream gets it again when its turn comes (`fetchStream`).
+        let wanted = itemWanted
         teardown()
-        prepare()
+        if wanted { prepare() }
     }
 
     /// Stops everything and releases the stream; `prepare()` starts over.
@@ -488,8 +491,9 @@ final class ShortVideoPlayback: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.session?.playerDidStall() }
             .store(in: &itemObservers)
+        // Not on the run loop, which waits while a finger is on the page, and the clock would have moved on from the start.
         playerItem.publisher(for: \.status)
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self, weak playerItem] status in
                 guard let self, playerItem === self.player.currentItem else { return }
                 if status == .readyToPlay, let start = self.startingAt {
@@ -608,8 +612,8 @@ struct ShortVideoDanmakuLayer: UIViewRepresentable {
     let playback: ShortVideoPlayback
     /// In 全屏 (`ShortVideoLandscapeView`), not on the page.
     var landscape = false
-    /// In the black above a landscape picture.
-    var abovePicture = false
+    /// Takes in the black above a landscape picture.
+    var abovePicture: DanmakuOverlayView.AbovePicture?
 
     func makeUIView(context: Context) -> ShortVideoDanmakuHost {
         let host = ShortVideoDanmakuHost()

@@ -2,7 +2,7 @@
 
 <img src="BiliOverseas/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" width="120" alt="图标">
 
-# B站海外加速版（BiliOverseas）
+# Bilioverseas
 
 **原生 iOS 哔哩哔哩第三方客户端，内置「线程撕裂者」多线程多 CDN 加速，专治海外看 B 站卡顿**
 

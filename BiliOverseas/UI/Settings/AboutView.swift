@@ -79,7 +79,7 @@ struct AboutView: View {
                 }
                 .shadow(color: Color.biliPink.opacity(0.35), radius: 8, y: 4)
                 .accessibilityHidden(true)
-            Text("B站海外加速版")
+            Text("Bilioverseas")
                 .font(.title2.bold())
             Text(verbatim: Self.versionText)
                 .font(.subheadline)
@@ -214,11 +214,11 @@ enum AboutLicenseTexts {
               text: mitText(copyright: "Copyright (c) 2024 Predidit"),
               url: URL(string: "https://github.com/Predidit/canvas_danmaku")),
         Entry(id: "app",
-              name: "B站海外加速版（本应用）",
+              name: "Bilioverseas（本应用）",
               author: "Bilioverseas contributors",
               license: "GPL-2.0-or-later",
               usage: "本应用以 GNU 通用公共许可证第 2 版或（由你选择）任何更新版本发布，源代码见 GitHub。",
-              text: gplNotice(program: "B站海外加速版 (Bilioverseas)", copyright: "Copyright (C) 2026 Bilioverseas contributors", orLater: true),
+              text: gplNotice(program: "Bilioverseas", copyright: "Copyright (C) 2026 Bilioverseas contributors", orLater: true),
               url: repositoryURL),
     ]
 

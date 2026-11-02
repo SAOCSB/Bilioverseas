@@ -24,7 +24,7 @@ targets:
     info:
       path: BiliOverseas/Resources/Info.plist
       properties:
-        CFBundleDisplayName: B站海外加速
+        CFBundleDisplayName: Bilioverseas
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDevelopmentRegion: zh_CN

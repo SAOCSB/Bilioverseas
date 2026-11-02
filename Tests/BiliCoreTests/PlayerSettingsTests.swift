@@ -91,6 +91,32 @@ final class PlayerSettingsTests: XCTestCase {
         XCTAssertEqual(s.adoptingCacheRoute().cdnMode, .custom)
     }
 
+    func testOldAppFeedSwitchTurnedOffBecomesTheWebSource() throws {
+        let suite = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        suite.removePersistentDomain(forName: suiteName)
+        let old = SettingsStore.defaults
+        SettingsStore.defaults = suite
+        defer {
+            SettingsStore.defaults = old
+            suite.removePersistentDomain(forName: suiteName)
+        }
+        suite.set(try JSONSerialization.data(withJSONObject: ["useAppFeed": false, "feedColumns": 1]),
+                  forKey: "settings.general")
+        let first = AppSettings()
+        XCTAssertEqual(first.general.homeFeedSource, .web)
+        XCTAssertEqual(first.general.feedColumns, 1, "the rest stays")
+        let saved: GeneralSettings = SettingsStore.load(key: "settings.general")
+        XCTAssertEqual(saved.homeFeedSource, .web)
+
+        // Choosing App 端 afterwards sticks.
+        first.general.homeFeedSource = .app
+        XCTAssertEqual(AppSettings().general.homeFeedSource, .app)
+
+        // Left on, nothing is chosen for the user: 推荐 keeps following the login.
+        suite.set(try JSONSerialization.data(withJSONObject: ["useAppFeed": true]), forKey: "settings.general")
+        XCTAssertNil(AppSettings().general.homeFeedSource)
+    }
+
     func testFreshInstallIsNotRewrittenByTheAdoption() throws {
         let suite = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         suite.removePersistentDomain(forName: suiteName)

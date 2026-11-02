@@ -64,6 +64,24 @@ enum FeedAPI {
         useAppFeed && (hasAppToken || !isLoggedIn)
     }
 
+    /// The feed 推荐 shows: the one chosen (「首页推荐来源」), else the one the login personalises (`prefersAppFeed`).
+    static func recommendSource(chosen: HomeFeedSource?, useAppFeed: Bool) -> HomeFeedSource {
+        recommendSource(chosen: chosen, useAppFeed: useAppFeed, hasAppToken: appAuth() != nil,
+                        isLoggedIn: BiliHTTP.shared.isLoggedIn)
+    }
+
+    static func recommendSource(chosen: HomeFeedSource?, useAppFeed: Bool, hasAppToken: Bool, isLoggedIn: Bool) -> HomeFeedSource {
+        chosen ?? (prefersAppFeed(useAppFeed: useAppFeed, hasAppToken: hasAppToken, isLoggedIn: isLoggedIn) ? .app : .web)
+    }
+
+    /// Why a 推荐 source would not go by the account, for where it is chosen.
+    static func loginNote(for source: HomeFeedSource) -> String? {
+        switch source {
+        case .app: return appAuth() == nil ? "未 TV 登录，不按账号推荐" : nil
+        case .web: return BiliHTTP.shared.isLoggedIn ? nil : "未登录，不按账号推荐"
+        }
+    }
+
     // MARK: - Video sizes
 
     /// Fills `width` / `height` of the video cards that came without them (web 推荐 carries no sizes),
@@ -261,13 +279,21 @@ enum FeedAPI {
             "voice_balance": 0,
         ]
         var key = ListMapping.appKey
-        if let auth = appAuth() {
+        let auth = appAuth()
+        if let auth {
             query["access_key"] = auth.token
             key = auth.key
         }
-        let data = try await BiliHTTP.shared.api(BiliHost.app + "/x/v2/feed/index", query: query,
-                                                 sign: .app(key), headers: appFeedHeaders())
-        return parseAppRecommend(data, idx: idx)
+        do {
+            let data = try await BiliHTTP.shared.api(BiliHost.app + "/x/v2/feed/index", query: query,
+                                                     sign: .app(key), headers: appFeedHeaders())
+            return parseAppRecommend(data, idx: idx)
+        } catch {
+            // The feed serves a token it does not know as a guest; should it refuse one, say it is the TV login that
+            // failed (账号未登录 reads as the whole login). A read-only feed never signs anyone out.
+            if auth != nil, AuthService.isRejectedAppToken(error) { throw BiliError.other(AuthService.appTokenRejectedMessage) }
+            throw error
+        }
     }
 
     /// `data` of the app feed → cards. `next` = idx + 1.

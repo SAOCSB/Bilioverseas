@@ -45,14 +45,17 @@ final class HomeTabModels: ObservableObject {
     @Published private(set) var reselects: [HomeTopTab: FeedReselectSignal] = [:]
 
     private var cancellables: Set<AnyCancellable> = []
-    /// Account 推荐 was loaded for (0 = logged out), and whether it had a TV login: together they decide
-    /// which feed 推荐 shows (`FeedAPI.prefersAppFeed`).
+    /// Account 推荐 was loaded for (0 = logged out), the TV-login token it last saw, and the 「首页推荐来源」 settings it
+    /// was started with: another account, a new TV login, or settings that give another feed start it over.
     private var accountMid: Int64
-    private var accountHasAppToken: Bool
+    private var accountAppToken: String?
+    private var shownChoice: (chosen: HomeFeedSource?, useAppFeed: Bool)
 
     init() {
         recommend = PagedListModel<VideoCard>(filter: FeedFilter.liveFilter(scope: .recommend)) { cursor in
-            try await HomeTabModels.fetchRecommend(cursor: cursor, useAppFeed: AppSettings.shared.general.useAppFeed)
+            let general = AppSettings.shared.general
+            return try await HomeTabModels.fetchRecommend(cursor: cursor, chosen: general.homeFeedSource,
+                                                          useAppFeed: general.useAppFeed)
         }
         popular = PagedListModel<VideoCard>(filter: FeedFilter.liveFilter(scope: .popular)) { cursor in
             try await FeedAPI.popular(page: ListCursor.page(cursor))
@@ -61,36 +64,47 @@ final class HomeTabModels: ObservableObject {
         bangumi = BangumiHomeModel()
         live = LiveHomeModel()
         accountMid = BiliHTTP.shared.mid ?? 0
-        accountHasAppToken = FeedAPI.appAuth() != nil
+        accountAppToken = FeedAPI.appAuth()?.token
+        let general = AppSettings.shared.general
+        shownChoice = (general.homeFeedSource, general.useAppFeed)
         observe()
     }
 
-    /// 推荐: with 「首页使用app端推荐」 the app feed when it can be personalised (TV login) or nobody is
-    /// signed in, else the cookie-personalised web feed, each falling back to the other when it fails or
-    /// comes back empty; without it the web feed. Both count pages from 0, so the cursor works for
-    /// either. Cards without a size get one, so portrait videos open 短视频 from either feed.
-    static func fetchRecommend(cursor: String?, useAppFeed: Bool) async throws -> Page<VideoCard> {
-        let appFirst = FeedAPI.prefersAppFeed(useAppFeed: useAppFeed, hasAppToken: FeedAPI.appAuth() != nil,
-                                              isLoggedIn: BiliHTTP.shared.isLoggedIn)
-        var page = try await recommendPage(cursor: cursor, appFirst: appFirst, fallback: useAppFeed)
+    /// The feed 推荐 shows with the settings and logins now.
+    static var currentSource: HomeFeedSource {
+        let general = AppSettings.shared.general
+        return FeedAPI.recommendSource(chosen: general.homeFeedSource, useAppFeed: general.useAppFeed)
+    }
+
+    /// 推荐: the feed chosen in 「首页推荐来源」; else the app feed when it can be personalised (TV login) or nobody
+    /// is signed in, and the cookie-personalised web feed otherwise, each falling back to the other when it fails
+    /// or comes back empty. A chosen feed does not fall back: the two differ a lot, and its error says what is
+    /// wrong. Both count pages from 0, so the cursor works for either. Cards without a size get one, so
+    /// portrait videos open 短视频 from either feed.
+    static func fetchRecommend(cursor: String?, chosen: HomeFeedSource?, useAppFeed: Bool) async throws -> Page<VideoCard> {
+        let source = FeedAPI.recommendSource(chosen: chosen, useAppFeed: useAppFeed)
+        var page = try await recommendPage(cursor: cursor, source: source, fallback: chosen == nil && useAppFeed)
         if AppSettings.shared.general.portraitOpensShortVideo {
             page.items = await FeedAPI.fillVideoSizes(page.items)
         }
         return page
     }
 
-    private static func recommendPage(cursor: String?, appFirst: Bool, fallback: Bool) async throws -> Page<VideoCard> {
-        func fetch(app: Bool) async throws -> Page<VideoCard> {
-            app ? try await FeedAPI.appRecommend(cursor: cursor) : try await FeedAPI.recommend(cursor: cursor)
+    private static func recommendPage(cursor: String?, source: HomeFeedSource, fallback: Bool) async throws -> Page<VideoCard> {
+        func fetch(_ source: HomeFeedSource) async throws -> Page<VideoCard> {
+            source == .app ? try await FeedAPI.appRecommend(cursor: cursor) : try await FeedAPI.recommend(cursor: cursor)
         }
-        guard fallback else { return try await fetch(app: appFirst) }
+        if cursor == nil { PlaybackSession.routeLog?("home feed \(source.rawValue)\(fallback ? "" : " (chosen)")") }
+        guard fallback else { return try await fetch(source) }
         do {
-            let page = try await fetch(app: appFirst)
+            let page = try await fetch(source)
             if !page.items.isEmpty { return page }
+            PlaybackSession.routeLog?("home feed \(source.rawValue): empty, \(source.other.rawValue) instead")
         } catch {
             if ListMapping.isCancellation(error) { throw error }
+            PlaybackSession.routeLog?("home feed \(source.rawValue): failed, \(source.other.rawValue) instead")
         }
-        return try await fetch(app: !appFirst)
+        return try await fetch(source.other)
     }
 
     func reselect(for tab: HomeTopTab) -> FeedReselectSignal {
@@ -117,11 +131,11 @@ final class HomeTabModels: ObservableObject {
             .sink { [weak self] keep in self?.recommend.keepOnRefresh = keep }
             .store(in: &cancellables)
         settings.$general
-            .map(\.useAppFeed)
+            .map { [$0.homeFeedSource?.rawValue, "\($0.useAppFeed)"] }
             .dropFirst()
             .removeDuplicates()
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.reloadRecommend() }
+            .sink { [weak self] _ in self?.sourceMayHaveChanged() }
             .store(in: &cancellables)
         NotificationCenter.default.publisher(for: AccountBlacklistStore.didChange)
             .receive(on: RunLoop.main)
@@ -145,11 +159,26 @@ final class HomeTabModels: ObservableObject {
 
     private func accountMayHaveChanged() {
         let mid = BiliHTTP.shared.mid ?? 0
-        let hasAppToken = FeedAPI.appAuth() != nil
-        defer { (accountMid, accountHasAppToken) = (mid, hasAppToken) }
-        // Another account, or a TV login just added: start 推荐 over. A TV login lost while scrolling (a
-        // rejected token) leaves the rows alone; the next pages and refreshes already ask the web feed.
-        if mid != accountMid || (hasAppToken && !accountHasAppToken) { reloadRecommend() }
+        let appToken = FeedAPI.appAuth()?.token
+        defer { (accountMid, accountAppToken) = (mid, appToken) }
+        // Another account, or a TV login just added (a token other than the last one seen, which may have run out
+        // unnoticed) while 推荐 is (or now becomes) the app feed: start 推荐 over. A TV login lost while scrolling
+        // leaves the rows alone; the next pages and refreshes already ask the feed that follows.
+        if mid != accountMid || (appToken != nil && appToken != accountAppToken && HomeTabModels.currentSource == .app) {
+            reloadRecommend()
+        }
+    }
+
+    /// 「首页推荐来源」 settings changed: start 推荐 over when the new ones give another feed than the old ones, both with
+    /// the logins there are now, as the long-press menu decides its toast. Choosing the feed shown keeps it, and a TV
+    /// login that ran out on its own (nothing is posted then) never counts as a switch.
+    private func sourceMayHaveChanged() {
+        let general = AppSettings.shared.general
+        let before = FeedAPI.recommendSource(chosen: shownChoice.chosen, useAppFeed: shownChoice.useAppFeed)
+        shownChoice = (general.homeFeedSource, general.useAppFeed)
+        if FeedAPI.recommendSource(chosen: general.homeFeedSource, useAppFeed: general.useAppFeed) != before {
+            reloadRecommend()
+        }
     }
 
     /// Starts 推荐 over without keeping the old rows (another account's or another source's feed).
@@ -174,7 +203,7 @@ struct HomeView: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar
-            HomeTabStrip(tabs: HomeTopTab.allCases, selection: $selection) { $0.title }
+            HomeTopTabBar(selection: $selection)
             Divider()
             TabView(selection: $selection) {
                 LiveHomeView(model: models.live, reselect: models.reselect(for: .live))
@@ -291,20 +320,69 @@ private struct HomeSearchCapsule: View {
     }
 }
 
+/// 首页's top tabs. A long press on 推荐 picks the feed it shows (also 设置 → 屏蔽设置 → 首页推荐来源), each choice
+/// with what would keep it from going by the account. A context menu shows what its view had at the last render, so the
+/// bar re-renders on any settings or login change itself (the pages below do not), and reads the logins as `choose` and
+/// 推荐 do.
+private struct HomeTopTabBar: View {
+    @Binding var selection: HomeTopTab
+    @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var auth = AuthService.shared
+
+    var body: some View {
+        HomeTabStrip(tabs: HomeTopTab.allCases, selection: $selection, menuTab: .recommend) { $0.title } menu: {
+            sourceMenu
+        }
+    }
+
+    @ViewBuilder private var sourceMenu: some View {
+        let current = HomeTabModels.currentSource
+        Section("首页推荐来源") {
+            ForEach(HomeFeedSource.allCases) { source in
+                Button {
+                    choose(source)
+                } label: {
+                    if source == current {
+                        Label(source.title, systemImage: "checkmark")
+                    } else {
+                        Text(source.title)
+                    }
+                    if let note = FeedAPI.loginNote(for: source) { Text(note) }
+                }
+            }
+        }
+    }
+
+    private func choose(_ source: HomeFeedSource) {
+        let changed = source != HomeTabModels.currentSource
+        settings.general.homeFeedSource = source
+        withAnimation(.easeInOut(duration: 0.25)) { selection = .recommend }
+        guard changed else { return }
+        let name = source == .app ? "App 端推荐" : "网页端推荐"
+        ToastCenter.shared.show(FeedAPI.loginNote(for: source).map { "已切换到\(name)，\($0)" } ?? "已切换到\(name)")
+    }
+}
+
 /// Official-style top tab strip: horizontally scrollable titles, the selected one pink and bold with
 /// a short underline that slides between tabs (also follows swipe paging through `selection`).
-struct HomeTabStrip<Tab: Hashable>: View {
+/// `menuTab` gets `menu` on a long press; the others have none.
+struct HomeTabStrip<Tab: Hashable, TabMenu: View>: View {
     let tabs: [Tab]
     let title: (Tab) -> String
     let spacing: CGFloat
+    let menuTab: Tab?
+    let menu: () -> TabMenu
     @Binding var selection: Tab
     @Namespace private var indicatorSpace
 
-    init(tabs: [Tab], selection: Binding<Tab>, spacing: CGFloat = 24, title: @escaping (Tab) -> String) {
+    init(tabs: [Tab], selection: Binding<Tab>, spacing: CGFloat = 24, menuTab: Tab?,
+         title: @escaping (Tab) -> String, @ViewBuilder menu: @escaping () -> TabMenu) {
         self.tabs = tabs
         self._selection = selection
         self.spacing = spacing
         self.title = title
+        self.menuTab = menuTab
+        self.menu = menu
     }
 
     var body: some View {
@@ -312,8 +390,14 @@ struct HomeTabStrip<Tab: Hashable>: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: spacing) {
                     ForEach(tabs, id: \.self) { tab in
-                        tabButton(tab)
-                            .id(tab)
+                        if tab == menuTab {
+                            tabButton(tab)
+                                .contextMenu { menu() }
+                                .id(tab)
+                        } else {
+                            tabButton(tab)
+                                .id(tab)
+                        }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -349,5 +433,11 @@ struct HomeTabStrip<Tab: Hashable>: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+extension HomeTabStrip where TabMenu == EmptyView {
+    init(tabs: [Tab], selection: Binding<Tab>, spacing: CGFloat = 24, title: @escaping (Tab) -> String) {
+        self.init(tabs: tabs, selection: selection, spacing: spacing, menuTab: nil, title: title) { EmptyView() }
     }
 }

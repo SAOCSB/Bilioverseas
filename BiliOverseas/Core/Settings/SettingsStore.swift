@@ -72,6 +72,12 @@ final class AppSettings: ObservableObject {
                 SettingsStore.save(acceleration, key: "settings.acceleration")
             }
         }
+        // The old 「首页使用app端推荐」 turned off meant the web feed without the other as a fallback: 首页推荐来源 网页端
+        // now, which behaves the same and is what 设置 shows and describes.
+        if !general.useAppFeed && general.homeFeedSource == nil {
+            general.homeFeedSource = .web
+            SettingsStore.save(general, key: "settings.general")
+        }
     }
 
     /// Posted on the changing (main) thread after every `acceleration` change; the acceleration engine copies the
@@ -112,9 +118,11 @@ struct GeneralSettings: SettingsGroup {
     var reportHistory: Bool = true
     /// Keep local search history.
     var saveSearchHistory: Bool = true
-    /// 「首页使用app端推荐」: 推荐 comes from the app feed (`FeedAPI.appRecommend`, with 不感兴趣 reasons);
-    /// the web feed is the fallback when it fails.
+    /// The old 「首页使用app端推荐」 switch, no longer shown. A save with it off becomes 首页推荐来源 网页端 at launch
+    /// (`AppSettings.init`); `FeedAPI.recommendSource` reads it the same way.
     var useAppFeed: Bool = true
+    /// 「首页推荐来源」 once chosen, in settings or by long-pressing 推荐 (nil: `FeedAPI.recommendSource`).
+    var homeFeedSource: HomeFeedSource? = nil
     /// 「保留首页推荐刷新」: pull to refresh on 推荐 puts the new cards above the ones already shown.
     var keepRecommendOnRefresh: Bool = true
     /// 「显示上次看到位置提示」: a 「上次看到这里」 divider where the previous refresh started.
@@ -132,6 +140,25 @@ struct GeneralSettings: SettingsGroup {
     var swipesOnlyPortrait: Bool = false
     /// Where vertical swiping gets its videos, once chosen (nil: `ShortVideoAPI.source`).
     var swipeFeedSource: SwipeFeedSource? = nil
+}
+
+/// Where 首页 推荐 gets its videos. The two differ a lot for the same account.
+enum HomeFeedSource: String, Codable, CaseIterable, Identifiable {
+    /// The phone app's 推荐 (`FeedAPI.appRecommend`), personalised by a TV login's `access_key`.
+    case app
+    /// bilibili.com's 推荐 (`FeedAPI.recommend`), personalised by the login's cookies (a TV login brings them too).
+    case web
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .app: return "App 端（TV 登录）"
+        case .web: return "网页端"
+        }
+    }
+
+    var other: HomeFeedSource { self == .app ? .web : .app }
 }
 
 /// Where vertical swiping gets its videos.

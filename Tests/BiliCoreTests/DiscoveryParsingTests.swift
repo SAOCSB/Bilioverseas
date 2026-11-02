@@ -101,6 +101,30 @@ final class DiscoveryParsingTests: XCTestCase {
         XCTAssertFalse(FeedAPI.prefersAppFeed(useAppFeed: false, hasAppToken: false, isLoggedIn: false))
     }
 
+    func testRecommendSourceCanBeChosen() {
+        // Nothing chosen: the login decides as before, and the old switch turned off still means the web feed.
+        XCTAssertEqual(FeedAPI.recommendSource(chosen: nil, useAppFeed: true, hasAppToken: true, isLoggedIn: true), .app)
+        XCTAssertEqual(FeedAPI.recommendSource(chosen: nil, useAppFeed: true, hasAppToken: false, isLoggedIn: true), .web)
+        XCTAssertEqual(FeedAPI.recommendSource(chosen: nil, useAppFeed: false, hasAppToken: true, isLoggedIn: true), .web)
+        // Chosen: that feed, whatever the logins.
+        XCTAssertEqual(FeedAPI.recommendSource(chosen: .web, useAppFeed: true, hasAppToken: true, isLoggedIn: true), .web)
+        XCTAssertEqual(FeedAPI.recommendSource(chosen: .app, useAppFeed: true, hasAppToken: false, isLoggedIn: true), .app)
+        XCTAssertEqual(FeedAPI.recommendSource(chosen: .app, useAppFeed: false, hasAppToken: true, isLoggedIn: true), .app)
+    }
+
+    func testHomeFeedSourceIsSavedAndOlderSavesHaveNone() throws {
+        let saved = try JSONEncoder().encode(GeneralSettings())
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: Any])
+        XCTAssertNil(object["homeFeedSource"])
+        let old = SettingsStore.deepMerge(object, ["useAppFeed": false])
+        let decodedOld = try JSONDecoder().decode(GeneralSettings.self, from: JSONSerialization.data(withJSONObject: old))
+        XCTAssertNil(decodedOld.homeFeedSource)
+        XCTAssertFalse(decodedOld.useAppFeed)
+        let chosen = SettingsStore.deepMerge(object, ["homeFeedSource": "web"])
+        let decoded = try JSONDecoder().decode(GeneralSettings.self, from: JSONSerialization.data(withJSONObject: chosen))
+        XCTAssertEqual(decoded.homeFeedSource, .web)
+    }
+
     func testVideoSizesFromArticleCards() {
         let sizes = FeedAPI.videoSizes(json(#"""
         {"BV1MdpT6tENe":{"aid":117398434748032,"dimension":{"width":1440,"height":1920,"rotate":0}},

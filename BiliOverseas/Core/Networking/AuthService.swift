@@ -42,6 +42,8 @@ final class AuthService: ObservableObject, @unchecked Sendable {
     /// Generation for which `onLoginStateChanged(true)` was already delivered.
     private var announcedGeneration: Int?
     private var persistPending = false
+    /// The TV-login `access_key` whose running out on the device is already watched (`watchAppTokenExpiry`).
+    private var expiryWatchedToken: String?
     private var observers: [NSObjectProtocol] = []
     private let persistQueue = DispatchQueue(label: "io.github.bilioverseas.auth.persist", qos: .utility)
 
@@ -68,6 +70,7 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         profile = loggedIn ? AuthService.loadCached(UserProfile.self, key: AuthService.profileCacheKey) : nil
         stat = loggedIn ? AuthService.loadCached(UserStat.self, key: AuthService.statCacheKey) : nil
         observeChanges()
+        watchAppTokenExpiry()
     }
 
     deinit {
@@ -127,9 +130,28 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// Posted on the main thread when `dropAppToken` forgets the TV-login `access_key` (a new one
-    /// arrives with a login, which posts `loginStateDidChange`). 首页推荐 switches feeds on it.
+    /// Posted on the main thread when `dropAppToken` forgets the TV-login `access_key`, or when it runs out on the device
+    /// (`watchAppTokenExpiry`; a new one arrives with a login, which posts `loginStateDidChange`). 首页推荐 switches feeds
+    /// on it.
     static let appTokenDidChange = Notification.Name("AuthServiceAppTokenDidChange")
+
+    /// Says once when the TV-login `access_key` runs out on the device: `accessKey` turns nil then, and nothing else would
+    /// tell what shows the TV login (设置, 首页推荐来源), which update as after `dropAppToken`. A token replaced or dropped
+    /// by then is left alone.
+    private func watchAppTokenExpiry() {
+        let watch: (token: String, expiresAt: TimeInterval)? = locked {
+            guard let token = tokens.accessKey, let expiresAt = tokens.accessKeyExpiresAt,
+                  expiresAt > Date().timeIntervalSince1970, token != expiryWatchedToken else { return nil }
+            expiryWatchedToken = token
+            return (token, expiresAt)
+        }
+        guard let watch else { return }
+        DispatchQueue.main.asyncAfter(wallDeadline: .now() + (watch.expiresAt - Date().timeIntervalSince1970) + 1) { [weak self] in
+            guard let self, self.locked({ self.tokens.accessKey }) == watch.token, self.accessKey == nil else { return }
+            self.objectWillChange.send()
+            NotificationCenter.default.post(name: AuthService.appTokenDidChange, object: self)
+        }
+    }
 
     /// The session a login for account `newMid` stores. A TV authorisation recorded for that same
     /// account (网页扫码 after TV 扫码, say) is kept unless the new login brings its own `access_key`;
@@ -476,6 +498,7 @@ final class AuthService: ObservableObject, @unchecked Sendable {
         UserDefaults.standard.removeObject(forKey: AuthService.profileCacheKey)
         UserDefaults.standard.removeObject(forKey: AuthService.statCacheKey)
         persistNow()
+        watchAppTokenExpiry()
         let gen = currentGeneration
         let loggedIn = http.isLoggedIn
         await publish(generation: gen, loggedIn: loggedIn, profile: nil, stat: nil, updateStat: true, notify: true)

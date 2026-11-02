@@ -396,6 +396,10 @@ final class ShortVideoFeedModel: ObservableObject {
     func pageOnScreenChanged(_ onScreen: Bool) {
         guard let wentToPage, let playback = playbacks[wentToPage.id], playback.isLent else { return }
         playback.pictureDetached = !onScreen
+        // A paused player gives a layer just put on it nothing to show.
+        if onScreen, playback.player.rate == 0 {
+            playback.player.seek(to: playback.player.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
     }
 
     /// That page has gone.

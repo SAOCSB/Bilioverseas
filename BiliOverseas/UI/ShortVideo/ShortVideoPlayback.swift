@@ -402,6 +402,8 @@ final class ShortVideoPlayback: ObservableObject {
         if player.currentItem?.status == .failed {
             if position > 1 { resumeAt = position }
             teardown()
+            // It has nothing to go on with: `activate` starts it over as it would a paused one.
+            wantsPlay = false
         } else if duration > 0, position >= duration - 0.6 {
             loop()
         } else if playing {

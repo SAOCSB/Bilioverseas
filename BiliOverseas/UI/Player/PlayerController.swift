@@ -756,7 +756,8 @@ final class PlayerController: ObservableObject {
     func endLoan(playing: Bool? = nil, returning: Bool = false) {
         guard let lent = loan else { return }
         loan = nil
-        let wasPlaying = playing ?? wantsToPlay
+        // A video that ended or failed here was not paused: that screen just goes on with it, from where it can.
+        let wasPlaying = (playing ?? wantsToPlay) || (returning && (status == .ended || isFailed))
         let time = lent.player.currentTime().seconds
         if time.isFinite { lastKnownPosition = max(0, time) }
         trace("gave back at \(lastKnownPosition) playing=\(wasPlaying) returning=\(returning)")
@@ -1355,6 +1356,8 @@ final class PlayerController: ObservableObject {
         if isPiPBusy {
             stopAfterPiP = true
             PlayerPiPKeeper.retain(self)
+            // The video on loan goes on on the screen it came from, which is showing it again.
+            if isOnLoan { pip?.stopPictureInPicture() }
             return
         }
         performStop()

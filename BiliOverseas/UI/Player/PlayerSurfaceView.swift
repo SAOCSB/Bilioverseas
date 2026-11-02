@@ -124,7 +124,10 @@ final class PlayerSurfaceView: UIView {
     /// The controller goes on with another player (`PlayerStreamLoan`).
     func playerChanged() {
         guard let player = controller?.player else { return }
-        videoView.playerLayer.player = player
+        // Off for background play, as the system pauses a player on a layer there (QA1668): it comes back with the app.
+        if videoView.playerLayer.player != nil || UIApplication.shared.applicationState != .background {
+            videoView.playerLayer.player = player
+        }
         observeVideoSize(of: player)
     }
 
